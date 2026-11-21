@@ -172313,6 +172313,7 @@ async function runSnifferPass(options) {
     while (pending.length > 0 && report.stoppedBy === undefined) {
       const turnStarted = monotonicNow();
       let turnCallMs = 0;
+      let releaseCall;
       try {
         const aged = pending.filter((item) => options.lane.kind !== "venice" && dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
         const raisedNext = aged.length === 0 ? pending.find((item) => boosts.has(item.question)) : undefined;
@@ -172358,11 +172359,12 @@ async function runSnifferPass(options) {
           }
         }
         const batch = [group];
-        const stop = report.calls > 0 && options.trickle?.() === true ? "pass_budget" : stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
-        if (stop) {
-          report.stoppedBy = stop;
+        const admission = report.calls > 0 && options.trickle?.() === true ? "pass_budget" : admitCall(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+        if (typeof admission === "string") {
+          report.stoppedBy = admission;
           return;
         }
+        releaseCall = admission;
         assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
         const prompt = buildSnifferBatchPrompt(pass, batch.map((group, index) => ({ i: index + 1, material: snifferMaterialForModel(group[0].question.material) })), options.ownerContext);
         next.target.sniffer.recordDispatch();
@@ -172457,6 +172459,7 @@ async function runSnifferPass(options) {
           return;
         }
       } finally {
+        releaseCall?.();
         report.timing.dispatchMs += Math.max(0, monotonicNow() - turnStarted - turnCallMs);
       }
     }
@@ -172493,16 +172496,21 @@ function openPasses(row) {
     passes.push("content");
   return passes;
 }
-function stopReason(options, report, maxCallsPerPass, timeUp) {
+function admitCall(options, report, maxCallsPerPass, timeUp) {
   if (options.signal?.aborted)
     return "aborted";
   if (report.calls >= maxCallsPerPass || timeUp)
     return "pass_budget";
   if (options.shouldYield?.())
     return "yield";
-  if (options.budget && !options.budget.tryConsume(options.lane.snifferMode === "decision"))
+  const release = options.acquireCall?.();
+  if (release === false)
+    return "yield";
+  if (options.budget && !options.budget.tryConsume(options.lane.snifferMode === "decision")) {
+    release?.();
     return "daily_budget";
-  return;
+  }
+  return release;
 }
 function finish(report, monotonicNow, passStarted) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
@@ -246387,7 +246395,14 @@ import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay, now = Date.now) {
   const context = new AsyncLocalStorage16;
   let inFlight = 0;
+  let startedAt;
   let lastEndedAt;
+  const acquire = () => {
+    if (++inFlight === 1) {
+      startedAt = now();
+      relay?.busy(OWNER_QUESTION_RESOURCE);
+    }
+  };
   const release = () => {
     if (--inFlight === 0) {
       lastEndedAt = now();
@@ -246395,6 +246410,9 @@ function createOwnerQuestionActivity(relay, now = Date.now) {
     }
   };
   return {
+    get busySince() {
+      return inFlight > 0 ? startedAt : undefined;
+    },
     get lastEndedAt() {
       return lastEndedAt;
     },
@@ -246406,12 +246424,10 @@ function createOwnerQuestionActivity(relay, now = Date.now) {
       if (!scope || scope.active || scope.settled)
         return;
       scope.active = true;
-      if (++inFlight === 1)
-        relay?.busy(OWNER_QUESTION_RESOURCE);
+      acquire();
     },
     begin() {
-      if (++inFlight === 1)
-        relay?.busy(OWNER_QUESTION_RESOURCE);
+      acquire();
       let released = false;
       return () => {
         if (released)
@@ -249801,6 +249817,7 @@ class TierSnifferService {
   };
   heldBackSinceMs;
   arrivalTurn = false;
+  dispatch = { inFlight: 0, protected: false };
   backlogRefresh;
   waiting;
   moveFailures = new Map;
@@ -249908,13 +249925,13 @@ class TierSnifferService {
     if (!this.running)
       this.closeLedgers();
   }
-  preempt() {
-    if (this.options.ownerAskTurn?.() === "share")
+  preempt(reason = "model") {
+    if (this.dispatch.protected)
+      return;
+    if ((reason === "question" || this.options.lane.kind !== "local") && this.options.ownerAskTurn?.() === "share")
       return;
     this.fairTurn = false;
     this.yieldingSinceMs = undefined;
-    if (this.arrivalTurn)
-      return;
     this.abort?.abort();
   }
   backlog() {
@@ -250257,10 +250274,7 @@ class TierSnifferService {
     if (!this.running && this.continuation === undefined)
       return false;
     try {
-      const turn = this.options.ownerAskTurn?.();
-      if (turn === "share")
-        return true;
-      return turn !== "hold" && this.options.shouldYield?.() !== true;
+      return this.options.shouldYield?.() !== true && (this.dispatch.protected || this.options.ownerAskTurn?.() !== "hold");
     } catch {
       return true;
     }
@@ -250330,6 +250344,7 @@ class TierSnifferService {
       this.running = false;
     }
     const generation = ++this.passGeneration;
+    this.dispatch = { inFlight: 0, protected: false };
     this.arrivalTurn = this.arrivalTurnDue();
     if (this.arrivalTurn)
       this.heldBackSinceMs = undefined;
@@ -250496,17 +250511,36 @@ class TierSnifferService {
       return;
     }
   }
-  yieldNow() {
+  yieldNow(turn = this.dispatch.protected ? "hold" : this.options.ownerAskTurn?.()) {
     if (this.breakerOpen()) {
       this.lastYieldReason = "breaker";
       return true;
     }
-    if (this.running && this.arrivalTurn)
+    if (this.running && this.arrivalTurn && turn !== "hold" && turn !== "share")
       return false;
-    const held = this.holdsBack();
+    const held = this.holdsBack(turn);
     if (this.running)
       this.heldBackSinceMs = held ? this.heldBackSinceMs ?? this.clockMs() : undefined;
     return held;
+  }
+  acquireCall() {
+    const dispatch = this.dispatch;
+    if (dispatch.protected)
+      return false;
+    const turn = this.options.ownerAskTurn?.();
+    if (this.yieldNow(turn))
+      return false;
+    const protect = this.arrivalTurn || turn === "share" && this.options.lane.kind === "local";
+    if (protect && dispatch.inFlight > 0)
+      return false;
+    dispatch.inFlight++;
+    if (protect)
+      dispatch.protected = true;
+    return () => {
+      dispatch.inFlight--;
+      if (protect)
+        dispatch.protected = false;
+    };
   }
   isOnDemandRead(question) {
     return this.options.stores().some((store) => {
@@ -250535,13 +250569,8 @@ class TierSnifferService {
       return false;
     }
   }
-  holdsBack() {
-    const turn = this.options.ownerAskTurn?.();
-    if (turn === "share") {
-      this.lastYieldReason = undefined;
-      return false;
-    }
-    let busy = turn === "hold" || this.answering();
+  holdsBack(turn) {
+    let busy = turn === "hold" || turn !== "share" && this.answering();
     this.lastYieldReason = busy ? "answer" : undefined;
     if (!busy) {
       try {
@@ -250552,7 +250581,7 @@ class TierSnifferService {
       if (busy)
         this.lastYieldReason = "caller";
     }
-    if (!this.running)
+    if (!this.running || turn === "share")
       return busy;
     if (!busy) {
       if (!this.fairTurn)
@@ -250840,7 +250869,7 @@ class TierSnifferService {
       ...this.arrivalTurn ? { arrivalsOnly: true } : {},
       passTimeMs: this.options.passTimeMs,
       ...this.options.monotonicNow ? { monotonicNow: this.options.monotonicNow } : {},
-      shouldYield: () => this.yieldNow(),
+      acquireCall: () => this.acquireCall(),
       onProgress: this.progress,
       ...this.options.pacing && isBuiltInLane(lane) ? { trickle: () => this.trickle() } : {},
       signal
@@ -252703,11 +252732,14 @@ class OwnerBusyMarks {
     const last = this.marks.get(change.resource);
     if (last && last.front === change.front && change.seq <= last.seq)
       return false;
+    const at = this.now();
+    const wasBusy = last !== undefined && last.busyUntil > at;
     this.marks.set(change.resource, {
       front: change.front,
       seq: change.seq,
-      busyUntil: change.kind === "owner_busy" ? this.now() + this.lapseMs : 0,
-      endedAt: change.kind === "owner_idle" ? this.now() : last?.endedAt
+      busyUntil: change.kind === "owner_busy" ? at + this.lapseMs : 0,
+      startedAt: wasBusy ? last.startedAt : at,
+      endedAt: change.kind === "owner_idle" ? at : this.lastEndedAt(change.resource)
     });
     return true;
   }
@@ -252716,6 +252748,10 @@ class OwnerBusyMarks {
     if (mark && mark.busyUntil > 0 && mark.busyUntil <= this.now())
       return Math.max(mark.endedAt ?? 0, mark.busyUntil);
     return mark?.endedAt;
+  }
+  busySince(resource) {
+    const mark = this.marks.get(resource);
+    return mark && mark.busyUntil > this.now() ? mark.startedAt : undefined;
   }
   busy(resource) {
     return (this.marks.get(resource)?.busyUntil ?? 0) > this.now();
@@ -253169,6 +253205,12 @@ function ownerAskReason(local, frontBusy) {
     return "question in this process";
   return frontBusy() ? "question in the front" : undefined;
 }
+function ownerIdleWindow(local, frontBusySince, frontLastEndedAt) {
+  return {
+    since: Math.max(local.lastEndedAt ?? -Infinity, frontLastEndedAt ?? -Infinity),
+    until: Math.min(local.busySince ?? Infinity, frontBusySince ?? Infinity)
+  };
+}
 function createStandBack(options) {
   const now = options.now ?? Date.now;
   const log = options.log ?? ((line) => console.log(line));
@@ -253192,8 +253234,11 @@ function createStandBack(options) {
         return "idle";
       states.set(work, state = { counts: { holds: 0, held_ms: 0, bound_reached: 0 } });
     }
-    if (state.idleSince !== undefined && at - state.idleSince >= shareMs)
-      delete state.waitSince;
+    if (state.waitSince !== undefined) {
+      const idle = options.idleWindow?.();
+      if (idle && Math.min(at, idle.until) - Math.max(state.waitSince, idle.since) >= shareMs)
+        delete state.waitSince;
+    }
     const waitedMs = state.waitSince === undefined ? 0 : at - state.waitSince;
     const bound = state.waitSince !== undefined && waitedMs >= maxMs;
     if (state.heldSince !== undefined && (!reason || bound)) {
@@ -253207,15 +253252,11 @@ function createStandBack(options) {
       state.counts.bound_reached += 1;
       log(`Olympus engine: ${work} reached the bound ${seconds(waitedMs)} s after first standing back (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
       delete state.waitSince;
-      delete state.idleSince;
       state.shareUntil = at + shareMs;
       return "share";
     }
-    if (!reason) {
-      state.idleSince ??= at;
+    if (!reason)
       return "idle";
-    }
-    delete state.idleSince;
     state.waitSince ??= at;
     if (state.heldSince === undefined) {
       state.heldSince = at;
@@ -279253,7 +279294,8 @@ async function main() {
   const remoteOwnerBusy = (resource) => remoteOwnerMarks.busy(resource);
   let statusRecount;
   const standBack = createStandBack({
-    reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
+    reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
+    idleWindow: () => ownerIdleWindow(ownerQuestions, remoteOwnerMarks.busySince(OWNER_QUESTION_RESOURCE), remoteOwnerMarks.lastEndedAt(OWNER_QUESTION_RESOURCE))
   });
   setVectorDigestBackfillHold(() => standBack.holds("digest"));
   let recencyIndexMaintenanceReady = false;
@@ -284171,8 +284213,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         owner_busy: (change) => {
           if (!remoteOwnerMarks.apply(change))
             return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
-          if (change.resource === snifferResource || change.resource === OWNER_QUESTION_RESOURCE && standBack.holds("judge"))
+          if (change.resource === snifferResource)
             tierSniffer?.preempt();
+          else if (change.resource === OWNER_QUESTION_RESOURCE)
+            tierSniffer?.preempt("question");
           return { busy: true };
         },
         owner_idle: (change) => {

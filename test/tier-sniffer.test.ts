@@ -34,6 +34,7 @@ import {
 } from '../src/workers/classification/sniffer-lane.ts';
 import { SnifferCallBudget, runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import { BUILT_IN_SNIFFER_LANE, resolveTierSnifferRuntime } from '../src/workers/classification/built-in-sniffer.ts';
+import { createLocalModelActivity, runClassificationInference } from '../src/workers/answer-activity.ts';
 import { createStandBack, STAND_BACK_MAX_MS, STAND_BACK_SHARE_MS } from '../src/workers/engine/stand-back.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { archivePrivateModelFromSniffer } from '../src/workers/archive-import/dashboard.ts';
@@ -666,6 +667,7 @@ describe('bounds and the owner-approval gate', () => {
       // the caller asks it to yield, not only once it reaches a question.
       recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 3, 'medical letter');
       let overdue = false;
+      let share = false;
       let enter: () => void = () => {};
       const entered = new Promise<void>((resolve) => { enter = resolve; });
       let finish: () => void = () => {};
@@ -682,6 +684,7 @@ describe('bounds and the owner-approval gate', () => {
         stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
         classificationLedgerPath: ledgerPath,
         shouldYield: () => overdue,
+        ownerAskTurn: () => share ? 'share' : 'idle',
         now: () => new Date(clock),
       });
       const running = blocked.runOnce();
@@ -689,8 +692,11 @@ describe('bounds and the owner-approval gate', () => {
       expect(blocked.hasPriority).toBe(true);
       overdue = true;
       expect(blocked.hasPriority).toBe(false);
+      share = true;
+      expect(blocked.hasPriority).toBe(false);
       finish();
       await running;
+      expect(await blocked.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0, stoppedBy: 'yield' } });
       blocked.stop();
     } finally {
       installed.close();
@@ -887,6 +893,82 @@ describe('bounds and the owner-approval gate', () => {
       }
       throw new Error('No judge call within the first share');
     } finally {
+      service.stop();
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const concurrentCalls of [1, 4]) test(`the owner waits for only the final admitted judge call with concurrency ${concurrentCalls}`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tier-sniffer-handoff-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    const classificationLedgerPath = join(dir, 'classification-ledger.jsonl');
+    const clock = createTestClock(0);
+    const shareEnd = STAND_BACK_MAX_MS + STAND_BACK_SHARE_MS;
+    const standBack = createStandBack({ reason: () => 'question in the front', now: clock.now, log: () => {} });
+    const pool = createLocalModelActivity();
+    const starts: number[] = [];
+    const owner = pool.track('shared', { async complete() {
+      starts.push(clock.now());
+      return { text: 'answer', modelId: 'fixture' };
+    } } as AnalystModel);
+    let finish!: () => void;
+    const inFlight = new Promise<void>(resolve => { finish = resolve; });
+    const judge = spyModel((_, items) => verdictsFor(items, { tier: 'private', category: 'health', confidence: 0.95 }));
+    const sharedJudge = pool.track('shared', { async complete(request: AnalystModelRequest) {
+      await inFlight;
+      request.signal?.throwIfAborted();
+      return judge.complete(request);
+    } }, { concurrency: concurrentCalls });
+    const preparationAborts: boolean[] = [];
+    const model = {
+      async prepareSniffer(signal: AbortSignal) {
+        if (!preparationAborts.length) {
+          service.preempt('question');
+          preparationAborts.push(signal.aborted);
+          service.preempt();
+          preparationAborts.push(signal.aborted);
+        }
+      },
+      complete: (request: AnalystModelRequest) => runClassificationInference(() => sharedJudge.complete(request)),
+    };
+    const service = new TierSnifferService({
+      installed, lane: LOCAL_LANE, model,
+      classificationLedgerPath, stores: () => [{ dbPath: join(dir, 'store.sqlite') }], concurrentCalls,
+      ownerAskTurn: () => standBack.turn('judge'), now: clock.date,
+    });
+    pool.onBusy('shared', () => service.preempt());
+    try {
+      await appendClassificationLedgerEntry(classificationLedgerPath, {
+        recorded_at: clock.date().toISOString(), kind: 'classifier_model_decision', what: 'Approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      for (let n = 1; n <= 4; n++) recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), n, `trip plan ${n}`);
+      expect(standBack.turn('judge')).toBe('hold');
+      clock.set(STAND_BACK_MAX_MS);
+      expect(standBack.turn('judge')).toBe('share');
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0, stoppedBy: 'aborted' } });
+      expect(preparationAborts).toEqual([false, true]);
+      clock.set(shareEnd - 1);
+      const tick = service.runOnce();
+      await waitFor(() => pool.busy('shared'), { description: 'judge holds the shared model' });
+      const ask = () => owner.complete({ system: 'Answer the question.', prompt: 'question', localOnly: true });
+      const first = ask();
+      clock.set(shareEnd + 1);
+      // One case has no further notification, the other a fresh Ask after expiry.
+      const owners = concurrentCalls === 1 ? [first] : [first, ask()];
+      expect(starts).toEqual([]);
+      clock.set(shareEnd - 1 + 20_000);
+      finish();
+      await Promise.all(owners);
+      expect(await tick).toMatchObject({ state: 'ran', report: { calls: 1, failedCalls: 0, verdictsApplied: 1 } });
+      expect(starts.map(at => at - shareEnd)).toEqual(owners.map(() => 19_999));
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0, stoppedBy: 'yield' } });
+    } finally {
+      finish();
       service.stop();
       installed.close();
       ledger.close();

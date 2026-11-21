@@ -4,7 +4,9 @@
 
 import { describe, expect, test } from 'bun:test';
 import { storeReadHasPriority, withStoreReadPriority } from '../src/core/store-reclaim-admission.ts';
-import { createStandBack, ownerAskReason, STAND_BACK_MAX_MS, STAND_BACK_SHARE_MS } from '../src/workers/engine/stand-back.ts';
+import { createStandBack, ownerAskReason, ownerIdleWindow, STAND_BACK_MAX_MS, STAND_BACK_SHARE_MS } from '../src/workers/engine/stand-back.ts';
+import { createOwnerQuestionActivity, OWNER_QUESTION_RESOURCE } from '../src/workers/engine/runtime/source-answer-lanes.ts';
+import { OwnerBusyMarks } from '../src/workers/engine-split/runtime.ts';
 import { createTestClock, waitFor } from './helpers/test-clock.ts';
 
 describe('stand-back for the owner\'s Ask', () => {
@@ -67,26 +69,74 @@ describe('stand-back for the owner\'s Ask', () => {
     }
   });
 
+  for (const source of ['local', 'front']) test(`16 s worker checks get a share during 1.5 s busy / 0.3 s idle (${source} Ask)`, () => {
+    const clock = createTestClock(0);
+    const local = createOwnerQuestionActivity(undefined, clock.now);
+    const front = new OwnerBusyMarks({ now: clock.now });
+    const resource = OWNER_QUESTION_RESOURCE;
+    const standBack = createStandBack({
+      now: clock.now, reason: () => ownerAskReason(local, () => front.busy(resource)),
+      idleWindow: () => ownerIdleWindow(local, front.busySince(resource), front.lastEndedAt(resource)),
+      log: () => {},
+    });
+    let release: (() => void) | undefined;
+    const turns: string[] = [];
+    for (let at = 0; at <= STAND_BACK_MAX_MS + STAND_BACK_SHARE_MS; at += 100) {
+      clock.set(at);
+      if (at % 1_800 === 0) {
+        if (source === 'local') release = local.begin();
+        else front.apply({ kind: 'owner_busy', resource, front: 'front', seq: at });
+      } else if (at % 1_800 === 1_500) {
+        if (source === 'local') release!();
+        else front.apply({ kind: 'owner_idle', resource, front: 'front', seq: at });
+      }
+      if (at % 16_000 === 0) turns.push(standBack.turn('import'));
+    }
+    expect(turns).toEqual(['hold', 'idle', 'hold', 'hold', 'share']);
+    release?.();
+  });
+
   test('idle resumes immediately and a full idle share gives the next Ask its full bound', () => {
     const clock = createTestClock(0);
-    let busy = false;
-    const standBack = createStandBack({ now: clock.now, reason: () => busy ? 'question in the front' : undefined, log: () => {} });
+    const owner = createOwnerQuestionActivity(undefined, clock.now);
+    const standBack = createStandBack({ now: clock.now, reason: () => ownerAskReason(owner, () => false),
+      idleWindow: () => ownerIdleWindow(owner, undefined, undefined), log: () => {} });
     expect(standBack.holds('judge')).toBe(false);
-    busy = true;
+    const release = owner.begin();
     expect(standBack.holds('judge')).toBe(true);
     clock.set(STAND_BACK_MAX_MS - 1);
-    busy = false;
+    release();
     expect(standBack.holds('judge')).toBe(false);
     expect(standBack.counts().judge).toMatchObject({ holding: false, held_ms: STAND_BACK_MAX_MS - 1 });
     const nextAsk = clock.now() + STAND_BACK_SHARE_MS;
     clock.set(nextAsk);
-    busy = true;
+    const releaseNext = owner.begin();
     expect(standBack.holds('judge')).toBe(true);
     clock.set(nextAsk + STAND_BACK_MAX_MS - 1);
     expect(standBack.holds('judge')).toBe(true);
     clock.set(nextAsk + STAND_BACK_MAX_MS);
     expect(standBack.holds('judge')).toBe(false);
     expect(standBack.counts().judge).toMatchObject({ holds: 2, bound_reached: 1 });
+    releaseNext();
+  });
+
+  test('overlapping Asks and a renewed front lease give no idle credit until the last Ask ends', () => {
+    const clock = createTestClock(0);
+    const local = createOwnerQuestionActivity(undefined, clock.now);
+    const front = new OwnerBusyMarks({ now: clock.now, lapseMs: STAND_BACK_MAX_MS });
+    const resource = OWNER_QUESTION_RESOURCE;
+    const window = () => ownerIdleWindow(local, front.busySince(resource), front.lastEndedAt(resource));
+    const release = local.begin();
+    clock.set(1_000);
+    front.apply({ kind: 'owner_busy', resource, front: 'front', seq: 1 });
+    clock.set(2_000);
+    release();
+    clock.set(STAND_BACK_MAX_MS);
+    front.apply({ kind: 'owner_busy', resource, front: 'front', seq: 2 });
+    expect(window().until).toBeLessThan(window().since);
+    clock.set(2 * STAND_BACK_MAX_MS + STAND_BACK_SHARE_MS);
+    front.apply({ kind: 'owner_busy', resource, front: 'front', seq: 3 });
+    expect(window()).toEqual({ since: 2 * STAND_BACK_MAX_MS, until: clock.now() });
   });
 
   test('each kind of work keeps its own bound', () => {

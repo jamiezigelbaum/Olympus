@@ -28,7 +28,7 @@ export interface StandBackCounts {
 export type StandBackTurn = 'idle' | 'hold' | 'share';
 
 export interface StandBack {
-  /** A guaranteed share also protects work already in flight from preemption. */
+  /** Whether work may start now, including its guaranteed share. */
   turn(work: StandBackWork): StandBackTurn;
   /** True while `work` should start nothing new. */
   holds(work: StandBackWork): boolean;
@@ -47,9 +47,20 @@ export function ownerAskReason(local: { readonly busy: boolean }, frontBusy: () 
   return frontBusy() ? 'question in the front' : undefined;
 }
 
+/** Both question sources were idle from the latest end until the first still-open Ask. */
+export function ownerIdleWindow(
+  local: { readonly busySince: number | undefined; readonly lastEndedAt: number | undefined },
+  frontBusySince: number | undefined, frontLastEndedAt: number | undefined,
+): { since: number; until: number } {
+  return { since: Math.max(local.lastEndedAt ?? -Infinity, frontLastEndedAt ?? -Infinity),
+    until: Math.min(local.busySince ?? Infinity, frontBusySince ?? Infinity) };
+}
+
 export function createStandBack(options: {
   /** Why the owner is busy now, or undefined when not. */
   reason: () => string | undefined;
+  /** The latest idle interval established by the question sources' transitions. */
+  idleWindow?: () => { since: number; until: number };
   now?: () => number;
   log?: (line: string) => void;
   maxMs?: number;
@@ -62,7 +73,6 @@ export function createStandBack(options: {
   const states = new Map<StandBackWork, {
     waitSince?: number;
     heldSince?: number;
-    idleSince?: number;
     shareUntil?: number;
     reason?: string;
     counts: Omit<StandBackCounts, 'holding' | 'reason'>;
@@ -83,7 +93,10 @@ export function createStandBack(options: {
 
     // A short idle gap lets work resume immediately, but only a full idle
     // share satisfies the wait. Count actual holds separately for health.
-    if (state.idleSince !== undefined && at - state.idleSince >= shareMs) delete state.waitSince;
+    if (state.waitSince !== undefined) {
+      const idle = options.idleWindow?.();
+      if (idle && Math.min(at, idle.until) - Math.max(state.waitSince, idle.since) >= shareMs) delete state.waitSince;
+    }
     const waitedMs = state.waitSince === undefined ? 0 : at - state.waitSince;
     const bound = state.waitSince !== undefined && waitedMs >= maxMs;
     if (state.heldSince !== undefined && (!reason || bound)) {
@@ -96,16 +109,10 @@ export function createStandBack(options: {
       state.counts.bound_reached += 1;
       log(`Olympus engine: ${work} reached the bound ${seconds(waitedMs)} s after first standing back (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
       delete state.waitSince;
-      delete state.idleSince;
       state.shareUntil = at + shareMs;
       return 'share';
     }
-    if (!reason) {
-      state.idleSince ??= at;
-      return 'idle';
-    }
-
-    delete state.idleSince;
+    if (!reason) return 'idle';
     state.waitSince ??= at;
     if (state.heldSince === undefined) {
       state.heldSince = at;

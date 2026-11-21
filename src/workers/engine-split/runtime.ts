@@ -579,7 +579,7 @@ export async function waitForProcessExit(pid: number, options: {
  * front that died mid-call cannot hold background work back for good.
  */
 export class OwnerBusyMarks {
-  private readonly marks = new Map<string, { front: string; seq: number; busyUntil: number; endedAt: number | undefined }>();
+  private readonly marks = new Map<string, { front: string; seq: number; busyUntil: number; startedAt: number; endedAt: number | undefined }>();
   private readonly lapseMs: number;
   private readonly now: () => number;
 
@@ -592,8 +592,13 @@ export class OwnerBusyMarks {
   apply(change: { kind: 'owner_busy' | 'owner_idle'; resource: string; front: string; seq: number }): boolean {
     const last = this.marks.get(change.resource);
     if (last && last.front === change.front && change.seq <= last.seq) return false;
-    this.marks.set(change.resource, { front: change.front, seq: change.seq, busyUntil: change.kind === 'owner_busy' ? this.now() + this.lapseMs : 0,
-      endedAt: change.kind === 'owner_idle' ? this.now() : last?.endedAt });
+    const at = this.now();
+    const wasBusy = last !== undefined && last.busyUntil > at;
+    this.marks.set(change.resource, { front: change.front, seq: change.seq,
+      busyUntil: change.kind === 'owner_busy' ? at + this.lapseMs : 0,
+      startedAt: wasBusy ? last.startedAt : at,
+      endedAt: change.kind === 'owner_idle' ? at : this.lastEndedAt(change.resource),
+    });
     return true;
   }
 
@@ -602,6 +607,11 @@ export class OwnerBusyMarks {
     const mark = this.marks.get(resource);
     if (mark && mark.busyUntil > 0 && mark.busyUntil <= this.now()) return Math.max(mark.endedAt ?? 0, mark.busyUntil);
     return mark?.endedAt;
+  }
+
+  busySince(resource: string): number | undefined {
+    const mark = this.marks.get(resource);
+    return mark && mark.busyUntil > this.now() ? mark.startedAt : undefined;
   }
 
   busy(resource: string): boolean {

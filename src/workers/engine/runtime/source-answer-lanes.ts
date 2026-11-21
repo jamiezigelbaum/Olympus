@@ -45,22 +45,27 @@ export const OWNER_QUESTION_RESOURCE = 'owner_question';
 export function createOwnerQuestionActivity(relay?: { busy(resource: string): void; idle(resource: string): void }, now: () => number = Date.now) {
   const context = new AsyncLocalStorage<{ active: boolean; settled: boolean } | undefined>();
   let inFlight = 0;
+  let startedAt: number | undefined;
   let lastEndedAt: number | undefined;
+  const acquire = () => {
+    if (++inFlight === 1) { startedAt = now(); relay?.busy(OWNER_QUESTION_RESOURCE); }
+  };
   const release = () => {
     if (--inFlight === 0) { lastEndedAt = now(); relay?.idle(OWNER_QUESTION_RESOURCE); }
   };
   return {
+    get busySince(): number | undefined { return inFlight > 0 ? startedAt : undefined; },
     get lastEndedAt(): number | undefined { return lastEndedAt; },
     get busy(): boolean { return inFlight > 0; },
     retrieving(): void {
       const scope = context.getStore();
       if (!scope || scope.active || scope.settled) return;
       scope.active = true;
-      if (++inFlight === 1) relay?.busy(OWNER_QUESTION_RESOURCE);
+      acquire();
     },
     /** A lease held outside an async scope (a claimed panel job), released exactly once. */
     begin(): () => void {
-      if (++inFlight === 1) relay?.busy(OWNER_QUESTION_RESOURCE);
+      acquire();
       let released = false;
       return () => {
         if (released) return;

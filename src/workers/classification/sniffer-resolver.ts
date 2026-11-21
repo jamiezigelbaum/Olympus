@@ -215,6 +215,8 @@ export interface SnifferPassOptions {
   pendingPageSize?: number;
   /** True when an answer needs the private pool (or its breaker is open): stop before the next call. */
   shouldYield?: () => boolean;
+  /** Acquire one dispatch before charging its budget. False leaves the item queued. */
+  acquireCall?: () => (() => void) | false;
   signal?: AbortSignal;
   /**
    * Go easy on this computer (#922, local-pacing.ts): true while local work
@@ -754,6 +756,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     // Each turn of this loop is dispatch work, less the time inside its call.
     const turnStarted = monotonicNow();
     let turnCallMs = 0;
+    let releaseCall: (() => void) | undefined;
     try {
       // Reserve every fifth dispatch for an aged question, even across short passes.
       // Paid cloud judging spends its calls on new items, never an aged backlog.
@@ -813,11 +816,13 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         }
       }
       const batch = [group];
-      const stop = report.calls > 0 && options.trickle?.() === true ? 'pass_budget' : stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
-      if (stop) {
-        report.stoppedBy = stop;
+      const admission = report.calls > 0 && options.trickle?.() === true ? 'pass_budget'
+        : admitCall(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+      if (typeof admission === 'string') {
+        report.stoppedBy = admission;
         return;
       }
+      releaseCall = admission;
       // Re-checked at every dispatch: a policy that changed under a running
       // worker still cannot route possibly-private names to a cloud model.
       assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
@@ -917,6 +922,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       }
       if (preemptedAfterAnswer) { report.stoppedBy = 'preempted'; return; }
     } finally {
+      releaseCall?.();
       report.timing.dispatchMs += Math.max(0, monotonicNow() - turnStarted - turnCallMs);
     }
   } };
@@ -970,12 +976,17 @@ function openPasses(row: TierLedgerRecord): SnifferPass[] {
   return passes;
 }
 
-function stopReason(options: SnifferPassOptions, report: SnifferPassReport, maxCallsPerPass: number, timeUp: boolean): SnifferPassStop | undefined {
+function admitCall(options: SnifferPassOptions, report: SnifferPassReport, maxCallsPerPass: number, timeUp: boolean): SnifferPassStop | (() => void) | undefined {
   if (options.signal?.aborted) return 'aborted';
   if (report.calls >= maxCallsPerPass || timeUp) return 'pass_budget';
   if (options.shouldYield?.()) return 'yield';
-  if (options.budget && !options.budget.tryConsume(options.lane.snifferMode === 'decision')) return 'daily_budget';
-  return undefined;
+  const release = options.acquireCall?.();
+  if (release === false) return 'yield';
+  if (options.budget && !options.budget.tryConsume(options.lane.snifferMode === 'decision')) {
+    release?.();
+    return 'daily_budget';
+  }
+  return release;
 }
 
 function finish(report: SnifferPassReport, monotonicNow: () => number, passStarted: number): SnifferPassReport {

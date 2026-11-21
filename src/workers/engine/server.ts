@@ -519,7 +519,7 @@ import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { sqliteMmapPolicy } from '../connector-store/sqlite-mmap.ts';
 import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
 import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
-import { createStandBack, ownerAskReason } from './stand-back.ts';
+import { createStandBack, ownerAskReason, ownerIdleWindow } from './stand-back.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { applyPendingRestoreAtBoot, createBackupService, defaultBackupServicePaths } from '../backup-service.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
@@ -976,6 +976,7 @@ export async function main(): Promise<void> {
   let statusRecount: PacedStatusRecount | undefined;
   const standBack = createStandBack({
     reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
+    idleWindow: () => ownerIdleWindow(ownerQuestions, remoteOwnerMarks.busySince(OWNER_QUESTION_RESOURCE), remoteOwnerMarks.lastEndedAt(OWNER_QUESTION_RESOURCE)),
   });
   setVectorDigestBackfillHold(() => standBack.holds('digest'));
   let recencyIndexMaintenanceReady = false;
@@ -7181,9 +7182,8 @@ export async function main(): Promise<void> {
         // A stale change (older than the last applied for that resource) changes nothing.
         owner_busy: (change) => {
           if (!remoteOwnerMarks.apply(change)) return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
-          // An owner question preempts the judge only while it stands back:
-          // within its guaranteed share the call it is making finishes.
-          if (change.resource === snifferResource || (change.resource === OWNER_QUESTION_RESOURCE && standBack.holds('judge'))) tierSniffer?.preempt();
+          if (change.resource === snifferResource) tierSniffer?.preempt();
+          else if (change.resource === OWNER_QUESTION_RESOURCE) tierSniffer?.preempt('question');
           return { busy: true };
         },
         owner_idle: (change) => {
