@@ -21,7 +21,9 @@
  * canary opened is closed again.
  *
  * With `--accounts <file>` the live accounts (live-accounts.ts) and the web clients (web-clients.ts) are checked after the
- * desktop; `--accounts-only` leaves out the update and the desktop checks. `--web-sign-in` only opens the canary browser on
+ * desktop; on test-mac and test-omarchy this also runs the ChatGPT protocol smoke against the installed engine.
+ * The smoke uses the release suite's synthetic records and expects them to be indexed at their fixture tiers.
+ * `--accounts-only` leaves out the update and the desktop checks. `--web-sign-in` only opens the canary browser on
  * the machine at each web app, for a person to sign the test accounts in and connect Olympus (over Screen Sharing).
  *
  * Fresh-user mode: --fresh-install --accounts <file> [--candidate <tgz>] [--cdp <host:port>].
@@ -34,7 +36,10 @@ import { prepareLinuxLocalBundle } from '../publish-release-to-site.ts';
 import { FRESH_LEG, redactFreshTimeline, runFreshInstall, validateFreshSources } from './fresh-install.ts';
 import { openFreshDashboard, parseCdpEndpoint } from './fresh-dashboard.ts';
 import { MAC_ENGINE_LOG, MAC_MACHINE_SAMPLE, memoryCheck, splitRestartCheck, startRssSampler, type RssSample } from './split-watch.ts';
-import { bundleAgent, LEG_BUDGET_MINUTES } from './run.ts';
+import { BUN_LOCATE, bundleAgent, LEG_BUDGET_MINUTES, parseAgentLine } from './run.ts';
+import { forbiddenMarkers } from './fixture.ts';
+import { redactMarkers } from './leak.ts';
+import { protocolChecks } from './protocol.ts';
 import { LegBudget } from './leg-budget.ts';
 import { liveChecks, publishFailedCheck } from './live-checks.ts';
 import { readAgentKey } from './agents.ts';
@@ -88,7 +93,7 @@ export interface CanaryOptions {
   /** Only the real-accounts legs. Requires the engine split already running on the test machine. */
   onDemandTiming?: boolean;
   cdp?: string;
-  /** Linux web clients: the machine-agent bundle for the owner-socket forward (web-clients.ts). */
+  /** The machine-agent bundle for the protocol smoke and the Linux web-client owner-socket forward. */
   bridgeAgent?: string;
   /** Poll timing; tests shorten it. */
   pollMs?: number;
@@ -199,6 +204,37 @@ export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) 
     ...(timing ? { on_demand_timing: timing } : {}), ...(veniceKey ? { venice_key_command: veniceKey as string[] } : {}) };
 }
 
+const CANARY_SMOKE_TIMEOUT_MS = 60 * 60_000;
+const smokeMachine = (handle: string): boolean => handle === 'test-mac' || handle === 'test-omarchy';
+
+async function runCanarySmoke(machine: Machine, agent: string | undefined): Promise<CheckResult[]> {
+  const markers = forbiddenMarkers();
+  let code = 1;
+  let result: ReturnType<typeof parseAgentLine>;
+  try {
+    if (!agent) throw new Error('the canary has no machine-agent bundle');
+    const dir = await machine.exec('mkdir -p "$HOME/rc"', { timeoutMs: 15_000 });
+    if (dir.code !== 0) throw new Error('could not create the machine-agent directory');
+    await machine.put(agent, '~/rc/agent.js');
+    const out = await machine.exec(`${BUN_LOCATE}\nexec "$BUN" --no-env-file ~/rc/agent.js canary-smoke\n`, { timeoutMs: CANARY_SMOKE_TIMEOUT_MS });
+    code = out.code;
+    result = parseAgentLine(out.stdout);
+    if (!result && (out.timedOut || out.code === 124)) result = { ok: false, detail: 'the machine-agent smoke timed out' };
+    if (!result && out.code === 90) result = { ok: false, detail: 'no Bun runtime on the machine' };
+  } catch (error) {
+    result = { ok: false, detail: error instanceof Error ? error.message : String(error) };
+  }
+  const diagnostic = [
+    `Private model wait: ${typeof result?.modelWaitMs === 'number' ? `${(result.modelWaitMs / 1000).toFixed(1)} s` : 'unavailable'}`,
+    `Private answer model and route: ${result?.privateModel ?? 'unavailable'}`,
+    `Machine before smoke: ${result?.sampleBefore ?? 'unavailable'}`,
+    `Machine after smoke: ${result?.sampleAfter ?? 'unavailable'}`,
+  ].join('; ');
+  return protocolChecks({ code, stderr: '' }, result, markers).map(check => ({
+    ...check, detail: redactMarkers([check.detail, diagnostic].filter(Boolean).join('; '), markers),
+  }));
+}
+
 /** Runs the canary's checks on one machine. Never throws for a product problem: every failure is a check. */
 export async function runCanary(machine: Machine, options: CanaryOptions): Promise<{ checks: CheckResult[]; screens: CanaryScreen[]; onDemandTiming?: OnDemandTimingResult }> {
   const desktop = options.accountsOnly ? { checks: [], screens: [] } : await runDesktopChecks(machine, options);
@@ -208,6 +244,7 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
   const checks = liveChecks(publishFailedCheck);
   Array.prototype.push.apply(checks, desktop.checks);
   const screens = [...desktop.screens];
+  if (smokeMachine(machine.handle)) checks.push(...await runCanarySmoke(machine, options.bridgeAgent));
   let onDemandTiming: OnDemandTimingResult | undefined;
   if (accounts.sources.length > 0 || options.onDemandTiming) {
     const started = Date.now();
@@ -638,7 +675,9 @@ if (import.meta.main) {
   if (bundle) expectVersion = bundle.version;
   const budgetChecks = liveChecks(publishFailedCheck);
   const kind = freshInstall ? 'fresh-install' : accounts ? 'accounts' : 'canary';
-  const budget = new LegBudget(kind, LEG_BUDGET_MINUTES[kind] * 60_000, check => { budgetChecks.push(check); });
+  const protocolSmoke = kind === 'accounts' && smokeMachine(handle);
+  const budgetMs = LEG_BUDGET_MINUTES[kind] * 60_000 + (protocolSmoke ? CANARY_SMOKE_TIMEOUT_MS : 0);
+  const budget = new LegBudget(kind, budgetMs, check => { budgetChecks.push(check); });
   const timedMachine = budget.machine(machine);
   const result = await (async () => {
     try {
@@ -657,7 +696,7 @@ if (import.meta.main) {
         accountsOnly: argv.includes('--accounts-only'),
         ...(onDemandTimingEnabled ? { onDemandTiming: true, cdp } : {}),
         screensDir: join(runDir, 'screens'),
-        ...(os === 'linux' && accounts && (accounts.clients.length > 0 || onDemandTimingEnabled) ? { bridgeAgent: await bundleAgent(runDir) } : {}),
+        ...(protocolSmoke || (os === 'linux' && accounts && (accounts.clients.length > 0 || onDemandTimingEnabled)) ? { bridgeAgent: await bundleAgent(runDir) } : {}),
       });
     } finally { budget.finish(); }
   })();

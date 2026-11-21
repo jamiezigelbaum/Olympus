@@ -30,7 +30,8 @@ import { answerModelTiming } from './model-timing.ts';
 import { resolveSourceAnswerLatencyLogPath } from '../../src/workers/source-index/answer-latency-log.ts';
 import { saveFixtureJudge } from './fixture-judge-settings.ts';
 import { privateAnswerOptions } from '../../src/core/privacy-language.ts';
-import { validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
+import { environmentWithWorkerSetupEnv } from '../../src/core/worker-auth.ts';
+import { loadSovereigntyEngine, validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
 import { ENGINE_ROLE_ENV } from '../../src/core/engine-split.ts';
 // Embedded: the bundled agent runs outside the product tree, so the preset file is not on disk beside it.
 import noSensitivePreset from '../../config/sovereignty/presets/no-sensitive.json' with { type: 'json' };
@@ -45,7 +46,10 @@ import { archiveConnectorStoreDbPath } from '../../src/workers/archive-import/st
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from '../../src/workers/archive-import/state.ts';
 import { engineStatusSnapshotPath } from '../../src/workers/engine-split/runtime.ts';
 import { tierLedgerPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
-import { desktopSandboxOrigin, runSmoke, type SmokeObservation, privateNoteKind, panelMeta, resultText } from '../chatgpt-live-smoke.ts';
+import { desktopSandboxOrigin, PRODUCTION_RELAY, runSmoke, type SmokeObservation, privateNoteKind, panelMeta, resultText } from '../chatgpt-live-smoke.ts';
+import { SUITE_QUESTIONS } from './fixture.ts';
+import { describeCanaryPrivateModel, waitForCanaryModels, type CanarySmokeSettings } from './canary-smoke.ts';
+import { LINUX_MACHINE_SAMPLE, MAC_MACHINE_SAMPLE } from './split-watch.ts';
 import { privateNoteKindIn } from './private-note.ts';
 import { FAKE_READWISE_PORT, FAKE_READWISE_TOKEN, startFakeReadwise } from './readwise-fake.ts';
 import type { DashboardCounts, ItemRow, PolicyState, StateSnapshot } from './upgrade.ts';
@@ -270,9 +274,9 @@ async function ownerSession(timeoutMs?: number, bearerToken?: string): Promise<{
   };
 }
 
-async function dashboardJson(): Promise<{ status: number; json: any; text: string }> {
-  const session = await ownerSession();
-  return await session.call('GET', '/dashboard.json');
+async function dashboardJson(timeoutMs?: number): Promise<{ status: number; json: any; text: string }> {
+  const session = await ownerSession(timeoutMs);
+  return await session.call('GET', '/dashboard.json', undefined, timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs));
 }
 
 // ---------------------------------------------------------------------------
@@ -887,6 +891,21 @@ async function smoke(questionsFile: string): Promise<never> {
   // mac-upgrade 44900781180). The smoke's Private questions wait for the models first, and say how long that took.
   let modelWaitMs: number | undefined;
   try { modelWaitMs = await waitForEngine(30 * 60_000); } catch { /* the questions below then report what they meet */ }
+  const receipt = await smokeQuestions(questions, {
+    ...config, stateFile: join(WORKDIR, 'smoke-client.json'),
+    ...(process.platform === 'darwin' ? { panelCapMs: 300_000 } : {}),
+  });
+  emit({ ...receipt, ...(modelWaitMs !== undefined ? { modelWaitMs } : {}) });
+}
+
+async function smokeQuestions(questions: readonly SmokeQuestionIn[], config: {
+  enginePort: number;
+  relay: string;
+  stateFile: string;
+  panelCapMs?: number;
+  requireOwnerCookie?: boolean;
+  privateFacts: Readonly<Record<string, readonly string[]>>;
+}) {
   const stopBridge = startBridge(config.enginePort);
   const observed: Array<{ id: string; obs: SmokeObservation }> = [];
   const printed: string[] = [];
@@ -901,7 +920,7 @@ async function smoke(questionsFile: string): Promise<never> {
   const engine = `http://127.0.0.1:${config.enginePort}`;
   // The owner approves the smoke client as the owner does: with the dashboard session open, which on a Mac is the
   // approval's owner proof (#1186). Minted once, for the approval page's own origin.
-  const ownerCookie = await smokeOwnerCookie(engine).catch(() => undefined);
+  let ownerCookie: string | undefined;
   const ask = async (batch: SmokeQuestionIn[]): Promise<number> => await runSmoke({
     questions: batch.map((q) => ({ question: q.text, detail: 'summary' as const })),
     quiet: true,
@@ -910,11 +929,9 @@ async function smoke(questionsFile: string): Promise<never> {
     relay: config.relay,
     engine,
     origin: desktopSandboxOrigin(),
-    stateFile: join(WORKDIR, 'smoke-client.json'),
+    stateFile: config.stateFile,
     ...(ownerCookie ? { ownerCookie } : {}),
-    // The Mac VM's local model answers the cardiology question in about 119 s, against the panel's 120 s cap (44742818442
-    // passed at 119,162 ms, 44903893874 missed at 119,223 ms with the judge standing back): 300 s there only (plan, 21 Nov).
-    ...(process.platform === 'darwin' ? { panelCapMs: 300_000 } : {}),
+    ...(config.panelCapMs ? { panelCapMs: config.panelCapMs } : {}),
   }, {
     onTools: (names) => { tools = [...names]; },
     onQuestion: (obs) => {
@@ -929,6 +946,11 @@ async function smoke(questionsFile: string): Promise<never> {
     },
   });
   try {
+    ownerCookie = await smokeOwnerCookie(engine).catch(error => {
+      if (config.requireOwnerCookie) throw error;
+      return undefined;
+    });
+    if (config.requireOwnerCookie && !ownerCookie) throw new Error('no dashboard control session cookie was minted');
     // A fresh install starts its on-computer answer model on first use, so a Private question is
     // asked until its answer panel exists (bounded), and the wait is reported rather than hidden.
     const priv = questions.filter((q) => q.kind === 'private');
@@ -973,7 +995,57 @@ async function smoke(questionsFile: string): Promise<never> {
   });
   // "cannot start: …" is the smoke's reason when it never got a grant (no question ran): without it the report says only "no results".
   const lines = printed.filter((line) => /^\s+(FAIL|warn):/.test(line) || /^\s+(PASS|\d+ failure)/.test(line) || /^cannot start:/.test(line)).map((line) => line.trim());
-  emit({ ok: true, exit: exit ?? 1, tools, results, smokeChecks: lines, ...(modelWaitMs !== undefined ? { modelWaitMs } : {}) });
+  return { ok: true, exit: exit ?? 1, tools, results, smokeChecks: lines };
+}
+
+function readCanarySmokeSettings(timeoutMs: number): CanarySmokeSettings | undefined {
+  const result = olympus(['settings', 'show'], { timeoutMs });
+  try { return result.code === 0 ? JSON.parse(result.stdout) as CanarySmokeSettings : undefined; }
+  catch { return undefined; }
+}
+
+function canaryPrivateRoute() {
+  try {
+    const env = environmentWithWorkerSetupEnv({ env: process.env, workerEnvPath: platform().workerEnvPath });
+    const pool = loadSovereigntyEngine({ env }).resolveAnalystPool({ trustDomain: 'secure_local' });
+    return (pool.explicitOrder ?? pool.members)[0];
+  } catch { return undefined; }
+}
+
+async function canarySmoke(): Promise<never> {
+  const wait = await waitForCanaryModels(async remainingMs => {
+    const deadline = performance.now() + remainingMs;
+    try {
+      const dash = await dashboardJson(Math.max(1, Math.min(5_000, Math.floor(remainingMs / 3))));
+      const setup = dash.status === 200 ? dash.json?.model_setup : undefined;
+      if (!setup?.ready || !setup.private_model || ['ready', 'loading'].includes(setup.private_model.state)) return setup;
+      // The dashboard also shows an unused built-in model. An external model can be ready while that download is still pending.
+      const current = readCanarySmokeSettings(Math.max(1, Math.min(5_000, Math.floor(deadline - performance.now()))))?.models?.local?.current;
+      return { ...setup, ready: !!current && !current.startsWith('builtin:') };
+    } catch { return undefined; }
+  }, { now: () => performance.now(), sleep });
+  const model = describeCanaryPrivateModel(readCanarySmokeSettings(15_000), canaryPrivateRoute());
+  if (wait.problem) emit({ ok: false, detail: wait.problem, modelWaitMs: wait.ms, privateModel: model });
+
+  const sample = () => {
+    const result = spawnSync('/bin/sh', ['-c', process.platform === 'darwin' ? MAC_MACHINE_SAMPLE : LINUX_MACHINE_SAMPLE], { encoding: 'utf8', timeout: 10_000 });
+    return result.stdout?.trim() || 'unavailable';
+  };
+  const before = sample();
+  let receipt: Record<string, unknown>;
+  try {
+    receipt = await smokeQuestions(SUITE_QUESTIONS, {
+      enginePort: Number(new URL(WORKER_ORIGIN).port),
+      relay: PRODUCTION_RELAY,
+      stateFile: join(WORKDIR, 'canary-smoke-client.json'),
+      panelCapMs: 300_000,
+      requireOwnerCookie: true,
+      privateFacts: Object.fromEntries(SUITE_QUESTIONS.map(question => [question.id, question.privateFacts])),
+    });
+  } catch (error) {
+    receipt = { ok: false, detail: error instanceof Error ? error.message : String(error) };
+  }
+  emit({ ...receipt, modelWaitMs: wait.ms, privateModel: model, sampleBefore: before, sampleAfter: sample() });
 }
 
 // ---------------------------------------------------------------------------
@@ -2928,6 +3000,7 @@ async function main(): Promise<void> {
     case 'mcp-tools': return await mcpTools();
     case 'mcp-call': return await mcpCall(rest[0] ?? '', rest[1] ?? '{}');
     case 'mcp-rpc': return await mcpRpcRelay(flag('--input'));
+    case 'canary-smoke': return await canarySmoke();
     case 'smoke': return await smoke(flag('--questions'));
     case 'helper-files': return emit({ ok: true, whatsappBridges: installedWhatsAppBridges() });
     case 'dashboard-json': {
@@ -3038,7 +3111,7 @@ async function main(): Promise<void> {
     case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
     case 'upgrade-selftest': return await upgradeSelftest(flag('--mode'));
     default:
-      console.error('usage: agent <prepare-source|connect-source|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|explore|archive-import|archive-drain|archive-remove|archive-model|archive-changed|archive-cleanup|archive-collect|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|cutover-watch|cutover-report|upgrade-selftest>');
+      console.error('usage: agent <prepare-source|connect-source|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|canary-smoke|dashboard-json|screenshots|inbox-check|journeys|explore|archive-import|archive-drain|archive-remove|archive-model|archive-changed|archive-cleanup|archive-collect|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|cutover-watch|cutover-report|upgrade-selftest>');
       process.exit(2);
   }
 }

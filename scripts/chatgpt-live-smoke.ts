@@ -84,9 +84,11 @@ export interface SmokeOptions {
    * also needs this owner proof (#1186).
    */
   ownerCookie?: string;
-  /** A longer wait than the panel's own cap, for a test machine slower than any owner's (the Mac VM, plan 21 Nov 2026). */
+  /** Override the usual panel wait when measuring the private answer on release-check machines. */
   panelCapMs?: number;
 }
+
+export const PRODUCTION_RELAY = 'https://mcp.olympusplugin.ai';
 
 export function parseSmokeArgs(argv: readonly string[], home = homedir()): SmokeOptions {
   const options: SmokeOptions = {
@@ -94,7 +96,7 @@ export function parseSmokeArgs(argv: readonly string[], home = homedir()): Smoke
     quiet: false,
     expectPrivate: false,
     dashboard: true,
-    relay: 'https://mcp.olympusplugin.ai',
+    relay: PRODUCTION_RELAY,
     engine: 'http://127.0.0.1:8010',
     origin: desktopSandboxOrigin(),
     stateFile: join(home, '.olympus', 'live-smoke-client.json'),

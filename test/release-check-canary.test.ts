@@ -7,6 +7,9 @@ import {
   canaryVerdict, isDashboard, macCloseCommand, isSystemPrompt, openedWindows, parseCanaryAccounts, parseWindows, pinnedVersion, renderCanaryHtml, renewals, runCanary,
   SITE_INSTALLER, type CanaryOptions, type CanaryReport,
 } from '../scripts/release-check/canary.ts';
+import { describeCanaryPrivateModel, waitForCanaryModels } from '../scripts/release-check/canary-smoke.ts';
+import { PRIVATE_MARKER, SUITE_QUESTIONS } from '../scripts/release-check/fixture.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
 
 interface FakeWindow { id: string; app: string; title: string }
@@ -275,6 +278,114 @@ describe('release-check canary', () => {
     expect(() => parseCanaryAccounts({ sources: [{ id: 'Gmail!', label: 'Gmail' }] }, () => questions)).toThrow('each source needs an id');
     const chatgptOnly = { questions: [{ ...questions.questions[0], clients: ['chatgpt'] }] };
     expect(() => parseCanaryAccounts({ clients: ['chatgpt', 'grok'], questions: 'q.json' }, () => chatgptOnly)).toThrow('no question applies to grok');
+  });
+
+  test.each([
+    ['test-mac', 'macos', 0],
+    ['test-omarchy', 'linux', 1],
+  ] as const)('%s accounts canary runs the installed-engine smoke and reports the shared verdicts', async (handle, os, exit) => {
+    const { machine } = fakeDesktop(os);
+    machine.handle = handle;
+    const uploads: string[] = [];
+    machine.put = async (_from, to) => { uploads.push(to); };
+    const exec = machine.exec;
+    machine.exec = async (script, opts) => {
+      if (!script.includes('canary-smoke')) return exec(script, opts);
+      expect(script).toContain('~/rc/agent.js canary-smoke');
+      expect(opts?.timeoutMs).toBeGreaterThan(30 * 60_000);
+      const stdout = JSON.stringify({
+        ok: true, exit, smokeChecks: exit ? [`FAIL: unexpected ${PRIVATE_MARKER}`] : [],
+        modelWaitMs: 312_000, privateModel: 'delphi/source-answer (local-openai-compatible via delphi.local; mode local-only)',
+        sampleBefore: 'load 0.7; browser', sampleAfter: 'load 1.1; bun',
+        results: SUITE_QUESTIONS.map(q => ({
+          id: q.id, text: q.facts.join(' '),
+          evidence: q.citedTitle ? [{ title: q.citedTitle }] : [],
+          noteKind: q.kind === 'private' ? 'private-note' : null,
+          privateAnswer: q.kind === 'private' ? { factsStated: [true, exit === 0] } : null,
+          panel: q.kind === 'private' ? { totalMs: 121_000 } : null,
+        })),
+      });
+      return { code: 0, stdout, stderr: '', timedOut: false, ms: 500_000 };
+    };
+    const accounts = { sources: [], clients: [], questions: [] };
+    const result = await runCanary(machine, options(os, { accounts, accountsOnly: true, bridgeAgent: '/bundle/agent.js' }));
+    expect(uploads).toEqual(['~/rc/agent.js']);
+    const status = exit === 0 ? 'pass' : 'fail';
+    expect(statusOf(result.checks)).toMatchObject({
+      'protocol.smoke': status, 'private-medical.local-private-answer': status, 'personal-fact.cited': 'pass', 'file-fact.cited': 'pass',
+    });
+    for (const id of ['protocol.smoke', 'private-medical.local-private-answer']) {
+      const check = result.checks.find(row => row.id === id)!;
+      expect(check.detail).toContain('312.0 s');
+      expect(check.detail).toContain('delphi.local');
+      expect(check.detail).toContain('Machine before smoke: load 0.7; browser');
+      expect(check.detail).toContain('Machine after smoke: load 1.1; bun');
+      expect(check.detail).not.toContain(PRIVATE_MARKER);
+    }
+    expect(result.checks.find(row => row.id === 'private-medical.local-private-answer')?.ms).toBe(121_000);
+  });
+
+  test('the smoke only runs for an accounts check on a dedicated machine', async () => {
+    const accounts = { sources: [], clients: [], questions: [] };
+    const { machine } = fakeDesktop('linux');
+    const only = options('linux', { accountsOnly: true, bridgeAgent: '/bundle/agent.js' });
+    expect((await runCanary(machine, { ...only, accounts })).checks).toEqual([]);
+    machine.handle = 'test-omarchy';
+    expect((await runCanary(machine, only)).checks).toEqual([]);
+  });
+
+  test('a model wait failure becomes a protocol failure with the wait time', async () => {
+    const { machine } = fakeDesktop('macos');
+    machine.handle = 'test-mac';
+    machine.exec = async script => ({
+      code: 0, stderr: '', timedOut: false, ms: 1,
+      stdout: script.includes('canary-smoke') ? JSON.stringify({ ok: false, detail: 'Private models made no progress for 5 minutes', modelWaitMs: 300_000 }) : '',
+    });
+    const result = await runCanary(machine, options('macos', {
+      accountsOnly: true, accounts: { sources: [], clients: [], questions: [] }, bridgeAgent: '/bundle/agent.js',
+    }));
+    expect(statusOf(result.checks)).toEqual({ 'protocol.ran': 'fail' });
+    expect(result.checks[0]?.detail).toContain('no progress for 5 minutes');
+    expect(result.checks[0]?.detail).toContain('300.0 s');
+  });
+
+  test.each([
+    { readyAt: 9, stallsAt: 20, minutes: 9, problem: undefined },
+    { readyAt: 20, stallsAt: 4, minutes: 9, problem: 'no progress for 5 minutes' },
+    { readyAt: 35, stallsAt: 40, minutes: 30, problem: 'not ready within 30 minutes' },
+  ])('private model wait at $minutes minutes', async ({ readyAt, stallsAt, minutes, problem }) => {
+    const clock = createTestClock(0);
+    const wait = waitForCanaryModels(async () => {
+      const minute = Math.floor(clock.now() / 60_000);
+      return { ready: minute >= readyAt, private_model: { state: 'downloading', bytesDone: Math.min(minute, stallsAt) * 1024 } };
+    }, clock);
+    await clock.advance(minutes * 60_000);
+    const result = await wait;
+    expect(result.ms).toBe(minutes * 60_000);
+    if (problem) expect(result.problem).toContain(problem);
+    else expect(result.problem).toBeUndefined();
+  });
+
+  test('a restarted download gets its full window while bytes are moving', async () => {
+    const clock = createTestClock(0);
+    const wait = waitForCanaryModels(async () => {
+      const minute = Math.floor(clock.now() / 60_000);
+      return { ready: minute >= 10, private_model: { state: 'downloading', bytesDone: minute < 4 ? 1000 + minute : minute - 4 } };
+    }, clock);
+    await clock.advance(10 * 60_000);
+    expect(await wait).toEqual({ ms: 600_000 });
+  });
+
+  test('the model and route diagnostic leaves endpoint credentials on the machine', () => {
+    const settings = { private_answer_mode: { id: 'local-only' }, models: { local: { current: 'delphi/source-answer' } } };
+    const local = { id: 'local-source-answer', profile: {
+      provider: 'local-openai-compatible' as const, trust: 'local' as const,
+      baseUrl: 'https://user:password@delphi.local:8090/v1?api_key=secret',
+      model: 'delphi/source-answer', secretRef: 'env:SECRET',
+    } };
+    expect(describeCanaryPrivateModel(settings, local)).toBe('delphi/source-answer (local-openai-compatible via delphi.local:8090; mode local-only)');
+    expect(describeCanaryPrivateModel({ ...settings, models: { local: { current: 'builtin:standard' } } }, local))
+      .toBe('builtin:standard (built into Olympus; mode local-only)');
   });
 
   test('accounts only: the run\'s connection is made, the sources are asked over MCP, and the connection is revoked', async () => {

@@ -85,7 +85,8 @@ import {
   describeDifferences, evaluateCounts, evaluateUpgrade, versionFromTarballName,
   type DashboardCounts, type Difference, type StateSnapshot,
 } from './upgrade.ts';
-import { evaluateArtifactScan, evaluateObservation, evaluateSmokeVerdict, type QuestionObservation } from './suite.ts';
+import { protocolChecks } from './protocol.ts';
+import { evaluateArtifactScan, evaluateObservation, type QuestionObservation } from './suite.ts';
 import { AgentApiError, readAgentKey, runXaiAgent, type AgentSpec, type ToolBridge, type ToolDefinition } from './agents.ts';
 import { codexLoginAvailable, looksLikeClaudeSetupToken, runClaudeCode, runCodex } from './cli-agents.ts';
 import { cachingRelay, startMcpProxy, type McpExchange, type Relay } from './mcp-proxy.ts';
@@ -216,7 +217,7 @@ export interface RunOptions {
 
 const ENGINE_PORT = 8010;
 // The runtime the installer put on the machine: its own location on macOS, the engine's generation folder on Linux.
-const BUN_LOCATE = 'BUN=$(command -v bun 2>/dev/null || ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun "$HOME/Library/Application Support/Olympus/runtime/bun" 2>/dev/null | tail -1); [ -n "$BUN" ] || { echo "no bun runtime on the machine" >&2; exit 90; }';
+export const BUN_LOCATE = 'BUN=$(command -v bun 2>/dev/null || ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun "$HOME/Library/Application Support/Olympus/runtime/bun" 2>/dev/null | tail -1); [ -n "$BUN" ] || { echo "no bun runtime on the machine" >&2; exit 90; }';
 
 const nowIso = (): string => new Date().toISOString();
 
@@ -991,21 +992,14 @@ async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBri
   }
 }
 
-/** A short, plaintext-free reason for a missing private answer: the panel state and, if a job ran, its status. */
-function panelWhy(row: Record<string, any>): string {
-  const state = row.panelState ?? 'no panel';
-  const panel = row.panel as { ok?: boolean; status?: string; detail?: string; polls?: number } | null;
-  const tries = (row.attempts as Array<{ panelState: string | null; noteKind: string | null; atS: number }> | undefined) ?? [];
-  const history = tries.length > 0 ? `; ${tries.length} attempt(s): ${tries.map((a) => `${a.panelState ?? 'no panel'}/${a.noteKind ?? 'no note'}@${a.atS}s`).join(', ')}` : '';
-  return (panel && panel.ok === false ? `panel ${state}, job ${panel.status ?? 'unknown'}: ${panel.detail ?? ''}`.trim() : `panel state ${state}`) + history;
-}
-
 async function runProtocolAgent(run: Run, workDir: string): Promise<void> {
   const relay = run.options.config.relay;
-  if (run.options.skipRelay || !relay) {
+  // The Delphi Mac VM competes with its host for the model. The accounts canaries own its timing-sensitive smoke.
+  const macVm = run.machine!.os === 'macos';
+  if (run.options.skipRelay || !relay || macVm) {
     run.agents.push({
       id: 'chatgpt-protocol', label: 'ChatGPT protocol (production relay)', kind: 'protocol', ran: false,
-      skipReason: run.options.skipRelay ? 'skipped by option' : 'no relay configured for this run', checks: run.checkList(),
+      skipReason: run.options.skipRelay ? 'skipped by option' : macVm ? 'run on the dedicated test machines by the accounts canary' : 'no relay configured for this run', checks: run.checkList(),
     });
     return;
   }
@@ -1016,35 +1010,12 @@ async function runProtocolAgent(run: Run, workDir: string): Promise<void> {
   await run.phase('agent-chatgpt-protocol', async () => {
     // Up to 30 min waiting for the private models after an update, then each Private question up to the machine's panel cap.
     const out = await run.agent('smoke', '--questions ~/rc/questions.json', 3_600_000);
-    const results = (out.result?.results ?? []) as Array<Record<string, any>>;
-    if (out.result?.ok !== true || results.length === 0) {
-      agent.checks.push({ id: 'protocol.ran', title: 'The ChatGPT-protocol pass ran', status: 'fail', detail: `no results (exit ${out.code}; smoke exit ${out.result?.exit ?? 'n/a'}): ${(out.result?.detail ?? (((out.result?.smokeChecks ?? []) as string[]).join('; ') || out.stderr.slice(-200)))}` });
-      return;
+    const checks = protocolChecks(out, out.result, run.markers);
+    if (checks[0]?.id === 'protocol.smoke') {
+      run.add({ id: 'relay.reachable', title: 'The machine is reachable through the production relay', status: 'pass', detail: `ChatGPT-protocol grant minted; ${(out.result!.tools as string[]).length} tool(s) listed` });
+      if (typeof out.result!.modelWaitMs === 'number') run.log(`agent chatgpt-protocol: private models ready after ${Math.round(out.result!.modelWaitMs / 1000)} s of waiting`);
     }
-    run.add({ id: 'relay.reachable', title: 'The machine is reachable through the production relay', status: 'pass', detail: `ChatGPT-protocol grant minted; ${(out.result.tools as string[]).length} tool(s) listed` });
-    if (typeof out.result.modelWaitMs === 'number') run.log(`agent chatgpt-protocol: private models ready after ${Math.round(out.result.modelWaitMs / 1000)} s of waiting`);
-    // The smoke's own verdict stands: its private-content and panel checks are stronger than anything re-derived here.
-    agent.checks.push(evaluateSmokeVerdict(out.result.exit, (out.result.smokeChecks ?? []) as string[], run.markers));
-    for (const question of SUITE_QUESTIONS) {
-      const row = results.find((r) => r.id === question.id);
-      if (!row) {
-        agent.checks.push({ id: `${question.id}.ran`, title: `${question.id}: the agent answered`, status: 'fail', detail: 'no result for this question' });
-        continue;
-      }
-      const observation: QuestionObservation = {
-        question,
-        visible: [{ label: `chatgpt-protocol tool result (${question.id})`, text: String(row.text ?? '') }],
-        answerText: String(row.text ?? ''),
-        evidenceTitles: (row.evidence as Array<{ title: string }>).map((e) => e.title),
-        privateNote: row.noteKind !== null && row.noteKind !== undefined,
-        ms: Number(row.searchMs ?? 0),
-        ...(row.isError ? { error: 'the tool returned an error' } : {}),
-        ...(question.kind === 'private'
-          ? { localPrivate: { present: row.privateAnswer !== null, factsStated: (row.privateAnswer?.factsStated ?? []) as boolean[], ms: row.panel?.totalMs, why: panelWhy(row), note: Array.isArray(row.attempts) && row.attempts.length > 1 ? `answer model started on attempt ${row.attempts.length} (${row.attempts[row.attempts.length - 1].atS} s after the first)` : '' } }
-          : {}),
-      };
-      agent.checks.push(...evaluateObservation(observation, run.markers));
-    }
+    agent.checks.push(...checks);
   });
   for (const check of agent.checks) run.log(`agent chatgpt-protocol ${check.status.toUpperCase()} ${check.id}${check.detail ? ` - ${check.detail}` : ''}`);
   run.agents.push(agent);
