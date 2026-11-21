@@ -229,7 +229,8 @@ const defaultPlant = (argv: readonly string[], env: Record<string, string>): { c
 export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOptions): Promise<CheckResult[]> {
   const checks: CheckResult[] = liveChecks(publishFailedCheck);
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
-  const pollMs = options.pollMs ?? 30_000;
+  // A real-use gap between searches (owner, 21 Nov 2026): an answer takes the private model ahead of the judge it waits for.
+  const pollMs = options.pollMs ?? 60_000;
   const runPlant = options.runPlant ?? defaultPlant;
   let started = Date.now();
   const status = await engine.call('source_index_status', {});

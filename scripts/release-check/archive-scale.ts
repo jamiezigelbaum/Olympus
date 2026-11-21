@@ -22,6 +22,8 @@ export const SCALE_REMOVE_S = 900;
 export const SCALE_RESPONSIVE_MS = 10_000;
 /** Status and search are asked every this many 2 s ticks, so the probes stay light beside the import. */
 const SCALE_PROBE_EVERY = 5;
+/** A search about once a minute (every 30 two-second ticks): real use asks a small fraction of the time, so the probe must not starve the judge. */
+const SCALE_SEARCH_EVERY = 30;
 
 export interface ReadwiseScaleSnapshot {
   items: number;
@@ -107,10 +109,8 @@ async function measured<T>(host: ScaleHost, obs: ScaleObservation, work: () => P
       const at = host.now();
       try { const rss = host.engineRss(); if (rss !== null) peak = Math.max(peak ?? 0, rss); } catch { /* measurement unavailable */ }
       if (!await timed(latencies, () => host.frontStatus())) failures++;
-      if (tick % SCALE_PROBE_EVERY === 0) {
-        if (!await timed(status, () => host.sourceStatus())) statusFailures++;
-        if (!await timed(search, async () => { const r = await host.search(`scale import ${tick}`); return r.ok && !r.isError; })) searchFailures++;
-      }
+      if (tick % SCALE_PROBE_EVERY === 0 && !await timed(status, () => host.sourceStatus())) statusFailures++;
+      if (tick % SCALE_SEARCH_EVERY === 0 && !await timed(search, async () => { const r = await host.search(`scale import ${tick}`); return r.ok && !r.isError; })) searchFailures++;
       if (active) await host.sleep(Math.max(1, 2_000 - (host.now() - at)));
     }
   })();

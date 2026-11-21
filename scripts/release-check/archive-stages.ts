@@ -303,7 +303,7 @@ export async function besideLiveStage(host: ArchiveHost, args: { format: string;
       // the leg's own drain bound for this machine, as the agent path's import does before its search. No source keeps its
       // records Private wholesale: each record is judged by its content, so an ordinary one is cited.
       const cited = { ...fx, expect: { ...fx.expect, citationLabel: fx.beside!.citationLabel } };
-      obs.search = await searchWhenJudged(host, cited, (args.drainS ?? drainBoundS(host.os)) * 1_000);
+      obs.search = await searchWhenJudged(host, cited, (args.drainS ?? drainBoundS(host.os)) * 1_000, () => host.readSourceStores!(beside.seedHook, fx.token));
       obs.stores = host.readSourceStores!(beside.seedHook, fx.token);
       // The history goes only with the source: the owner unpairs it (the engine refuses to delete a paired source's data), then
       // its Delete, then nothing of the archive in its stores or on the page.
@@ -389,12 +389,22 @@ async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView>
 }
 
 /** How long a search right after the drain may wait while the engine says it is still checking items. */
-const AFTER_DRAIN_CHECKING_BOUND_MS = 120_000;
+const AFTER_DRAIN_CHECKING_BOUND_MS = 180_000;
+
+/**
+ * The gap between two searches while a leg waits for judging. Olympus answers a small fraction of the time in real use and an
+ * answer takes the private model ahead of the judge (owner, 21 Nov 2026), so a leg that asked every few seconds starved the
+ * judge it was waiting for. A wait reads counts (status, the source's stores) and asks again only after this gap.
+ */
+export const SEARCH_GAP_MS = 60_000;
+
+/** How often a wait for judging reads the source's stores: a file count, no question to the engine. */
+const JUDGED_POLL_MS = 10_000;
 
 /**
  * The search once an archive has drained (nothing waits for the private model): its items can
  * still be on their way out of Private (a judged item's queued move), and the engine then says
- * it is still checking (#1054). Asked again every ten seconds while it says so, within a bound;
+ * it is still checking (#1054). Asked again a minute later while it says so, within a bound;
  * an empty result that does not say so is judged at once.
  */
 export async function searchAfterDrain(host: ArchiveHost, fx: LegFixture): Promise<SearchView> {
@@ -403,26 +413,42 @@ export async function searchAfterDrain(host: ArchiveHost, fx: LegFixture): Promi
     const search = await searchFor(host, fx);
     const cited = search.ok && search.evidence.some((item) => item.source === fx.expect.citationLabel && item.hasToken);
     if (cited || !search.stillChecking || host.now() - started >= AFTER_DRAIN_CHECKING_BOUND_MS) return search;
-    host.say('search: the engine is still checking items for privacy; asking again in 10 s');
-    await host.sleep(10_000);
+    host.say(`search: the engine is still checking items for privacy; asking again in ${SEARCH_GAP_MS / 1000} s`);
+    await host.sleep(SEARCH_GAP_MS);
   }
+}
+
+/** Whether the source's stores show the archive's word judged out of Private: in Personal or Public, and no longer in Private. */
+export function judgedOutOfPrivate(stores: StoreView[]): boolean {
+  const ok = stores.filter((store) => !store.error);
+  return ok.some((store) => store.tier !== 'private' && store.tokenRows > 0) && ok.every((store) => store.tier !== 'private' || store.tokenRows === 0);
 }
 
 /**
  * The search for an import inside a source's card, once what it imported has been judged: the source's import is not in the
- * agent's archive status (its records are the source's), so the wait is on the search itself, asked again every ten seconds until it
- * is cited with the archive's word or the bound runs out; the last answer is what the check judges.
+ * agent's archive status (its records are the source's), so the wait reads the source's own stores until the archive's word has
+ * left Private, then asks; an answer not yet cited is asked again only after a real-use gap, until the bound runs out. The last
+ * answer is what the check judges. Without a store reader the search itself is the wait, at the same gap.
  */
-export async function searchWhenJudged(host: ArchiveHost, fx: LegFixture, boundMs: number): Promise<SearchView> {
+export async function searchWhenJudged(host: ArchiveHost, fx: LegFixture, boundMs: number, stores?: () => StoreView[]): Promise<SearchView> {
   const started = host.now();
+  const left = () => boundMs - (host.now() - started);
+  if (stores) {
+    let judged = judgedOutOfPrivate(stores());
+    while (!judged && left() > 0) {
+      await host.sleep(Math.min(JUDGED_POLL_MS, Math.max(1, left())));
+      judged = judgedOutOfPrivate(stores());
+    }
+    host.say(`search beside live: the stores show it ${judged ? 'judged' : 'NOT judged'} after ${Math.round((host.now() - started) / 1000)} s`);
+  }
   for (;;) {
     const search = await searchFor(host, fx);
     const cited = search.ok && search.evidence.some((item) => item.source === fx.expect.citationLabel && item.hasToken);
-    if (cited || host.now() - started >= boundMs) {
+    if (cited || left() <= 0) {
       host.say(`search beside live: ${cited ? 'cited' : 'NOT cited'} after ${Math.round((host.now() - started) / 1000)} s`);
       return search;
     }
-    await host.sleep(10_000);
+    await host.sleep(Math.min(SEARCH_GAP_MS, Math.max(1, left())));
   }
 }
 

@@ -219,8 +219,34 @@ describe('the search beside a live input waits for the private model', () => {
   test('a search never cited within the bound is the one judged, and fails', async () => {
     const world = host(Number.POSITIVE_INFINITY);
     const search = await searchWhenJudged(world.host, { ...fx, expect: { ...fx.expect, citationLabel: 'Fixture' } }, 60_000);
-    expect(world.calls()).toBe(7);
+    // A minute apart, never every few seconds: an answer takes the private model ahead of the judge it waits for.
+    expect(world.calls()).toBe(2);
     expect(world.lines.at(-1)).toContain('NOT cited');
+    expect(failing(good({ search }))).toEqual(['archive.beside.fixture_chat.search']);
+  });
+
+  test('with the source\'s stores to read, nothing is asked until the word has left Private', async () => {
+    const world = host(1);
+    let reads = 0;
+    const stores = (): StoreView[] => {
+      reads += 1;
+      const judged = reads >= 30;
+      return [
+        { tier: 'private', exists: true, live: 2, tokenRows: judged ? 0 : 2 },
+        { tier: 'personal', exists: true, live: 2, tokenRows: judged ? 2 : 0 },
+      ];
+    };
+    const search = await searchWhenJudged(world.host, { ...fx, expect: { ...fx.expect, citationLabel: 'Fixture' } }, 900_000, stores);
+    expect(reads).toBe(30);
+    expect(world.calls()).toBe(1);
+    expect(search.evidence.some((item) => item.hasToken)).toBe(true);
+  });
+
+  test('stores never judged within the bound still get one search, and it is what fails', async () => {
+    const world = host(Number.POSITIVE_INFINITY);
+    const stores = (): StoreView[] => [{ tier: 'private', exists: true, live: 2, tokenRows: 2 }];
+    const search = await searchWhenJudged(world.host, { ...fx, expect: { ...fx.expect, citationLabel: 'Fixture' } }, 60_000, stores);
+    expect(world.calls()).toBe(1);
     expect(failing(good({ search }))).toEqual(['archive.beside.fixture_chat.search']);
   });
 });
@@ -264,7 +290,8 @@ describe('the search after an archive drains waits only while the engine says it
   test('still checking past the bound fails, and the detail says what the engine said', async () => {
     const world = host(Number.POSITIVE_INFINITY, true);
     const search = await searchAfterDrain(world.host, cite);
-    expect(world.calls()).toBe(13);
+    // A minute apart (real use asks a small fraction of the time): 0, 60, 120 and 180 s.
+    expect(world.calls()).toBe(4);
     const detail = besideLiveChecks(good({ search }), fx).find((check) => check.id === 'archive.beside.fixture_chat.search')?.detail;
     expect(detail).toContain('still being checked for privacy');
   });
