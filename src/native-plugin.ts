@@ -726,3 +726,8 @@ export function sourceWatchRouteFromToolContext(
 }
 
 export default plugin;
+
+// Programmatic G0 diagnostics; the plugin does not invoke these on a request.
+export { compareAdmissionScopes } from './workers/engine/runtime/admission-shadow.ts';
+export { corpusAdmissions, sourceAdmissionDefinitions } from './core/source-admission-definitions.ts';
+export { admitsSearchName } from './core/admission.ts';
