@@ -18138,6 +18138,9 @@ function tierSetPlannerForLedger(ledgerPath) {
 var TIER_LEDGER_SCHEMA_VERSION = 19;
 var RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided";
 var RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source";
+var LEGACY_PROTECTED_ROWS = "routed = 0 AND (metadata_tier IN ('secure', 'secrets') OR content_tier IN ('secure', 'secrets'))";
+var LEGACY_PROTECTED_INDEX = "tier_items_legacy_protected";
+var LEGACY_PROTECTED_KEYS = "provider, account_scope, conversation_key, provider_item_id";
 var LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held";
 var LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged";
 var LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2";
@@ -18359,8 +18362,8 @@ function listMovingRead(options) {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
-      ${options.legacyHoldsOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
-        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)
+      ${options.recordedOnly ? "AND (target_metadata_tier = 'secure' OR target_content_tier = 'secure') AND content_pending = 0 AND metadata_pending = 0" : ""}
+      ${options.legacyHoldsOnly || options.recordedOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
         AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
           AND c.account_scope = tier_items.account_scope AND c.conversation_key = tier_items.conversation_key
           AND c.provider_item_id = tier_items.provider_item_id AND c.trust_domain = 'internal' AND c.layers <> 'metadata'
@@ -19038,6 +19041,58 @@ class TierLedger {
   }
   movingDirectionClause(direction) {
     return tierMovingDirectionClause(direction);
+  }
+  legacyProtectedIndexReady = false;
+  async prepareLegacyProtectedIndex() {
+    if (this.legacyProtectedIndexReady)
+      return;
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(LEGACY_PROTECTED_INDEX)) {
+      assertWritableStoreOpenAllowed("legacy placement index", this.dbPath);
+      const sql = `CREATE INDEX IF NOT EXISTS ${LEGACY_PROTECTED_INDEX} ON tier_items (${LEGACY_PROTECTED_KEYS}) WHERE ${LEGACY_PROTECTED_ROWS}`;
+      if (this.dbPath === ":memory:")
+        this.db.exec(sql);
+      else {
+        const source = `import { Database } from 'bun:sqlite';
+          self.onmessage = ({ data: path }) => {
+            const db = new Database(path, { readwrite: true, create: false });
+            try {
+              // A busy writer gets this turn. The next scheduled pass retries.
+              db.exec('PRAGMA busy_timeout = 0;');
+              db.exec(${JSON.stringify(sql)});
+            } finally { db.close(); }
+            postMessage(true);
+          };`;
+        const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+        try {
+          const worker = new Worker(url);
+          try {
+            await new Promise((resolve, reject) => {
+              worker.onmessage = () => resolve();
+              worker.onerror = (event) => {
+                event.preventDefault();
+                reject(new Error(event.message));
+              };
+              worker.postMessage(this.dbPath);
+            });
+          } finally {
+            worker.terminate();
+          }
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      }
+    }
+    this.legacyProtectedIndexReady = true;
+  }
+  *legacyProtectedRowsSteps(after, limit) {
+    const rows = yield {
+      sql: `SELECT ${LEGACY_PROTECTED_KEYS} FROM tier_items INDEXED BY ${LEGACY_PROTECTED_INDEX}
+        WHERE ${LEGACY_PROTECTED_ROWS} AND (${LEGACY_PROTECTED_KEYS}) > (?, ?, ?, ?)
+        ORDER BY ${LEGACY_PROTECTED_KEYS} LIMIT ?`,
+      params: [...after ? idParams(after) : ["", "", "", ""], limit],
+      mode: "all"
+    };
+    return rows.map(identityFromRow);
   }
   listMoving(options = {}) {
     const read = listMovingRead(options);
@@ -19934,7 +19989,7 @@ class TierLedger {
         }
       }
       const key = legacyPersonalBodyKey(identity);
-      if (result.raise && this.readMeta(key) === undefined) {
+      if (digest !== undefined && result.raise && this.readMeta(key) === undefined) {
         const order = this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_HELD);
         this.writeMeta(key, JSON.stringify({ digest, order }));
       }
@@ -25121,10 +25176,34 @@ function childLane(scope) {
   const stores = scope.stores;
   return stores ? { ledger: () => scope.ledger, stores } : undefined;
 }
+function* releaseStates(ledger, identities) {
+  return yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, identities));
+}
+function releaseVerdict(input, state = { copies: [] }) {
+  const { record, copies, override, hidingIntent } = state;
+  if (hidingIntent === "secret")
+    return { tier: "secret", gone: false };
+  const pendingDeletion = hidingIntent === "deletion";
+  if (!record)
+    return { tier: "legacy", gone: pendingDeletion, ...pendingDeletion ? { pendingDeletion: true } : {} };
+  const namesOnly = input.layer === "names";
+  const tiers = namesOnly ? [record.metadataTier, record.targetMetadataTier] : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+  if (override?.kind === "tier")
+    tiers.push(override.tier);
+  const privateTier = tiers.includes("secure");
+  const held = namesOnly ? itemNamesHeldForJudgment(record, copies, input.corpusId) : record.metadataPending || contentHeldForJudgment(record);
+  return {
+    tier: tiers.includes("secrets") ? "secret" : held || privateTier ? "private" : "public_or_personal",
+    gone: pendingDeletion || record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata")),
+    ...!namesOnly && !record.routed && record.contentRead && privateTier ? { unroutedPrivate: true } : {},
+    ...pendingDeletion ? { pendingDeletion: true } : {}
+  };
+}
 function* effectiveItemVerdicts(scopes, inputs) {
   const verdicts = inputs.map(() => ({ tier: "legacy", gone: false }));
   if (inputs.length === 0)
     return verdicts;
+  const unchanged = [];
   for (const scope of scopes()) {
     const governed = [];
     inputs.forEach((input, index) => {
@@ -25146,33 +25225,37 @@ function* effectiveItemVerdicts(scopes, inputs) {
     });
     if (governed.length === 0)
       continue;
-    const identities = governed.map(({ identity }) => identity);
-    const states = yield* visibilityRead(() => memoVisibilityItemsHere(scope.ledger, "states", () => scope.ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => scope.ledger.itemStatesForMany(missing)), () => itemStatesOffThread(scope.ledger, identities));
-    for (const { index, identity } of governed) {
+    const states = yield* releaseStates(scope.ledger, governed.map(({ identity }) => identity));
+    const unrouted = new Map;
+    for (const entry of governed) {
+      const { index, identity } = entry;
+      const input = inputs[index];
       const state = states.get(tierLedgerIdentityKey(identity));
-      if (!state)
+      const verdict = releaseVerdict(input, state);
+      verdicts[index] = verdict;
+      if (state?.record?.routed || verdict.gone || verdict.tier === "secret")
         continue;
-      const { record, copies, override, hidingIntent } = state;
-      if (hidingIntent === "secret") {
-        verdicts[index] = { tier: "secret", gone: false };
+      const entries = unrouted.get(input.corpusId);
+      if (entries)
+        entries.push(entry);
+      else
+        unrouted.set(input.corpusId, [entry]);
+    }
+    const previousFor = scope.preRoutingLedger ?? ((corpusId) => scope.stores?.().find((store) => store.corpusId === corpusId)?.preRoutingReadLedgerFor?.(scope.ledger));
+    for (const [corpusId, entries] of unrouted) {
+      const previous = previousFor(corpusId);
+      const marker = previous?.changeMarker();
+      unchanged.push(() => previousFor(corpusId) === previous && previous?.changeMarker() === marker);
+      if (!previous)
         continue;
+      const historical = yield* releaseStates(previous, entries.map(({ identity }) => identity));
+      for (const { index, identity } of entries) {
+        const prior = releaseVerdict(inputs[index], historical.get(tierLedgerIdentityKey(identity)));
+        if (prior.tier === "secret" || prior.gone)
+          verdicts[index] = prior;
+        else if (prior.tier === "private")
+          verdicts[index] = inputs[index].layer === "names" ? prior : { ...prior, unroutedPrivate: true };
       }
-      const pendingDeletion = hidingIntent === "deletion";
-      if (!record) {
-        if (pendingDeletion)
-          verdicts[index] = { tier: "legacy", gone: true, pendingDeletion: true };
-        continue;
-      }
-      const namesOnly = inputs[index].layer === "names";
-      const tiers = namesOnly ? [record.metadataTier, record.targetMetadataTier] : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
-      if (override?.kind === "tier")
-        tiers.push(override.tier);
-      const held = namesOnly ? itemNamesHeldForJudgment(record, copies, inputs[index].corpusId) : record.metadataPending || contentHeldForJudgment(record);
-      verdicts[index] = {
-        tier: tiers.includes("secrets") ? "secret" : held || tiers.includes("secure") ? "private" : "public_or_personal",
-        gone: pendingDeletion || record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata")),
-        ...pendingDeletion ? { pendingDeletion: true } : {}
-      };
     }
     const lane = childLane(scope);
     if (lane) {
@@ -25192,6 +25275,8 @@ function* effectiveItemVerdicts(scopes, inputs) {
       }
     }
   }
+  if (unchanged.some((check) => !check()))
+    throw new VisibilityChangedError;
   return verdicts;
 }
 
@@ -26653,6 +26738,7 @@ class LocalConnectorStore {
   tierLedgerOwned;
   tierLedgerDisabled;
   preRoutingLedger;
+  preRoutingReadLedger;
   boundLedgerHandle;
   embeddingQueueState;
   embeddingFailureState;
@@ -26968,6 +27054,7 @@ class LocalConnectorStore {
       if (this.tierLedgerOwned === true)
         this.tierLedgerHandle?.close();
       this.preRoutingLedger?.close();
+      this.preRoutingReadLedger?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
     } finally {
@@ -27092,11 +27179,18 @@ class LocalConnectorStore {
     return this.visibilityLedger();
   }
   effectiveItemTiers(identities, layer) {
+    return this.effectiveStoreVerdicts(identities, layer).map((verdict) => verdict.tier);
+  }
+  effectiveStoreVerdicts(identities, layer) {
     try {
       const ledger = this.governingTierLedger();
-      return visibilityHere(effectiveItemVerdicts(() => ledger ? [{ ledger, corpusIds: new Set([this.corpusId]) }] : [], identities.map((identity) => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...layer ? { layer } : {} })))).map((verdict) => verdict.gone && verdict.tier !== "secret" ? "private" : verdict.tier);
+      return visibilityHere(effectiveItemVerdicts(() => ledger ? [{
+        ledger,
+        corpusIds: new Set([this.corpusId]),
+        preRoutingLedger: () => this.preRoutingReadLedgerFor(ledger)
+      }] : [], identities.map((identity) => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...layer ? { layer } : {} })))).map((verdict) => verdict.gone && verdict.tier !== "secret" ? { ...verdict, tier: "private" } : verdict);
     } catch {
-      return identities.map(() => "private");
+      return identities.map(() => ({ tier: "private", gone: true }));
     }
   }
   effectiveLocalItemTier(localItemId) {
@@ -27120,6 +27214,14 @@ class LocalConnectorStore {
     if (!this.preRoutingLedger && existsSync22(path))
       this.preRoutingLedger = new TierLedger({ dbPath: path });
     return this.preRoutingLedger;
+  }
+  preRoutingReadLedgerFor(setLedger) {
+    if (this.trustDomain !== "internal")
+      return;
+    const path = tierLedgerPathForStore(this.dbPath);
+    if (path === ":memory:" || path === setLedger.dbPath || !existsSync22(path))
+      return;
+    return this.preRoutingReadLedger ??= new TierLedger({ dbPath: path, readOnly: true, allowWalLessRead: true });
   }
   tierLedger() {
     if (this.tierLedgerDisabled === true)
@@ -29559,6 +29661,23 @@ ${parentKey(ref)}`, { ref, origin });
       params: after ? [after.date, pageSize - sameDate.length] : [pageSize]
     } : [];
     const rows = [...sameDate, ...older];
+    return yield* this.readPersonalBodyRows(rows, after, pageSize, chunkLimit);
+  }
+  personalBodyForIdentityFinder(identity, chunkLimit) {
+    const steps = () => this.personalBodyForIdentitySteps(identity, chunkLimit);
+    return { here: () => this.readHere(steps()), offThread: () => this.readStepsInBackground(steps()) };
+  }
+  *personalBodyForIdentitySteps(identity, chunkLimit) {
+    const rows = yield {
+      sql: `SELECT item_pk, 0 AS source_date, family, provider, account_scope, provider_item_id,
+          provider_conversation_id, local_item_id, mime_type, content_hash FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`,
+      params: [identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId],
+      mode: "all"
+    };
+    return yield* this.readPersonalBodyRows(rows, undefined, 1, chunkLimit);
+  }
+  *readPersonalBodyRows(rows, after, pageSize, chunkLimit) {
     const items = [];
     let next = after;
     let remaining = Math.max(1, Math.min(PERSONAL_BODY_CHUNKS_PER_PAGE, Math.floor(chunkLimit)));
@@ -33736,7 +33855,7 @@ ${parentKey(ref)}`, { ref, origin });
     const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held.filter((pk) => !eligibleHeld?.has(pk)), ...tierExcluded.metadataLayer];
     return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
   }
-  embeddingBatchRecheck(batch, embeddableTiers, allowHeld, scope) {
+  embeddingBatchRecheck(batch, embeddableTiers, cloud, allowHeld, scope) {
     const itemPks = [...new Set(batch.map((row) => row.item_pk))];
     const currentRows = this.db.query(`
       SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items i
@@ -33744,21 +33863,22 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(JSON.stringify(itemPks), ...scope.params);
     const current = new Map(currentRows.map((row) => [row.item_pk, row]));
     const hidden = this.embeddingHiddenAmong(currentRows, allowHeld);
-    const verdicts = this.effectiveItemTiers(currentRows.map((item) => ({
+    const verdicts = this.effectiveStoreVerdicts(currentRows.map((item) => ({
       provider: item.provider,
       accountScope: item.account_scope,
       providerItemId: item.provider_item_id,
       ...item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}
     })));
-    const tiers = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]]));
+    const verdictByPk = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]]));
     const kept = [];
     let privateTier = 0;
     let notVisible = 0;
     for (const row of batch) {
       const item = current.get(row.item_pk);
-      if (!item || item.tombstoned !== 0 || item.trust_tier === "S5" || tiers.get(row.item_pk) === "secret" || hidden.has(row.item_pk)) {
+      const verdict = verdictByPk.get(row.item_pk);
+      if (!item || item.tombstoned !== 0 || item.trust_tier === "S5" || verdict?.tier === "secret" || hidden.has(row.item_pk)) {
         notVisible += 1;
-      } else if (embeddableTiers !== undefined && (!embeddableTiers.includes(item.trust_tier) || tiers.get(row.item_pk) === "private" || tiers.get(row.item_pk) === "unknown")) {
+      } else if (cloud && (verdict?.gone || verdict?.unroutedPrivate) || embeddableTiers !== undefined && (!embeddableTiers.includes(item.trust_tier) || verdict?.tier === "private" || verdict?.tier === "unknown")) {
         privateTier += 1;
       } else {
         kept.push(row);
@@ -34034,7 +34154,7 @@ ${parentKey(ref)}`, { ref, origin });
         }
       }
       {
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === "cloud", allowHeld(), dispatchScope);
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
@@ -34095,7 +34215,7 @@ ${parentKey(ref)}`, { ref, origin });
         batch = batch.filter((row) => !failedRows.has(row));
         if (batch.length === 0)
           continue;
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === "cloud", allowHeld(), dispatchScope);
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
@@ -34117,7 +34237,7 @@ ${parentKey(ref)}`, { ref, origin });
       const writtenItemPks = options.onBatchWritten ? [] : undefined;
       this.db.transaction(() => {
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
-        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope).kept);
+        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === "cloud", allowHeld(), dispatchScope).kept);
         for (let index = 0;index < batch.length; index += 1) {
           const row = batch[index];
           if (!stillEligible.has(row))

@@ -5,18 +5,26 @@
 // 2026-10-12, reproduced exactly this with a paused content read.
 
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
+import { defaultConfig } from '../src/core/config.ts';
 import type { OperationContext } from '../src/core/operations.ts';
+import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
+import { forbidWritableStoreOpens, resetStoreWriteGuardForTests } from '../src/core/store-write-guard.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import type { ReleaseCheck } from '../src/core/release-manifest.ts';
-import type { TierSniffer } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, contentDigestReason, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
-import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
-import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
+import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
+import { createAnalystSourceIndexAnswerHandler, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { CORPORA, FIXTURE_PLACEMENT, RecordingProvider, fixtureConnector, identityOf, openLegStore, openTierFixture, storePaths, tempDir } from './helpers/tier-fixtures.ts';
 import { JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 
@@ -28,7 +36,7 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()!();
 });
 
-async function gardenLane(sniffer: TierSniffer = JUDGED_PERSONAL_SNIFFER) {
+async function gardenLane(sniffer: TierSniffer = JUDGED_PERSONAL_SNIFFER, legacy?: 'set' | 'sidecar') {
   // These short fixtures already have whole-item judgments. No new window
   // record or model call is needed to exercise the later tier-change race.
   registerInstalledTierClassification({ forLedger: () => ({ sniffer, releaseJudge: {
@@ -37,12 +45,41 @@ async function gardenLane(sniffer: TierSniffer = JUDGED_PERSONAL_SNIFFER) {
     resolve: async () => { throw new Error('short items need no new calls'); },
   } }) });
   const { dir, cleanup } = tempDir();
+  const connector = fixtureConnector(() => [{ id: 'garden', name: 'garden-notes.txt', text: SENTENCE }]);
+  if (legacy) {
+    const store = openLegStore(storePaths(dir), 'internal', null);
+    try {
+      await store.syncFromConnector(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    } finally { store.close(); }
+  }
   const fixture = openTierFixture(dir, { embed: false });
   cleanups.push(() => {
     fixture.close();
     cleanup();
   });
-  await fixture.set.sync(fixtureConnector(() => [{ id: 'garden', name: 'garden-notes.txt', text: SENTENCE }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  if (legacy) {
+    const identity = identityOf('garden');
+    const item = { signals: { title: 'garden-notes.txt' }, text: SENTENCE };
+    const personal = classifyItemTiers(item, { sniffer });
+    const privateDecision = classifyItemTiers(item, { sniffer: {
+      id: sniffer.id,
+      judge: () => ({ verdict: 'decided', tier: 'secure', code: 'private:0.99', origin: 'model' }),
+    } });
+    expect(privateDecision).toMatchObject({ decidedBy: 'sniffer', contentTier: 'secure' });
+    expect(privateDecision.reasons).toContain(contentDigestReason(SENTENCE));
+    const stored = { trustDomain: 'internal' as const, trustTier: 'S3' as const };
+    fixture.ledger.recordDecision(identity, legacy === 'set' ? privateDecision : personal, stored);
+    if (legacy === 'sidecar') {
+      const previous = new TierLedger({ dbPath: tierLedgerPathForStore(fixture.paths.internal) });
+      try { previous.recordDecision(identity, privateDecision, stored); }
+      finally { previous.close(); }
+    }
+    expect(fixture.ledger.getCurrent(identity)?.routed).toBe(false);
+    expect(fixture.ledger.copies(identity)).toEqual([]);
+    expect(fixture.stores.internal!.searchItems('violet turnips', 10)).toHaveLength(1);
+  } else {
+    await fixture.set.sync(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  }
   // Every content read waits here until the test lets it go.
   let pause: Promise<void> | undefined;
   let reading: (() => void) | undefined;
@@ -70,7 +107,9 @@ async function gardenLane(sniffer: TierSniffer = JUDGED_PERSONAL_SNIFFER) {
       visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }]),
     };
   };
-  const releaseCheck = createReleaseTierCheck(() => [{ ledger: fixture.ledger, corpusIds: new Set(Object.values(CORPORA)) }], () => 'allow');
+  const releaseCheck = createReleaseTierCheck(() => [{
+    ledger: fixture.ledger, corpusIds: new Set(Object.values(CORPORA)), stores: () => fixture.set.openStores(),
+  }], () => 'allow');
   const hold = () => {
     let release!: () => void;
     pause = new Promise<void>((resolve) => { release = resolve; });
@@ -78,6 +117,107 @@ async function gardenLane(sniffer: TierSniffer = JUDGED_PERSONAL_SNIFFER) {
   };
   return { fixture, lanes, releaseCheck, hold, readStarted };
 }
+
+async function legacyRemoteLane(legacy: 'set' | 'sidecar') {
+  const lane = await gardenLane(JUDGED_PERSONAL_SNIFFER, legacy);
+  let modelCalls = 0;
+  const analyst = { async analyze() {
+    modelCalls++;
+    return { answer: SENTENCE, citations: [], unanswered: [] };
+  } };
+  const sourceAnswer = createAnalystSourceIndexAnswerHandler({
+    lanes: lane.lanes, releaseCheck: lane.releaseCheck, analyst, cloudAnalyst: analyst, veniceAnalyst: () => analyst,
+  });
+  const worker = createEmailSourceWorker({ sourceAnswer, sourceAnswerReleaseCheck: lane.releaseCheck });
+  const store = openRemoteConnectionStore(join(lane.fixture.dir, 'remote-connections.sqlite'));
+  cleanups.push(() => { store.close(); worker.close(); });
+  const { token } = store.create('Remote test');
+  const context = (caller: NonNullable<OperationContext['caller']>, signal?: AbortSignal) => ({
+    ...createInProcessOperationContext({
+      config: defaultConfig(), sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller,
+      ...(signal ? { signal } : {}),
+    }),
+    releaseCheck: lane.releaseCheck,
+  });
+  const evidenceSearch = (input: { question: string }) => searchReleasedEvidence({
+    lanes: lane.lanes, question: input.question, releaseCheck: lane.releaseCheck,
+  });
+  const app = { evidenceSearch, dashboardView: async () => { throw new Error('unused'); },
+    privateMatchProbe: async () => ({ count: 0, evidence: [] }) };
+  const handler = createRemoteMcpHandler({
+    connections: () => store, makeOperationContext: context, search: { evidenceSearch }, log: () => {},
+  });
+  const question = 'violet turnips garden';
+  const remoteTool = async (name: string, args: Record<string, unknown>) => {
+    const response = await handler(new Request('http://worker.test/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { question, ...args } } }),
+    }));
+    expect(response.status).toBe(200);
+    const wire = await response.text();
+    expect(wire).toContain('"result"');
+    return wire;
+  };
+  forbidWritableStoreOpens();
+  cleanups.push(resetStoreWriteGuardForTests);
+  expect(await lane.releaseCheck.inputsOffThread!([{
+    ...identityOf('garden'), corpusId: CORPORA.internal, privateAtAnswer: false,
+  }])).toEqual([{ tier: 'private', gone: false, unroutedPrivate: true }]);
+  const ctx = context({ surface: 'remote', connectionId: 'test' });
+  const apps = [app, { ...app, appClient: { host: 'claude', connectorUrl: 'https://test.invalid/mcp' } }] as const;
+  const workerAnswer = (analyst_provider: 'cloud' | 'venice') => worker.fetch(new Request('http://worker.test/v1/source/answer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, analyst_provider, include_secure_local: false }),
+  }));
+  return { remoteTool, workerAnswer, question, ctx, apps, modelCalls: () => modelCalls };
+}
+
+test.each(['set', 'sidecar'] as const)('remote search withholds an unrouted Private body (%s ledger)', async legacy => {
+  const { remoteTool, question, ctx, apps } = await legacyRemoteLane(legacy);
+  expect(await remoteTool('olympus_search', {})).not.toContain(SENTENCE);
+  for (const options of apps) {
+    const search = await callChatGptTool('olympus_search', { question }, ctx, options);
+    expect(search.structuredContent?.evidence).toEqual([]);
+    expect(JSON.stringify(search)).not.toContain(SENTENCE);
+  }
+});
+
+test.each(['set', 'sidecar'] as const)('remote answer withholds an unrouted Private body (%s ledger)', async legacy => {
+  const { remoteTool, question, ctx, apps, modelCalls } = await legacyRemoteLane(legacy);
+  const remoteAnswer = await remoteTool('source_answer', {});
+  expect(remoteAnswer).toContain('source_index_policy_violation');
+  expect(remoteAnswer).not.toContain(SENTENCE);
+  for (const options of apps) {
+    const answer = await callChatGptTool('source_answer', { question }, ctx, options);
+    expect(answer.isError).toBe(true);
+    expect(JSON.stringify(answer)).not.toContain(SENTENCE);
+  }
+  expect(modelCalls()).toBe(0);
+});
+
+test.each([
+  ['set', 'cloud'], ['set', 'venice'], ['sidecar', 'cloud'], ['sidecar', 'venice'],
+] as const)('%s ledger withholds an unrouted Private body from the %s analyst', async (legacy, analyst_provider) => {
+  const { workerAnswer, modelCalls } = await legacyRemoteLane(legacy);
+  const response = await workerAnswer(analyst_provider);
+  const body = await response.text();
+  expect(body).toContain('source_index_policy_violation');
+  expect(body).not.toContain(SENTENCE);
+  expect(modelCalls()).toBe(0);
+});
+
+test.each([
+  ['set', 'google-gemini'], ['set', 'venice'], ['sidecar', 'google-gemini'], ['sidecar', 'venice'],
+] as const)('cloud embedding withholds an unrouted Private body (%s ledger, %s)', async (legacy, name) => {
+  const lane = await gardenLane(JUDGED_PERSONAL_SNIFFER, legacy);
+  const provider = new RecordingProvider(name, 'embedding-fixture', 'cloud');
+  const result = await lane.fixture.stores.internal!.embedChunks({ provider });
+  expect(result.chunksSeen).toBe(1);
+  expect(result.chunksEmbedded).toBe(0);
+  expect(provider.inputs).toEqual([]);
+});
 
 describe('remote search: tiers reread before release', () => {
   test('a Personal item is released when nothing changed', async () => {

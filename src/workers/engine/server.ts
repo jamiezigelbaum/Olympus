@@ -6899,6 +6899,17 @@ export async function main(): Promise<void> {
   let lastSecondRoundLog = '';
   const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
   const withSecondRound = (model: SnifferModel): SnifferModel => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed, localDecisionBar) : model;
+  const tierMoveOptions = {
+    ...automaticMoveContext,
+    onPlacementChecked: (paths: ReadonlySet<string>) => { void overPrivate?.refresh(paths); },
+    // A sweep may have visited the destination while the item was held
+    // or moving. Wake its source once the new copy is visible.
+    onEmbeddingNeeded: (corpora: ReadonlySet<string>) => {
+      const sourceIds = new Set(sourceCorpusRegistry.list()
+        .filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
+      sourceScheduler?.wakeTasksOfKind('embed', undefined, sourceIds);
+    },
+  };
   // The front judges nothing: the background is the only judge.
   const tierSniffer = !engineFront && snifferLane && snifferModel
     ? new TierSnifferService({
@@ -6955,19 +6966,17 @@ export async function main(): Promise<void> {
         // for the sniffer by default, and a Personal verdict's queued move
         // runs at once while every embedding is the built-in local model.
         ...(snifferRuntime.source === 'built_in' ? { autoApproveBuiltIn: true } : {}),
-        autoMoves: {
-          ...automaticMoveContext,
-          onPlacementChecked: (paths) => { void overPrivate?.refresh(paths); },
-          // A sweep may have visited the destination while the item was held
-          // or moving. Wake its source once the new copy is visible.
-          onEmbeddingNeeded: (corpora) => {
-            const sourceIds = new Set(sourceCorpusRegistry.list()
-              .filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
-            sourceScheduler?.wakeTasksOfKind('embed', undefined, sourceIds);
-          },
-        },
+        autoMoves: tierMoveOptions,
       })
     : undefined;
+  const tierWork = engineFront ? undefined : tierSniffer ?? new TierSnifferService({
+    installed: installedTierClassification,
+    stores: () => connectorStores,
+    classificationLedgerPath: resolveClassificationLedgerPath(process.env),
+    intervalMs: snifferEnv.intervalMs,
+    autoMoves: tierMoveOptions,
+    log: (line) => console.log(line),
+  });
   if (tierSniffer && snifferResource) {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
@@ -7051,12 +7060,12 @@ export async function main(): Promise<void> {
     if (overPrivate) tierOverPrivate = () => overPrivate.status();
     archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   }
-  tierSniffer?.start();
+  tierWork?.start();
   // The split's background: its private command socket, then the status
   // snapshot, then ready. The front waits for ready before it serves.
   const currentMemoryActivity = () => engineRole === 'front'
     ? memoryActivity(false, false, engineFront?.backgroundActivity() ?? 'idle')
-    : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
+    : memoryActivity(tierWork?.passRunning ?? false, statusRecount?.health().counting ?? false);
   const memoryDiagnostic = createMemoryDiagnostic({
     role: engineRole, activity: currentMemoryActivity, readers: readPoolMemoryCounts,
     workerPayloads: modelWorkerMemoryPayloads,
@@ -7223,7 +7232,7 @@ export async function main(): Promise<void> {
     const rssRestart = startEngineRssRestart({
       memory: memoryDiagnostic,
       thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,
-      batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
+      batchRunning: () => (tierWork?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
       restart: () => requestModelReload(),
       record: () => status.publish(),
       previous: engineRssRestartsFrom(readEngineStatusSnapshot(engineStatusSnapshotPath(process.env))),
@@ -7368,7 +7377,7 @@ export async function main(): Promise<void> {
     stopSupersededSweep();
     stopCpuSampleLog?.();
     stopCreditRecovery();
-    tierSniffer?.stop();
+    tierWork?.stop();
     localPacer.stop();
     archiveImportDashboard.close();
     installedTierClassification.close({ checkpoint: true });

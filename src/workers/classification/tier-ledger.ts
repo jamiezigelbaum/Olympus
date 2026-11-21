@@ -65,6 +65,10 @@ export interface LegacyPersonalBodyProgress {
   waiting?: number;
 }
 
+const LEGACY_PROTECTED_ROWS = "routed = 0 AND (metadata_tier IN ('secure', 'secrets') OR content_tier IN ('secure', 'secrets'))";
+const LEGACY_PROTECTED_INDEX = 'tier_items_legacy_protected';
+const LEGACY_PROTECTED_KEYS = 'provider, account_scope, conversation_key, provider_item_id';
+
 const LEGACY_PERSONAL_BODIES_HELD = 'legacy-personal-bodies:held';
 const LEGACY_PERSONAL_BODIES_JUDGED = 'legacy-personal-bodies:judged';
 export const LEGACY_PERSONAL_BODIES_CURSOR = 'legacy_personal_bodies_cursor_v2';
@@ -229,7 +233,7 @@ function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead
 
 type HidingIntent = 'deletion' | 'secret';
 
-interface TierLedgerItemState {
+export interface TierLedgerItemState {
   record?: TierLedgerRecord;
   copies: TierCopy[];
   override?: ItemTierOverride;
@@ -468,7 +472,12 @@ function* windowSteps(
   return lastEnd ? { records, resumeAfter: identityOfRow(lastEnd) } : { records };
 }
 
-interface MovingPageOptions { limit?: number; direction?: 'raise' | 'lower'; legacyHoldsOnly?: boolean }
+interface MovingPageOptions {
+  limit?: number;
+  direction?: 'raise' | 'lower';
+  legacyHoldsOnly?: boolean;
+  recordedOnly?: boolean;
+}
 
 function listMovingRead(options: MovingPageOptions): LedgerRead {
   const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
@@ -476,8 +485,8 @@ function listMovingRead(options: MovingPageOptions): LedgerRead {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
-      ${options.legacyHoldsOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
-        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)
+      ${options.recordedOnly ? "AND (target_metadata_tier = 'secure' OR target_content_tier = 'secure') AND content_pending = 0 AND metadata_pending = 0" : ''}
+      ${options.legacyHoldsOnly || options.recordedOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
         AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
           AND c.account_scope = tier_items.account_scope AND c.conversation_key = tier_items.conversation_key
           AND c.provider_item_id = tier_items.provider_item_id AND c.trust_domain = 'internal' AND c.layers <> 'metadata'
@@ -1540,6 +1549,52 @@ export class TierLedger {
     return tierMovingDirectionClause(direction);
   }
 
+
+  // This optional partial index is built on the first background pass. Opening
+  // a ledger on the front or at startup must never initiate a table scan.
+  private legacyProtectedIndexReady = false;
+  async prepareLegacyProtectedIndex(): Promise<void> {
+    if (this.legacyProtectedIndexReady) return;
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(LEGACY_PROTECTED_INDEX)) {
+      assertWritableStoreOpenAllowed('legacy placement index', this.dbPath);
+      const sql = `CREATE INDEX IF NOT EXISTS ${LEGACY_PROTECTED_INDEX} ON tier_items (${LEGACY_PROTECTED_KEYS}) WHERE ${LEGACY_PROTECTED_ROWS}`;
+      if (this.dbPath === ':memory:') this.db.exec(sql);
+      else {
+        const source = `import { Database } from 'bun:sqlite';
+          self.onmessage = ({ data: path }) => {
+            const db = new Database(path, { readwrite: true, create: false });
+            try {
+              // A busy writer gets this turn. The next scheduled pass retries.
+              db.exec('PRAGMA busy_timeout = 0;');
+              db.exec(${JSON.stringify(sql)});
+            } finally { db.close(); }
+            postMessage(true);
+          };`;
+        const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+        try {
+          const worker = new Worker(url);
+          try {
+            await new Promise<void>((resolve, reject) => {
+              worker.onmessage = () => resolve();
+              worker.onerror = event => { event.preventDefault(); reject(new Error(event.message)); };
+              worker.postMessage(this.dbPath);
+            });
+          } finally { worker.terminate(); }
+        } finally { URL.revokeObjectURL(url); }
+      }
+    }
+    this.legacyProtectedIndexReady = true;
+  }
+
+  *legacyProtectedRowsSteps(after: TierLedgerIdentity | undefined, limit: number): Generator<LedgerRead, TierLedgerIdentity[], unknown> {
+    const rows = (yield {
+      sql: `SELECT ${LEGACY_PROTECTED_KEYS} FROM tier_items INDEXED BY ${LEGACY_PROTECTED_INDEX}
+        WHERE ${LEGACY_PROTECTED_ROWS} AND (${LEGACY_PROTECTED_KEYS}) > (?, ?, ?, ?)
+        ORDER BY ${LEGACY_PROTECTED_KEYS} LIMIT ?`,
+      params: [...(after ? idParams(after) : ['', '', '', '']), limit], mode: 'all',
+    }) as TierIdentityRow[];
+    return rows.map(identityFromRow);
+  }
 
   /**
    * Items with a queued move (state `moving`): the fewest failed attempts
@@ -2835,9 +2890,9 @@ export class TierLedger {
     this.setMeta(key, value);
   }
 
-  /** Count a newly held body in the same transaction that hides its Personal copy. */
+  /** Hide the physical Personal copy. Only a body awaiting judgment counts as a new hold. */
   recordLegacyPersonalHold(
-    identity: TierLedgerIdentity, decision: TierDecision, plan: TierPlacementPlan, digest: string,
+    identity: TierLedgerIdentity, decision: TierDecision, plan: TierPlacementPlan, digest: string | undefined,
     guard: TierOwnerOverrideGuard, retainedBodyCorpusId?: string,
   ): ReturnType<TierLedger['recordRoutedPlacement']> {
     return this.db.transaction(() => {
@@ -2862,7 +2917,7 @@ export class TierLedger {
         }
       }
       const key = legacyPersonalBodyKey(identity);
-      if (result.raise && this.readMeta(key) === undefined) {
+      if (digest !== undefined && result.raise && this.readMeta(key) === undefined) {
         const order = this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_HELD);
         this.writeMeta(key, JSON.stringify({ digest, order }));
       }

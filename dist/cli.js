@@ -24745,6 +24745,8 @@ function adoptReleaseManifests(into, from) {
   into.manifests.push(...from.manifests);
 }
 function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
+  if (verdict.unroutedPrivate)
+    return false;
   const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
   const authorized = constraints.includeSecureLocalContent || postureNow === "allow";
   if (input.layer === "names")
@@ -24782,7 +24784,7 @@ function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
       if (verdict.tier === "secret")
         return ANSWER_RELEASE_UNVERIFIED;
       const { input, constraints } = entries[index];
-      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
+      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer || verdict.unroutedPrivate))
         return ANSWER_BECAME_PRIVATE;
       if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
         return "Olympus withheld this answer because current settings require approval for Private content.";
@@ -43042,8 +43044,8 @@ function listMovingRead(options) {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
-      ${options.legacyHoldsOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
-        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)
+      ${options.recordedOnly ? "AND (target_metadata_tier = 'secure' OR target_content_tier = 'secure') AND content_pending = 0 AND metadata_pending = 0" : ""}
+      ${options.legacyHoldsOnly || options.recordedOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
         AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
           AND c.account_scope = tier_items.account_scope AND c.conversation_key = tier_items.conversation_key
           AND c.provider_item_id = tier_items.provider_item_id AND c.trust_domain = 'internal' AND c.layers <> 'metadata'
@@ -43591,6 +43593,58 @@ class TierLedger {
   }
   movingDirectionClause(direction) {
     return tierMovingDirectionClause(direction);
+  }
+  legacyProtectedIndexReady = false;
+  async prepareLegacyProtectedIndex() {
+    if (this.legacyProtectedIndexReady)
+      return;
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(LEGACY_PROTECTED_INDEX)) {
+      assertWritableStoreOpenAllowed("legacy placement index", this.dbPath);
+      const sql = `CREATE INDEX IF NOT EXISTS ${LEGACY_PROTECTED_INDEX} ON tier_items (${LEGACY_PROTECTED_KEYS}) WHERE ${LEGACY_PROTECTED_ROWS}`;
+      if (this.dbPath === ":memory:")
+        this.db.exec(sql);
+      else {
+        const source = `import { Database } from 'bun:sqlite';
+          self.onmessage = ({ data: path }) => {
+            const db = new Database(path, { readwrite: true, create: false });
+            try {
+              // A busy writer gets this turn. The next scheduled pass retries.
+              db.exec('PRAGMA busy_timeout = 0;');
+              db.exec(${JSON.stringify(sql)});
+            } finally { db.close(); }
+            postMessage(true);
+          };`;
+        const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+        try {
+          const worker = new Worker(url);
+          try {
+            await new Promise((resolve, reject) => {
+              worker.onmessage = () => resolve();
+              worker.onerror = (event) => {
+                event.preventDefault();
+                reject(new Error(event.message));
+              };
+              worker.postMessage(this.dbPath);
+            });
+          } finally {
+            worker.terminate();
+          }
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      }
+    }
+    this.legacyProtectedIndexReady = true;
+  }
+  *legacyProtectedRowsSteps(after, limit) {
+    const rows = yield {
+      sql: `SELECT ${LEGACY_PROTECTED_KEYS} FROM tier_items INDEXED BY ${LEGACY_PROTECTED_INDEX}
+        WHERE ${LEGACY_PROTECTED_ROWS} AND (${LEGACY_PROTECTED_KEYS}) > (?, ?, ?, ?)
+        ORDER BY ${LEGACY_PROTECTED_KEYS} LIMIT ?`,
+      params: [...after ? idParams(after) : ["", "", "", ""], limit],
+      mode: "all"
+    };
+    return rows.map(identityFromRow);
   }
   listMoving(options = {}) {
     const read = listMovingRead(options);
@@ -44487,7 +44541,7 @@ class TierLedger {
         }
       }
       const key = legacyPersonalBodyKey(identity);
-      if (result.raise && this.readMeta(key) === undefined) {
+      if (digest !== undefined && result.raise && this.readMeta(key) === undefined) {
         const order = this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_HELD);
         this.writeMeta(key, JSON.stringify({ digest, order }));
       }
@@ -47316,7 +47370,7 @@ function overrideFromJson(json) {
     return parsed;
   return;
 }
-var TIER_LEDGER_SCHEMA_VERSION = 19, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2", LEGACY_PERSONAL_BODIES_WAITING = "legacy-personal-bodies:waiting", LEGACY_PERSONAL_BODY_PROGRESS_SQL, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
+var TIER_LEDGER_SCHEMA_VERSION = 19, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", LEGACY_PROTECTED_ROWS = "routed = 0 AND (metadata_tier IN ('secure', 'secrets') OR content_tier IN ('secure', 'secrets'))", LEGACY_PROTECTED_INDEX = "tier_items_legacy_protected", LEGACY_PROTECTED_KEYS = "provider, account_scope, conversation_key, provider_item_id", LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2", LEGACY_PERSONAL_BODIES_WAITING = "legacy-personal-bodies:waiting", LEGACY_PERSONAL_BODY_PROGRESS_SQL, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
@@ -66976,10 +67030,34 @@ function interleaveByCorpus(hits) {
   }
   return ordered;
 }
+function* releaseStates(ledger, identities) {
+  return yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, identities));
+}
+function releaseVerdict(input, state = { copies: [] }) {
+  const { record, copies, override, hidingIntent } = state;
+  if (hidingIntent === "secret")
+    return { tier: "secret", gone: false };
+  const pendingDeletion = hidingIntent === "deletion";
+  if (!record)
+    return { tier: "legacy", gone: pendingDeletion, ...pendingDeletion ? { pendingDeletion: true } : {} };
+  const namesOnly = input.layer === "names";
+  const tiers = namesOnly ? [record.metadataTier, record.targetMetadataTier] : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+  if (override?.kind === "tier")
+    tiers.push(override.tier);
+  const privateTier = tiers.includes("secure");
+  const held = namesOnly ? itemNamesHeldForJudgment(record, copies, input.corpusId) : record.metadataPending || contentHeldForJudgment(record);
+  return {
+    tier: tiers.includes("secrets") ? "secret" : held || privateTier ? "private" : "public_or_personal",
+    gone: pendingDeletion || record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata")),
+    ...!namesOnly && !record.routed && record.contentRead && privateTier ? { unroutedPrivate: true } : {},
+    ...pendingDeletion ? { pendingDeletion: true } : {}
+  };
+}
 function* effectiveItemVerdicts(scopes, inputs) {
   const verdicts = inputs.map(() => ({ tier: "legacy", gone: false }));
   if (inputs.length === 0)
     return verdicts;
+  const unchanged = [];
   for (const scope of scopes()) {
     const governed = [];
     inputs.forEach((input, index) => {
@@ -67001,33 +67079,37 @@ function* effectiveItemVerdicts(scopes, inputs) {
     });
     if (governed.length === 0)
       continue;
-    const identities = governed.map(({ identity }) => identity);
-    const states = yield* visibilityRead(() => memoVisibilityItemsHere(scope.ledger, "states", () => scope.ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => scope.ledger.itemStatesForMany(missing)), () => itemStatesOffThread(scope.ledger, identities));
-    for (const { index, identity } of governed) {
+    const states = yield* releaseStates(scope.ledger, governed.map(({ identity }) => identity));
+    const unrouted = new Map;
+    for (const entry of governed) {
+      const { index, identity } = entry;
+      const input = inputs[index];
       const state = states.get(tierLedgerIdentityKey(identity));
-      if (!state)
+      const verdict = releaseVerdict(input, state);
+      verdicts[index] = verdict;
+      if (state?.record?.routed || verdict.gone || verdict.tier === "secret")
         continue;
-      const { record, copies, override, hidingIntent } = state;
-      if (hidingIntent === "secret") {
-        verdicts[index] = { tier: "secret", gone: false };
+      const entries = unrouted.get(input.corpusId);
+      if (entries)
+        entries.push(entry);
+      else
+        unrouted.set(input.corpusId, [entry]);
+    }
+    const previousFor = scope.preRoutingLedger ?? ((corpusId) => scope.stores?.().find((store) => store.corpusId === corpusId)?.preRoutingReadLedgerFor?.(scope.ledger));
+    for (const [corpusId, entries] of unrouted) {
+      const previous = previousFor(corpusId);
+      const marker = previous?.changeMarker();
+      unchanged.push(() => previousFor(corpusId) === previous && previous?.changeMarker() === marker);
+      if (!previous)
         continue;
+      const historical = yield* releaseStates(previous, entries.map(({ identity }) => identity));
+      for (const { index, identity } of entries) {
+        const prior = releaseVerdict(inputs[index], historical.get(tierLedgerIdentityKey(identity)));
+        if (prior.tier === "secret" || prior.gone)
+          verdicts[index] = prior;
+        else if (prior.tier === "private")
+          verdicts[index] = inputs[index].layer === "names" ? prior : { ...prior, unroutedPrivate: true };
       }
-      const pendingDeletion = hidingIntent === "deletion";
-      if (!record) {
-        if (pendingDeletion)
-          verdicts[index] = { tier: "legacy", gone: true, pendingDeletion: true };
-        continue;
-      }
-      const namesOnly = inputs[index].layer === "names";
-      const tiers = namesOnly ? [record.metadataTier, record.targetMetadataTier] : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
-      if (override?.kind === "tier")
-        tiers.push(override.tier);
-      const held = namesOnly ? itemNamesHeldForJudgment(record, copies, inputs[index].corpusId) : record.metadataPending || contentHeldForJudgment(record);
-      verdicts[index] = {
-        tier: tiers.includes("secrets") ? "secret" : held || tiers.includes("secure") ? "private" : "public_or_personal",
-        gone: pendingDeletion || record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata")),
-        ...pendingDeletion ? { pendingDeletion: true } : {}
-      };
     }
     const lane = childLane(scope);
     if (lane) {
@@ -67047,6 +67129,8 @@ function* effectiveItemVerdicts(scopes, inputs) {
       }
     }
   }
+  if (unchanged.some((check) => !check()))
+    throw new VisibilityChangedError;
   return verdicts;
 }
 function createReleaseTierCheck(scopes, secureDerivativeDefault, chunkOptions = {}, pending) {
@@ -72897,6 +72981,7 @@ var init_local_index = __esm(() => {
     tierLedgerOwned;
     tierLedgerDisabled;
     preRoutingLedger;
+    preRoutingReadLedger;
     boundLedgerHandle;
     embeddingQueueState;
     embeddingFailureState;
@@ -73212,6 +73297,7 @@ var init_local_index = __esm(() => {
         if (this.tierLedgerOwned === true)
           this.tierLedgerHandle?.close();
         this.preRoutingLedger?.close();
+        this.preRoutingReadLedger?.close();
         this.boundLedgerHandle?.close();
         this.boundLedgerHandle = undefined;
       } finally {
@@ -73336,11 +73422,18 @@ var init_local_index = __esm(() => {
       return this.visibilityLedger();
     }
     effectiveItemTiers(identities, layer) {
+      return this.effectiveStoreVerdicts(identities, layer).map((verdict) => verdict.tier);
+    }
+    effectiveStoreVerdicts(identities, layer) {
       try {
         const ledger = this.governingTierLedger();
-        return visibilityHere(effectiveItemVerdicts(() => ledger ? [{ ledger, corpusIds: new Set([this.corpusId]) }] : [], identities.map((identity) => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...layer ? { layer } : {} })))).map((verdict) => verdict.gone && verdict.tier !== "secret" ? "private" : verdict.tier);
+        return visibilityHere(effectiveItemVerdicts(() => ledger ? [{
+          ledger,
+          corpusIds: new Set([this.corpusId]),
+          preRoutingLedger: () => this.preRoutingReadLedgerFor(ledger)
+        }] : [], identities.map((identity) => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...layer ? { layer } : {} })))).map((verdict) => verdict.gone && verdict.tier !== "secret" ? { ...verdict, tier: "private" } : verdict);
       } catch {
-        return identities.map(() => "private");
+        return identities.map(() => ({ tier: "private", gone: true }));
       }
     }
     effectiveLocalItemTier(localItemId) {
@@ -73364,6 +73457,14 @@ var init_local_index = __esm(() => {
       if (!this.preRoutingLedger && existsSync39(path))
         this.preRoutingLedger = new TierLedger({ dbPath: path });
       return this.preRoutingLedger;
+    }
+    preRoutingReadLedgerFor(setLedger) {
+      if (this.trustDomain !== "internal")
+        return;
+      const path = tierLedgerPathForStore(this.dbPath);
+      if (path === ":memory:" || path === setLedger.dbPath || !existsSync39(path))
+        return;
+      return this.preRoutingReadLedger ??= new TierLedger({ dbPath: path, readOnly: true, allowWalLessRead: true });
     }
     tierLedger() {
       if (this.tierLedgerDisabled === true)
@@ -75803,6 +75904,23 @@ ${parentKey(ref)}`, { ref, origin });
         params: after ? [after.date, pageSize - sameDate.length] : [pageSize]
       } : [];
       const rows = [...sameDate, ...older];
+      return yield* this.readPersonalBodyRows(rows, after, pageSize, chunkLimit);
+    }
+    personalBodyForIdentityFinder(identity, chunkLimit) {
+      const steps = () => this.personalBodyForIdentitySteps(identity, chunkLimit);
+      return { here: () => this.readHere(steps()), offThread: () => this.readStepsInBackground(steps()) };
+    }
+    *personalBodyForIdentitySteps(identity, chunkLimit) {
+      const rows = yield {
+        sql: `SELECT item_pk, 0 AS source_date, family, provider, account_scope, provider_item_id,
+          provider_conversation_id, local_item_id, mime_type, content_hash FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`,
+        params: [identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId],
+        mode: "all"
+      };
+      return yield* this.readPersonalBodyRows(rows, undefined, 1, chunkLimit);
+    }
+    *readPersonalBodyRows(rows, after, pageSize, chunkLimit) {
       const items = [];
       let next = after;
       let remaining = Math.max(1, Math.min(PERSONAL_BODY_CHUNKS_PER_PAGE, Math.floor(chunkLimit)));
@@ -79980,7 +80098,7 @@ ${parentKey(ref)}`, { ref, origin });
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held.filter((pk) => !eligibleHeld?.has(pk)), ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
-    embeddingBatchRecheck(batch, embeddableTiers, allowHeld, scope) {
+    embeddingBatchRecheck(batch, embeddableTiers, cloud, allowHeld, scope) {
       const itemPks = [...new Set(batch.map((row) => row.item_pk))];
       const currentRows = this.db.query(`
       SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items i
@@ -79988,21 +80106,22 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(JSON.stringify(itemPks), ...scope.params);
       const current = new Map(currentRows.map((row) => [row.item_pk, row]));
       const hidden = this.embeddingHiddenAmong(currentRows, allowHeld);
-      const verdicts = this.effectiveItemTiers(currentRows.map((item) => ({
+      const verdicts = this.effectiveStoreVerdicts(currentRows.map((item) => ({
         provider: item.provider,
         accountScope: item.account_scope,
         providerItemId: item.provider_item_id,
         ...item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}
       })));
-      const tiers = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]]));
+      const verdictByPk = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]]));
       const kept = [];
       let privateTier = 0;
       let notVisible = 0;
       for (const row of batch) {
         const item = current.get(row.item_pk);
-        if (!item || item.tombstoned !== 0 || item.trust_tier === "S5" || tiers.get(row.item_pk) === "secret" || hidden.has(row.item_pk)) {
+        const verdict = verdictByPk.get(row.item_pk);
+        if (!item || item.tombstoned !== 0 || item.trust_tier === "S5" || verdict?.tier === "secret" || hidden.has(row.item_pk)) {
           notVisible += 1;
-        } else if (embeddableTiers !== undefined && (!embeddableTiers.includes(item.trust_tier) || tiers.get(row.item_pk) === "private" || tiers.get(row.item_pk) === "unknown")) {
+        } else if (cloud && (verdict?.gone || verdict?.unroutedPrivate) || embeddableTiers !== undefined && (!embeddableTiers.includes(item.trust_tier) || verdict?.tier === "private" || verdict?.tier === "unknown")) {
           privateTier += 1;
         } else {
           kept.push(row);
@@ -80278,7 +80397,7 @@ ${parentKey(ref)}`, { ref, origin });
           }
         }
         {
-          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
+          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === "cloud", allowHeld(), dispatchScope);
           privateTierWithheldChunks += recheck.privateTier;
           staleSkipped += recheck.notVisible + recheck.privateTier;
           batch = recheck.kept;
@@ -80339,7 +80458,7 @@ ${parentKey(ref)}`, { ref, origin });
           batch = batch.filter((row) => !failedRows.has(row));
           if (batch.length === 0)
             continue;
-          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
+          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === "cloud", allowHeld(), dispatchScope);
           privateTierWithheldChunks += recheck.privateTier;
           staleSkipped += recheck.notVisible + recheck.privateTier;
           batch = recheck.kept;
@@ -80361,7 +80480,7 @@ ${parentKey(ref)}`, { ref, origin });
         const writtenItemPks = options.onBatchWritten ? [] : undefined;
         this.db.transaction(() => {
           this.assertEmbeddingWriteAuthority(provider, providerEpoch);
-          const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope).kept);
+          const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === "cloud", allowHeld(), dispatchScope).kept);
           for (let index = 0;index < batch.length; index += 1) {
             const row = batch[index];
             if (!stillEligible.has(row))
@@ -152897,17 +153016,62 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   const previousLedger = walk?.previousLedger;
   const movesAvailable = walk?.movesAvailable ?? true;
   const previous = previousLedger?.getCurrent(identity);
+  if (walk?.recordedOnly && current?.routed)
+    return "unchanged";
+  const recorded = mode === "walk" && !current?.routed ? [current, previous].filter((record) => protectedUnroutedReceipt(record)) : [];
+  if (walk?.recordedOnly && !recorded.length)
+    return "unchanged";
+  if (recorded.length && ledger.writeIntent(identity))
+    return "unchanged";
   const readOverride = (source) => movesAvailable ? source.observeOverrideText(identity) : source.getOverride(identity);
   const override = readOverride(ledger);
-  const effectiveOverride = override ?? (!current?.routed && previousLedger ? readOverride(previousLedger) : undefined);
+  const previousOverride = !override && !current?.routed && previousLedger ? readOverride(previousLedger) : undefined;
+  const effectiveOverride = override ?? previousOverride;
+  const authorityUnchanged = () => JSON.stringify(ledger.getCurrent(identity)) === JSON.stringify(current) && JSON.stringify(ledger.getOverride(identity)) === JSON.stringify(override) && (!previousLedger || JSON.stringify(previousLedger.getCurrent(identity)) === JSON.stringify(previous) && (override !== undefined || JSON.stringify(previousLedger.getOverride(identity)) === JSON.stringify(previousOverride)));
   const copies = ledger.copies(identity);
   const copy = copies.find((copy) => copy.corpusId === personal.corpusId && (mode === "walk" || copy.layers !== "metadata"));
-  if (effectiveOverride?.kind !== "not_secret" && (effectiveOverride?.tier === "secrets" || [current, current?.routed ? undefined : previous].some((record) => record && [
-    record.metadataTier,
-    record.contentTier,
-    record.targetMetadataTier,
-    record.targetContentTier
-  ].includes("secrets")))) {
+  const digest = recorded.length ? contentDigestReason(text) : "";
+  const matching = recorded.filter((record) => record.state === "current" && record.contentRead && !record.contentPending && !record.metadataPending && record.decidedBy !== "override" && contentReceiptRefusal(record.reasons, digest) === undefined);
+  const knownSecret = matching.find(secretDecision);
+  const known = knownSecret ?? (recorded.some(secretDecision) ? undefined : matching[0]);
+  const conflictingPhysicalBody = () => set.openStores().some((store) => store.corpusId !== personal.corpusId && differentStoredBody(store, identity, text));
+  const conflictingSecret = knownSecret && conflictingPhysicalBody();
+  if (known && !effectiveOverride && !conflictingSecret) {
+    const decision = {
+      ...known,
+      metadataTier: matching.reduce((tier, record) => maxTier(tier, record.metadataTier), known.metadataTier),
+      contentTier: knownSecret ? "secrets" : matching.reduce((tier, record) => maxTier(tier, record.contentTier), known.contentTier),
+      decidedBy: known.decidedBy,
+      reasons: knownSecret ? known.reasons : [...known.reasons, LEGACY_PERSONAL_BODY_REASON],
+      state: "current",
+      snifferId: "ledger"
+    };
+    if (knownSecret) {
+      const names = personal.exportItemNames(identity);
+      if (!names)
+        return "retry";
+      return settleLegacySecret(set, identity, decision, names, text, override, authorityUnchanged);
+    }
+    const settled = ledger.withMoveBatch(() => {
+      if (!authorityUnchanged())
+        return false;
+      const adopted = set.adoptLegacyItem(identity);
+      if (!adopted)
+        return false;
+      const { outcome } = ledger.recordLegacyPersonalHold(identity, decision, set.placementFor(decision), undefined, { generation: adopted.generation, override });
+      if (outcome !== "queued_move")
+        throw new OperationError("config_error", "A recorded Private body could not be queued.");
+      const sniffer = set.classification()?.sniffer;
+      if (sniffer)
+        ledger.markRejudged(identity, { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: sniffer.id });
+      return true;
+    });
+    if (!settled)
+      return "retry";
+    queue?.deleteItemQuestions(identity);
+    return "settled";
+  }
+  if (effectiveOverride?.kind !== "not_secret" && (effectiveOverride?.tier === "secrets" || [current, current?.routed ? undefined : previous].some((record) => record && !(mode === "walk" && protectedUnroutedReceipt(record)) && (secretDecision(record) || record.targetMetadataTier === "secrets" || record.targetContentTier === "secrets")))) {
     if (!movesAvailable)
       return "waiting";
     const record = set.adoptLegacyItem(identity);
@@ -152945,15 +153109,14 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   const photo = isImageMediaType(item.mimeType) ? personal.imageJudgmentForItem(identity) : undefined;
   const image = photo && imageJudgmentSignal(photo);
   const currentAllowsPersonal = !current || current.state !== "moving" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public");
-  if (currentAllowsPersonal && ownerTier !== "secure" && [current, previous].some((record) => record && exactPersonalReceipt(record, text, effectiveOverride, image)))
+  if (recorded.length === 0 && currentAllowsPersonal && ownerTier !== "secure" && [current, previous].some((record) => record && exactPersonalReceipt(record, text, effectiveOverride, image)))
     return "unchanged";
   if (!movesAvailable)
     return "waiting";
   const conflict = () => ledger.copies(identity).some((other) => {
     if (other.corpusId === personal.corpusId || other.state !== "current" || mode === "restore" && (other.trustDomain !== "secure_local" || other.layers === "metadata"))
       return false;
-    const otherText = set.store(other.trustDomain)?.exportItemCopy(identity)?.chunks.map((chunk) => chunk.boundedText).join("");
-    return !!otherText && otherText !== text;
+    return differentStoredBody(set.store(other.trustDomain), identity, text);
   });
   let record;
   if (mode === "restore") {
@@ -152967,51 +153130,121 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   const scanned = names ? classifyItemTiers({ signals: storedSignals(names), text }, effectiveOverride ? { override: effectiveOverride } : {}) : undefined;
   if (mode === "walk" && !names)
     return "retry";
-  record ??= set.adoptLegacyItem(identity);
-  if (mode === "walk" && names && scanned?.contentTier === "secrets" && !conflict()) {
-    const settled = settleRoutedSecrets(set, identity, { ...scanned, metadataTier: maxTier(record.metadataTier, scanned.metadataTier) }, names, {
-      text,
-      findingKinds: contentSecretFindingKinds(scanned.reasons)
-    }, { guard: { generation: record.generation, override } });
-    return settled ? "secrets" : "retry";
+  const recordedWalk = mode === "walk" && recorded.length > 0;
+  const basis = recordedWalk ? current ?? recorded[0] : record ??= set.adoptLegacyItem(identity);
+  if (mode === "walk" && names && scanned?.contentTier === "secrets") {
+    const decision = { ...scanned, metadataTier: maxTier(basis.metadataTier, scanned.metadataTier) };
+    if (recordedWalk && !conflictingPhysicalBody()) {
+      return settleLegacySecret(set, identity, decision, names, text, override, authorityUnchanged);
+    }
+    if (!recordedWalk && !conflict()) {
+      const settled = settleRoutedSecrets(set, identity, decision, names, {
+        text,
+        findingKinds: contentSecretFindingKinds(decision.reasons)
+      }, { guard: { generation: basis.generation, override } });
+      return settled ? "secrets" : "retry";
+    }
   }
   if (mode === "walk")
     queue?.deleteItemQuestions(identity);
   const floor = ownerTier === "secure" ? "secure" : "public";
   const decision = scanned && ownerOverrideSecretReview(scanned.reasons) ? {
     ...scanned,
-    metadataTier: maxTier(record.metadataTier, scanned.metadataTier)
+    metadataTier: maxTier(basis.metadataTier, scanned.metadataTier)
   } : {
-    metadataTier: heldTier(floor, record.metadataTier, record.targetMetadataTier),
-    contentTier: heldTier(floor, record.contentTier, record.targetContentTier),
+    metadataTier: heldTier(floor, basis.metadataTier, basis.targetMetadataTier),
+    contentTier: heldTier(floor, basis.contentTier, basis.targetContentTier),
     decidedBy: "default",
     reasons: [
-      ...record.reasons.filter((reason) => !reason.startsWith("content:") && !reason.startsWith("override:")),
+      ...basis.reasons.filter((reason) => !reason.startsWith("content:") && !reason.startsWith("override:")),
       HELD_UNTIL_JUDGED_REASON,
       "content:sniffer:undecided:undecided"
     ],
     state: "pending",
     contentRead: true,
-    metadataPending: record.metadataPending,
+    metadataPending: basis.metadataPending,
     contentPending: true,
-    metadataForced: record.metadataForced && record.decidedBy !== "override",
-    metadataFlagged: record.metadataFlagged,
+    metadataForced: basis.metadataForced && basis.decidedBy !== "override",
+    metadataFlagged: basis.metadataFlagged,
     engineVersion: TIER_CLASSIFIER_VERSION,
     mapRevision: TIER_MAP_REVISION,
     snifferId: "undecided"
   };
   const placement = set.placementFor(decision);
   if (mode === "walk") {
-    const digest = contentDigestReason(text);
+    const bodyDigest = digest || contentDigestReason(text);
     decision.reasons.push(LEGACY_PERSONAL_BODY_REASON);
-    if (!decision.reasons.includes(digest))
-      decision.reasons.push(digest);
-    const { outcome } = ledger.recordLegacyPersonalHold(identity, decision, placement, digest, { generation: record.generation, override }, copy?.layers === "metadata" ? personal.corpusId : undefined);
-    return outcome === "queued_move" ? "held" : "retry";
+    if (!decision.reasons.includes(bodyDigest))
+      decision.reasons.push(bodyDigest);
+    const hold = () => {
+      if (recordedWalk && !authorityUnchanged())
+        return "retry";
+      const base = current && !current.routed && protectedUnroutedReceipt(current) && secretDecision(current) ? ledger.recordDecision(identity, decision).record : current;
+      const adopted = record ?? (base?.routed ? base : set.adoptLegacyItem(identity));
+      if (!adopted)
+        return "retry";
+      const { outcome } = ledger.recordLegacyPersonalHold(identity, decision, placement, bodyDigest, { generation: adopted.generation, override }, copy?.layers === "metadata" ? personal.corpusId : undefined);
+      if (recordedWalk && outcome !== "queued_move")
+        throw new OperationError("config_error", "A recorded body could not be held.");
+      return outcome === "queued_move" ? "held" : "retry";
+    };
+    return recordedWalk ? ledger.withMoveBatch(hold) : hold();
   }
   const pending = resuming ? record : ledger.recordRoutedPlacement(identity, decision, placement).record;
   moveRestoredItemToHold({ set, identity, decision, expectedGeneration: pending.generation });
   return "held";
+}
+function settleLegacySecret(set, identity, decision, names, text, override, authorityUnchanged) {
+  const { ledger } = set;
+  const recorded = ledger.withMoveBatch(() => {
+    if (!authorityUnchanged() || ledger.writeIntent(identity))
+      return;
+    const adopted = set.adoptLegacyItem(identity);
+    if (!adopted)
+      return;
+    const placed = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+      guard: { generation: adopted.generation, override }
+    });
+    if (placed.outcome !== "secrets")
+      throw new OperationError("config_error", "A recorded Secret could not be hidden.");
+    const sourceVersion = names.identity.sourceVersion;
+    ledger.putWriteIntent({
+      identity,
+      kind: "secret",
+      connectorId: TIER_MOVE_CONNECTOR_ID,
+      itemFamily: identity.family,
+      ...sourceVersion === undefined ? {} : { version: sourceVersion }
+    });
+    const locations = set.secrets();
+    if (locations)
+      recordSecretLocation(locations, decision, names, { text, findingKinds: contentSecretFindingKinds(decision.reasons) });
+    return placed;
+  });
+  if (!recorded)
+    return "retry";
+  settleSecretsCopies({
+    ledger,
+    identity,
+    copies: recorded.previousCopies,
+    connectorId: TIER_MOVE_CONNECTOR_ID,
+    storeFor: (corpusId) => {
+      const domain = set.domainForCorpus(corpusId);
+      return domain && set.store(domain);
+    }
+  });
+  const sourceVersion = names.identity.sourceVersion;
+  ledger.clearWriteIntent(identity, { kind: "secret", ...sourceVersion === undefined ? {} : { version: sourceVersion } });
+  return "secrets";
+}
+function protectedUnroutedReceipt(record) {
+  return !!record && !record.routed && [record.metadataTier, record.contentTier].some((tier) => tier === "secure" || tier === "secrets") && record.reasons.some((reason) => reason.startsWith("content:sha256:"));
+}
+function secretDecision(record) {
+  return record.contentTier === "secrets" || record.metadataTier === "secrets";
+}
+function differentStoredBody(store, identity, text) {
+  const otherText = store?.exportItemCopy(identity)?.chunks.map((chunk) => chunk.boundedText).join("");
+  return !!otherText && otherText !== text;
 }
 function exactPersonalReceipt(record, text, override, image) {
   return record.state === "current" && !record.metadataPending && (record.contentTier === "private" || record.contentTier === "public") && (record.metadataTier === "private" || record.metadataTier === "public") && (record.decidedBy !== "override" || override?.kind === "tier") && personalContentAuthorized(record, text, override?.kind === "not_secret", override, image);
@@ -249566,12 +249799,25 @@ var init_installed_tier_classification = __esm(() => {
 function settleLegacyPersonalBodiesOffThread(options) {
   return runPassOffThread(walk(options), { family: "legacy-personal-bodies", ...options.turn ? { turn: options.turn } : {} });
 }
-function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE, movesAvailable = () => true }) {
+function settleRecordedPersonalBodiesOffThread(options) {
+  return runPassOffThread(walk(options, true), { family: "legacy-recorded-decisions", ...options.turn ? { turn: options.turn } : {} });
+}
+function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE, movesAvailable = () => true }, recordedOnly = false) {
   const { ledger } = set;
-  const report = { checked: 0, held: 0, secrets: 0, failed: 0, retired: false, waitingForMoves: false };
+  const report = { checked: 0, settled: 0, held: 0, secrets: 0, failed: 0, retired: false, waitingForMoves: false };
+  const personal = set.store("internal");
+  const progress = ledger.readMeta(RECORDED_PROGRESS);
+  if (personal && progress !== "done") {
+    if (set.foreignBoundLeg())
+      return { ...report, failed: 1 };
+    const handled = yield* walkRecorded({ set, queue, limit, chunkLimit, movesAvailable }, personal, progress, report);
+    if (handled)
+      return report;
+  }
+  if (recordedOnly)
+    return { ...report, retired: true };
   if (ledger.readMeta(DONE3) === "1")
     return { ...report, retired: true };
-  const personal = set.store("internal");
   const saved = ledger.readMeta(LEGACY_PERSONAL_BODIES_CURSOR);
   const canMove = movesAvailable();
   const last = saved ? JSON.parse(saved) : undefined;
@@ -249588,40 +249834,13 @@ function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit 
     const previousLedger = page.items.length ? personal.preRoutingLedgerFor(ledger) : undefined;
     const placement = { movesAvailable: canMove, ...previousLedger ? { previousLedger } : {} };
     for (const item of page.items) {
-      yield* turn();
-      report.checked++;
-      if (canMove && secretScanReusable(item.text)) {
-        yield* find({ here: () => {
-          return;
-        }, offThread: () => scanSecretsAhead(item.text) });
-      }
-      if (movesAvailable() !== canMove)
+      const outcome = yield* processBody(set, personal, item, queue, placement, marker, movesAvailable, report);
+      if (outcome === "interrupted")
         return report;
-      const current = item.watch ? personal.personalBodyWatchCurrent(item.watch) : personal.changeMarker() === marker || personal.itemMigrationFingerprint(item.identity, item.chunkCount + 1) === item.fingerprint;
-      if (!current) {
+      if (outcome === "changed")
         dirty = true;
-        continue;
-      }
-      try {
-        if (item.chunkCount === 0) {
-          if (canMove)
-            personal.clearOrphanPersonalVectors(item.identity);
-          else
-            waiting++;
-          continue;
-        }
-        const disposition = placePersonalBody(set, personal, item, queue, "walk", placement);
-        if (disposition === "held")
-          report.held++;
-        if (disposition === "secrets")
-          report.secrets++;
-        if (disposition === "waiting")
-          waiting++;
-        if (disposition === "retry")
-          report.failed++;
-      } catch {
-        report.failed++;
-      }
+      if (outcome === "waiting")
+        waiting++;
     }
     dirty ||= report.held + report.secrets + report.failed > 0;
     if (page.next || page.partial) {
@@ -249642,7 +249861,100 @@ function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit 
   }
   return report;
 }
-var DONE3 = "legacy_personal_bodies_done_v2", LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
+function* walkRecorded(options, personal, saved, report) {
+  const { set, queue, movesAvailable } = options;
+  const { ledger } = set;
+  const previousLedger = personal.preRoutingLedgerFor(ledger);
+  const cursor = saved ? JSON.parse(saved) : {};
+  const limit = Math.max(1, Math.min(options.limit, LEGACY_PERSONAL_BODY_PAGE_SIZE));
+  const canMove = movesAvailable();
+  let remaining = Math.max(1, Math.min(options.chunkLimit, PERSONAL_BODY_CHUNKS_PER_PAGE));
+  let checked = 0;
+  for (const source of cursor.previous ? [previousLedger] : [ledger, previousLedger]) {
+    if (!source)
+      continue;
+    yield* find({ here: () => {
+      return;
+    }, offThread: () => source.prepareLegacyProtectedIndex() });
+    const pageSize = limit - checked;
+    const rows = yield* findInLedger(source, () => source.legacyProtectedRowsSteps(cursor.after, pageSize));
+    for (const identity of rows) {
+      checked++;
+      const marker = personal.changeMarker();
+      const page = yield* find(personal.personalBodyForIdentityFinder(identity, remaining));
+      if (page.partial) {
+        ledger.writeSettleProgress(RECORDED_PROGRESS, JSON.stringify(cursor));
+        return true;
+      }
+      const item = page.items[0];
+      if (!item?.chunkCount)
+        yield* turn();
+      if (item?.chunkCount) {
+        const outcome = yield* processBody(set, personal, item, queue, {
+          ...previousLedger ? { previousLedger } : {},
+          movesAvailable: canMove,
+          recordedOnly: true
+        }, marker, movesAvailable, report);
+        if (outcome === "interrupted")
+          return true;
+        if (outcome === "changed" || outcome === "retry")
+          cursor.retry = true;
+        if (outcome === "waiting") {
+          ledger.writeSettleProgress(DONE3, "");
+        }
+        remaining -= item.chunkCount;
+      }
+      cursor.after = identity;
+      if (remaining <= 0 || checked === limit) {
+        ledger.writeSettleProgress(RECORDED_PROGRESS, JSON.stringify(cursor));
+        return true;
+      }
+    }
+    delete cursor.after;
+    cursor.previous = true;
+  }
+  if (!cursor.retry && ledger.readMeta(DONE3) === "1")
+    personal.finishPersonalBodyWalk();
+  ledger.writeSettleProgress(RECORDED_PROGRESS, cursor.retry ? "" : "done");
+  return checked > 0 || !!cursor.retry;
+}
+function* processBody(set, personal, item, queue, placement, marker, movesAvailable, report) {
+  const canMove = placement.movesAvailable;
+  yield* turn();
+  report.checked++;
+  if ((canMove || placement.recordedOnly) && secretScanReusable(item.text)) {
+    yield* find({ here: () => {
+      return;
+    }, offThread: () => scanSecretsAhead(item.text) });
+  }
+  if (movesAvailable() !== canMove)
+    return "interrupted";
+  const current = item.watch ? personal.personalBodyWatchCurrent(item.watch) : personal.changeMarker() === marker || personal.itemMigrationFingerprint(item.identity, item.chunkCount + 1) === item.fingerprint;
+  if (!current)
+    return "changed";
+  try {
+    if (item.chunkCount === 0) {
+      if (!canMove)
+        return "waiting";
+      personal.clearOrphanPersonalVectors(item.identity);
+      return "unchanged";
+    }
+    const disposition = placePersonalBody(set, personal, item, queue, "walk", placement);
+    if (disposition === "held")
+      report.held++;
+    if (disposition === "secrets")
+      report.secrets++;
+    if (disposition === "settled")
+      report.settled++;
+    if (disposition === "retry")
+      report.failed++;
+    return disposition;
+  } catch {
+    report.failed++;
+    return "retry";
+  }
+}
+var RECORDED_PROGRESS = "legacy_personal_recorded_decisions_v1", DONE3 = "legacy_personal_bodies_done_v2", LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
 var init_legacy_personal_bodies = __esm(() => {
   init_tier_ledger();
   init_engine();
@@ -249822,8 +250134,10 @@ class TierSnifferService {
       ...options.now ? { now: options.now } : {},
       ...options.budgetStatePath ? { statePath: options.budgetStatePath } : {}
     });
+    const { lane, model } = options;
+    if (!lane)
+      return;
     options.installed.setReleaseWindowResolver(async (ledgerPath, request, signal, expected) => {
-      const lane = options.lane;
       if (this.stopped || signal.aborted || options.modelAvailable?.() === false || options.breakerOpen?.() || lane.rejudgeReady === false)
         return { verdict: "undecided" };
       const ownerContext = options.ownerContext?.();
@@ -249838,7 +250152,7 @@ class TierSnifferService {
       return resolveReleaseWindow({
         store: options.installed.snifferStoreForLedger(ledgerPath),
         lane,
-        model: options.model,
+        model,
         request,
         promptVersion: versions.cache,
         ...ownerContext ? { ownerContext } : {},
@@ -250263,8 +250577,8 @@ class TierSnifferService {
   retiredPrefilterCleaned = new Set;
   status() {
     return {
-      lane: this.options.lane.kind,
-      modelId: this.options.lane.modelId,
+      lane: this.options.lane?.kind ?? "off",
+      modelId: this.options.lane?.modelId ?? "",
       callsToday: this.budget.usedToday(),
       ...this.lastTick ? { lastTick: this.lastTick } : {},
       ...this.waiting ? { waiting: { ...this.waiting } } : {},
@@ -250344,7 +250658,7 @@ class TierSnifferService {
     try {
       tick = await this.tick(abort.signal);
       tickReturnedAt = this.monotonicNow();
-      const lowerMoves = await this.drainMoves("lower");
+      const lowerMoves = this.options.lane ? await this.drainMoves("lower") : undefined;
       if (tick.state === "ran" && lowerMoves) {
         tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
       }
@@ -250381,7 +250695,7 @@ class TierSnifferService {
       this.notAnsweringPasses += 1;
       this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
     }
-    if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
+    if (this.options.lane && this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
       if (backlog.checkingItems > 0)
@@ -250391,6 +250705,8 @@ class TierSnifferService {
       this.pacedUntilMs = this.clockMs() + (this.options.pacing?.trickleGapMs ?? 0);
     if (this.stopped)
       this.closeLedgers();
+    else if (this.timer && tick.state === "settling_recorded" && tick.more && !this.yieldNow())
+      this.wake();
     else if (this.timer && tick.state === "ran" && !this.yieldNow() && tick.report.stoppedBy !== "daily_budget" && tick.report.stoppedBy !== "transport_failures" && tick.report.stoppedBy !== "cloud_stopped" && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls || (tick.autoMoves?.moved ?? 0) > 0 || (tick.rejudged?.seen ?? 0) > 0 || tick.report.stoppedBy === "preempted"))
       this.wake();
     const cycleEndedAt = this.monotonicNow();
@@ -250402,7 +250718,7 @@ class TierSnifferService {
     return (this.options.now?.() ?? new Date).getTime();
   }
   trickle() {
-    if (!this.options.pacing || !isBuiltInLane(this.options.lane))
+    if (!this.options.pacing || !this.options.lane || !isBuiltInLane(this.options.lane))
       return false;
     try {
       return this.options.pacing.trickle();
@@ -250741,7 +251057,28 @@ class TierSnifferService {
     return targets;
   }
   async tick(signal) {
-    const { lane } = this.options;
+    const { lane, model } = this.options;
+    if (!lane) {
+      const recorded = await this.settleRecordedDecisions();
+      await this.drainMoves();
+      if (!recorded) {
+        let pendingMove = false;
+        for (const path of this.ledgerPaths()) {
+          const set = tierSetForLedger(path);
+          if (set && (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({
+            limit: 1,
+            direction: "raise",
+            recordedOnly: true
+          }), { lane: "background" })).length) {
+            pendingMove = true;
+            break;
+          }
+        }
+        if (!pendingMove)
+          this.stop();
+      }
+      return { state: "settling_recorded", more: recorded === "more" };
+    }
     const phaseStarted = this.monotonicNow();
     const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
     let phaseAt = phaseStarted;
@@ -250754,11 +251091,17 @@ class TierSnifferService {
       this.passStep = `in the step after "${name}"`;
       setEngineStep(`judge pass, after "${name}"`);
     };
+    await this.applyOwnerOverrides();
+    const recorded = await this.settleRecordedDecisions();
+    if (recorded) {
+      await this.drainMoves();
+      return { state: "settling_recorded", more: recorded === "more" };
+    }
     await this.settleStoredItems();
     phase("settle");
     const targets = this.snifferTargets();
     phase("targets");
-    await this.recoverMissingQuestions(signal);
+    await this.recoverMissingQuestions(signal, lane);
     phase("recover");
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       try {
@@ -250805,10 +251148,10 @@ class TierSnifferService {
       return { state: "awaiting_owner_approval", lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
     }
     phase("approval");
-    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
+    const preparationStopped = await prepareSnifferModel({ model, signal, shouldYield: () => this.yieldNow() });
     phase("prepare");
     if (!preparationStopped)
-      await this.recoverMissingQuestions(signal, true);
+      await this.recoverMissingQuestions(signal, lane, true);
     phase("recover");
     const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge(snifferId(lane, versions.cache));
     phase("rejudge");
@@ -250821,7 +251164,7 @@ class TierSnifferService {
     const report = await runSnifferPass({
       targets,
       lane,
-      model: this.options.model,
+      model,
       promptVersion: versions.cache,
       ...ownerContext ? { ownerContext } : {},
       budget: this.budget,
@@ -250851,7 +251194,7 @@ class TierSnifferService {
       await this.applyOwnerOverrides();
     return { state: "ran", report, ...rejudged.seen > 0 || rejudged.builtinPromptSkipped > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
   }
-  async recoverMissingQuestions(signal, allowReask = false) {
+  async recoverMissingQuestions(signal, lane, allowReask = false) {
     const deadline = this.monotonicNow() + MISSING_QUESTION_RECOVERY_PHASE_MS;
     const cursorKey = allowReask ? "sniffer_missing_question_reask_cursor_v1" : "sniffer_missing_question_cursor_v1";
     const paths = this.ledgerPaths();
@@ -250938,7 +251281,7 @@ class TierSnifferService {
             if (ledger.settleMissingQuestions(row, {
               missingMetadata,
               missingContent: missingContent && !waitingForText && !legacyHold,
-              snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
+              snifferId: snifferId(lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, "metadata")) && (!missingContent || !queue.questionFor(identity, "content")),
               ...planner ? { placementFor: planner } : {}
             }))
@@ -251079,14 +251422,39 @@ class TierSnifferService {
       entry.walks.set(name, walk);
     }
     await runStoredWalk(walk, inputs, readPage, () => this.clockMs());
+    return walk.status;
   }
-  async settleStoredItems() {
-    await this.applyOwnerOverrides();
+  async settleRecordedDecisions() {
+    let pending;
     const paths = new Set(this.ledgerPaths());
     for (const path of this.storedWalks.keys())
       if (!paths.has(path))
         this.storedWalks.delete(path);
-    for (const ledgerPath of paths) {
+    for (const path of paths) {
+      const set = tierSetForLedger(path);
+      if (!set)
+        continue;
+      const status = await this.runStoredWalker(set, "legacyRecordedDecisions", undefined, async () => {
+        const page = await settleRecordedPersonalBodiesOffThread({
+          set,
+          queue: this.options.installed.snifferStoreForLedger(path),
+          movesAvailable: () => !!this.options.autoMoves?.localEmbeddingsOnly() && (this.options.autoMoves.maxPerPass ?? 25) > 0,
+          turn: () => {
+            this.progress();
+            return this.ingestionTurn();
+          }
+        });
+        return { complete: page.retired, retired: page.retired, changed: page.settled + page.secrets + page.held > 0, failed: page.failed > 0 };
+      });
+      if (status.lastResult === "read_failed")
+        pending ??= "retry";
+      else if (status.reason !== "retired")
+        pending = "more";
+    }
+    return pending;
+  }
+  async settleStoredItems() {
+    for (const ledgerPath of this.ledgerPaths()) {
       await this.ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set)
@@ -251282,7 +251650,7 @@ class TierSnifferService {
         continue;
       const builtInOnly = !recoveryOnly && setEmbedsWithBuiltInOnly(set);
       const legacyHoldsOnly = direction === "raise" && !builtInOnly;
-      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly }))).filter(isAutoMoveCandidate);
+      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly, recordedOnly: !this.options.lane }))).filter(isAutoMoveCandidate);
       if (set.openStores().some((store) => store.reclaiming))
         continue;
       if (!builtInOnly && direction === "lower") {
@@ -251316,7 +251684,7 @@ class TierSnifferService {
           this.movesRefusedNow.set(refusedKey, why);
         } else
           this.movesRefusedNow.delete(refusedKey);
-        if (error instanceof TierMoveContentChangedError) {
+        if (error instanceof TierMoveContentChangedError && this.options.lane) {
           if (set.ledger.getCurrent(identity)?.state === "moving") {
             try {
               set.ledger.abandonMove(identity, { expectedGeneration: record.generation });
@@ -283888,6 +284256,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   let lastSecondRoundLog = "";
   const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
   const withSecondRound = (model) => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed, localDecisionBar) : model;
+  const tierMoveOptions = {
+    ...automaticMoveContext,
+    onPlacementChecked: (paths) => {
+      overPrivate?.refresh(paths);
+    },
+    onEmbeddingNeeded: (corpora) => {
+      const sourceIds = new Set(sourceCorpusRegistry.list().filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
+      sourceScheduler?.wakeTasksOfKind("embed", undefined, sourceIds);
+    }
+  };
   const tierSniffer = !engineFront && snifferLane && snifferModel ? new TierSnifferService({
     installed: installedTierClassification,
     lane: snifferLane,
@@ -283927,17 +284305,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line) => console.log(line),
     ...snifferRuntime.source === "built_in" ? { autoApproveBuiltIn: true } : {},
-    autoMoves: {
-      ...automaticMoveContext,
-      onPlacementChecked: (paths) => {
-        overPrivate?.refresh(paths);
-      },
-      onEmbeddingNeeded: (corpora) => {
-        const sourceIds = new Set(sourceCorpusRegistry.list().filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
-        sourceScheduler?.wakeTasksOfKind("embed", undefined, sourceIds);
-      }
-    }
+    autoMoves: tierMoveOptions
   }) : undefined;
+  const tierWork = engineFront ? undefined : tierSniffer ?? new TierSnifferService({
+    installed: installedTierClassification,
+    stores: () => connectorStores,
+    classificationLedgerPath: resolveClassificationLedgerPath(process.env),
+    intervalMs: snifferEnv.intervalMs,
+    autoMoves: tierMoveOptions,
+    log: (line) => console.log(line)
+  });
   if (tierSniffer && snifferResource) {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
@@ -284023,8 +284400,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       tierOverPrivate = () => overPrivate.status();
     archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   }
-  tierSniffer?.start();
-  const currentMemoryActivity = () => engineRole === "front" ? memoryActivity(false, false, engineFront?.backgroundActivity() ?? "idle") : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
+  tierWork?.start();
+  const currentMemoryActivity = () => engineRole === "front" ? memoryActivity(false, false, engineFront?.backgroundActivity() ?? "idle") : memoryActivity(tierWork?.passRunning ?? false, statusRecount?.health().counting ?? false);
   const memoryDiagnostic = createMemoryDiagnostic({
     role: engineRole,
     activity: currentMemoryActivity,
@@ -284191,7 +284568,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const rssRestart = startEngineRssRestart({
       memory: memoryDiagnostic,
       thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,
-      batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
+      batchRunning: () => (tierWork?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
       restart: () => requestModelReload(),
       record: () => status.publish(),
       previous: engineRssRestartsFrom(readEngineStatusSnapshot(engineStatusSnapshotPath(process.env)))
@@ -284340,7 +284717,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     stopSupersededSweep();
     stopCpuSampleLog?.();
     stopCreditRecovery();
-    tierSniffer?.stop();
+    tierWork?.stop();
     localPacer.stop();
     archiveImportDashboard.close();
     installedTierClassification.close({ checkpoint: true });

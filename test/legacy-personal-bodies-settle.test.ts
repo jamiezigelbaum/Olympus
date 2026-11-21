@@ -30,6 +30,7 @@ import {
   ACCOUNT, JUDGED_PERSONAL_SNIFFER, RecordingProvider, fixtureConnector, fixtureItem, identityOf,
   openLegStore, openTierFixture, snapshotStore, storePaths, tempDir, type FixtureSpec,
 } from './helpers/tier-fixtures.ts';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
@@ -43,6 +44,7 @@ function fixture(tmp = tempDir('olympus-legacy-personal-'), options: { maxCallsP
   });
   registerInstalledTierClassification(installed);
   let judgeReady = false;
+  const judgeCalls: unknown[] = [];
   const service = new TierSnifferService({
     installed,
     lane: BUILT_IN_SNIFFER_LANE,
@@ -54,12 +56,13 @@ function fixture(tmp = tempDir('olympus-legacy-personal-'), options: { maxCallsP
     ...(options.maxCallsPerPass ? { maxCallsPerPass: options.maxCallsPerPass } : {}),
     log: message => logs.push(message),
     modelAvailable: () => judgeReady,
-    model: { async complete() {
+    model: { async complete(request) {
+      judgeCalls.push(request);
       return { modelId: 'test-judge', text: '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.99,"ownRecord":false,"privateKind":"none"}]}' };
     } },
   });
   cleanups.push(() => { service.stop(); registerInstalledTierClassification(undefined); installed.close(); f.close(); tmp.cleanup(); });
-  return { ...f, service, installed, logs, enableJudge() { judgeReady = true; } };
+  return { ...f, service, installed, logs, judgeCalls, enableJudge() { judgeReady = true; } };
 }
 
 async function answerPrivately(f: ReturnType<typeof fixture>) {
@@ -239,6 +242,137 @@ test('a legacy Personal verdict for the exact text leaves the stored row alone',
   expect(personal.exportItemCopy(identity)).toEqual(oldCopy);
   expect(f.ledger.getCurrent(identity)).toEqual(before);
   expect(f.stores.secure_local!.exportItemCopy(identity)).toBeUndefined();
+});
+
+test.each(['secure', 'secrets'] as const)('an exact recorded %s receipt settles without a judge question', async tier => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const row = { id: 'known', name: 'Picnic notes', text: BODY };
+  await seedLegacy(tmp.dir, [row]);
+  const f = fixture(tmp);
+  const personal = f.stores.internal!;
+  const identity = identityOf(row.id);
+  const base = classifyItemTiers({ signals: { title: row.name }, text: row.text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  f.ledger.recordDecision(identity, {
+    ...base, contentTier: tier, decidedBy: 'sniffer',
+  }, { trustDomain: 'internal', trustTier: 'S1' });
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  expect(personal.searchItems(MARKER, 10)).toHaveLength(1);
+
+  expect(placePersonalBody(f.set, personal, { identity, text: BODY }, queue, 'walk', {
+    movesAvailable: true, recordedOnly: true,
+  })).toBe(tier === 'secure' ? 'settled' : 'secrets');
+  expect(personal.searchItems(MARKER, 10)).toEqual([]);
+  expect(queue.questionFor(identity, 'content')).toBeUndefined();
+  f.enableJudge();
+  await f.service.runOnce();
+  expect(f.judgeCalls).toHaveLength(0);
+  const body = f.stores.secure_local!.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('');
+  expect(body).toBe(tier === 'secure' ? BODY : undefined);
+  expect(f.secrets.get(identity) !== undefined).toBe(tier === 'secrets');
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ contentTier: tier, contentPending: false, routed: true });
+});
+
+test('the first background tick settles recorded Private text with the judge disabled', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const known = { id: 'known', name: 'Picnic notes', text: BODY };
+  const other = { id: 'unclassified', name: 'Trail notes', text: 'The meadow trail is open.' };
+  await seedLegacy(tmp.dir, [known, other]);
+  const f = openTierFixture(tmp.dir);
+  const installed = new InstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: join(tmp.dir, 'rules.json') } });
+  registerInstalledTierClassification(installed);
+  const clock = createTestClock();
+  const service = new TierSnifferService({
+    installed,
+    stores: () => f.set.openStores(),
+    classificationLedgerPath: join(tmp.dir, 'classification.jsonl'),
+    autoMoves: { embeddingLedgerPath: join(tmp.dir, 'embedding.jsonl'), localEmbeddingsOnly: () => true },
+    timers: clock,
+  });
+  cleanups.push(() => { service.stop(); registerInstalledTierClassification(undefined); installed.close(); f.close(); tmp.cleanup(); });
+
+  const identity = identityOf(known.id);
+  const receipt = classifyItemTiers({ signals: { title: known.name }, text: known.text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  f.ledger.recordDecision(identity, { ...receipt, contentTier: 'secure', decidedBy: 'sniffer' }, { trustDomain: 'internal', trustTier: 'S1' });
+  service.start();
+  expect(f.ledger.getCurrent(identity)?.routed).toBe(false);
+  await clock.advance(0);
+  await waitFor(() => service.status().lastTick?.state === 'settling_recorded');
+
+  expect(f.stores.internal!.searchItems(MARKER, 10)).toEqual([]);
+  expect(f.stores.secure_local!.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(BODY);
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ contentTier: 'secure', contentPending: false, routed: true });
+  expect(f.ledger.getCurrent(identityOf(other.id))).toBeUndefined();
+  expect(f.stores.internal!.searchItems('meadow', 10)).toHaveLength(1);
+  expect(installed.snifferStoreForLedger(f.ledger.dbPath).questionFor(identity, 'content')).toBeUndefined();
+  expect(service.status().callsToday).toBe(0);
+});
+
+test.each(['secure', 'secrets'] as const)('a stale %s receipt holds the replacement body for judgment', async tier => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const row = { id: 'replaced-receipt', name: 'Picnic notes', text: BODY };
+  await seedLegacy(tmp.dir, [row]);
+  const f = fixture(tmp);
+  const personal = f.stores.internal!;
+  const identity = identityOf(row.id);
+  const prior = classifyItemTiers({ signals: { title: row.name }, text: 'A different picnic plan.' }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  f.ledger.recordDecision(identity, { ...prior, contentTier: tier, decidedBy: 'sniffer' }, { trustDomain: 'internal', trustTier: 'S1' });
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  const hold = () => placePersonalBody(f.set, personal, { identity, text: BODY }, queue, 'walk', {
+    movesAvailable: true, recordedOnly: true,
+  });
+  const record = f.ledger.recordLegacyPersonalHold.bind(f.ledger);
+  f.ledger.recordLegacyPersonalHold = () => { throw new Error('interrupted hold'); };
+  expect(hold).toThrow('interrupted hold');
+  f.ledger.recordLegacyPersonalHold = record;
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ contentTier: tier, routed: false });
+  expect(f.ledger.copies(identity)).toEqual([]);
+
+  expect(hold()).toBe('held');
+  expect(f.secrets.get(identity)).toBeUndefined();
+  expect(personal.searchItems(MARKER, 10)).toEqual([]);
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ contentPending: true, reasons: expect.arrayContaining([contentDigestReason(BODY)]) });
+  f.enableJudge();
+  for (let tick = 0; tick < 3 && f.judgeCalls.length === 0; tick++) await f.service.runOnce();
+  expect(f.judgeCalls).toHaveLength(1);
+});
+
+test('a sidecar Secret is hidden at placement and its interrupted tombstone is recoverable', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const row = { id: 'sidecar-secret', name: 'Picnic notes', text: BODY };
+  await seedLegacy(tmp.dir, [row]);
+  const f = fixture(tmp);
+  const personal = f.stores.internal!;
+  const identity = identityOf(row.id);
+  const previousLedger = new TierLedger({ dbPath: tierLedgerPathForStore(personal.dbPath) });
+  cleanups.push(() => previousLedger.close());
+  const base = classifyItemTiers({ signals: { title: row.name }, text: row.text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  const stored = { trustDomain: 'internal', trustTier: 'S1' } as const;
+  previousLedger.recordDecision(identity, { ...base, contentTier: 'secrets', decidedBy: 'secret_detector' }, stored);
+  f.ledger.recordDecision(identity, { ...base, contentTier: 'secure', decidedBy: 'sniffer' }, stored);
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  const settle = () => placePersonalBody(f.set, personal, { identity, text: BODY }, queue, 'walk', {
+    movesAvailable: true, recordedOnly: true, previousLedger,
+  });
+  const record = f.ledger.recordRoutedPlacement.bind(f.ledger);
+  f.ledger.recordRoutedPlacement = () => { throw new Error('interrupted placement'); };
+  expect(settle).toThrow('interrupted placement');
+  f.ledger.recordRoutedPlacement = record;
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ contentTier: 'secure', routed: false });
+  expect(f.ledger.copies(identity)).toEqual([]);
+
+  const tombstone = personal.tombstoneCopy.bind(personal);
+  personal.tombstoneCopy = () => { throw new Error('interrupted tombstone'); };
+  expect(settle).toThrow('interrupted tombstone');
+  personal.tombstoneCopy = tombstone;
+  expect(personal.searchItems(MARKER, 10)).toEqual([]);
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ contentTier: 'secrets', routed: true });
+  expect(f.ledger.writeIntent(identity)?.kind).toBe('secret');
+  expect(f.secrets.get(identity)).toBeDefined();
+
+  await f.set.finishWritesCutOff();
+  expect(f.ledger.writeIntent(identity)).toBeUndefined();
+  expect(personal.exportItemCopy(identity)).toBeUndefined();
+  expect(f.secrets.get(identity)).toBeDefined();
 });
 
 function restoreLegacyRepresentation(store: LocalConnectorStore, raw: RawItem, text: string,
@@ -637,4 +771,50 @@ test('a fresh store handle resumes before an unfinished body after restart', asy
   for (let tick = 0; tick < 8 && !held; tick++) held += (await step(reopened.set)).held;
   expect(held).toBe(1);
   expect(reopened.ledger.getCurrent(identityOf('restart'))?.reasons).toContain(contentDigestReason(text));
+});
+
+test('the first service ticks finish recorded placements before opening the paced legacy lap', async () => {
+  const tmp = tempDir('olympus-recorded-first-');
+  const known = Array.from({ length: 26 }, (_, i) => ({ id: `known-${String(i).padStart(2, '0')}`, name: 'Older note', text: BODY }));
+  const newest = { id: 'newest', name: 'Recent note', text: 'Fresh oranges for tomorrow.' };
+  await seedLegacy(tmp.dir, [...known, newest]);
+  const f = fixture(tmp);
+  const sidecar = new TierLedger({ dbPath: tierLedgerPathForStore(f.stores.internal!.dbPath) });
+  try {
+    for (const [i, row] of known.entries()) {
+      const source = i === 25 ? sidecar : f.ledger;
+      const decision = classifyItemTiers({ signals: { title: row.name }, text: row.text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+      source.recordDecision(identityOf(row.id), { ...decision, decidedBy: 'sniffer',
+        contentTier: i === 25 ? 'secrets' : 'secure' }, { trustDomain: 'internal', trustTier: 'S3' });
+    }
+  } finally { sidecar.close(); }
+  f.enableJudge();
+  expect((await f.service.runOnce()).state).toBe('settling_recorded');
+  expect(f.stores.internal!.searchItems(MARKER, 100).map(row => row.sourceItem.providerItemId)).toEqual(['known-25']);
+  expect(f.stores.secure_local!.exportItemCopy(identityOf('known-00'))?.chunks[0]?.boundedText).toBe(BODY);
+  expect(f.ledger.getCurrent(identityOf(newest.id))).toBeUndefined();
+  expect((await f.service.runOnce()).state).toBe('settling_recorded');
+  expect(f.secrets.get(identityOf('known-25'))).toBeDefined();
+  expect(f.stores.internal!.searchItems(MARKER, 100)).toEqual([]);
+  expect(f.ledger.getCurrent(identityOf(newest.id))).toBeUndefined();
+  expect(f.judgeCalls).toHaveLength(0);
+  await f.service.runOnce();
+  expect(f.ledger.getCurrent(identityOf(newest.id))?.routed).toBe(true);
+});
+
+test('a retired recency lap does not suppress the first recorded placement after upgrade', async () => {
+  const tmp = tempDir('olympus-recorded-upgrade-');
+  const row = { id: 'private-names', name: 'Notes', text: BODY };
+  await seedLegacy(tmp.dir, [row]);
+  const f = fixture(tmp);
+  const id = identityOf(row.id);
+  const decision = classifyItemTiers({ signals: { title: row.name }, text: row.text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  f.ledger.recordDecision(id, { ...decision, contentTier: 'private', metadataTier: 'secure', decidedBy: 'sniffer' },
+    { trustDomain: 'internal', trustTier: 'S3' });
+  f.ledger.writeSettleProgress('legacy_personal_bodies_done_v2', '1');
+  f.enableJudge();
+  await f.service.runOnce();
+  expect(f.stores.internal!.searchItems(MARKER, 10)).toEqual([]);
+  expect(f.stores.secure_local!.exportItemCopy(id)?.chunks[0]?.boundedText).toBe(BODY);
+  expect(f.judgeCalls).toHaveLength(0);
 });

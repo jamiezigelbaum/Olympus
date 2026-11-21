@@ -88,6 +88,8 @@ export interface ReleaseManifest {
 export interface ReleaseInputVerdict {
   tier: 'legacy' | 'public_or_personal' | 'private' | 'secret' | 'unknown';
   gone: boolean;
+  /** This input includes text protected by a Private decision before its first routed placement. */
+  unroutedPrivate?: true;
   /** A committed deletion intent withholds the whole answer while removal settles. */
   pendingDeletion?: boolean;
   hiddenByParent?: boolean;
@@ -295,6 +297,7 @@ export function privateInputReleaseAllowed(
   constraints: ReleaseConstraints,
   postureNow: 'allow' | 'approval',
 ): boolean {
+  if (verdict.unroutedPrivate) return false;
   const privateNow = verdict.tier === 'private' || (verdict.tier === 'legacy' && input.privateAtAnswer);
   const authorized = constraints.includeSecureLocalContent || postureNow === 'allow';
   // A parent label was cleared for the names tier of its time. Names that became Private since
@@ -342,7 +345,7 @@ export function answerReleaseWithheldReason(
       if (verdict.tier === 'unknown' || verdict.gone) return ANSWER_RELEASE_UNVERIFIED;
       if (verdict.tier === 'secret') return ANSWER_RELEASE_UNVERIFIED;
       const { input, constraints } = entries[index]!;
-      if (verdict.tier === 'private' && (ceiling === 'personal' || !input.privateAtAnswer)) return ANSWER_BECAME_PRIVATE;
+      if (verdict.tier === 'private' && (ceiling === 'personal' || !input.privateAtAnswer || verdict.unroutedPrivate)) return ANSWER_BECAME_PRIVATE;
       if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
         return 'Olympus withheld this answer because current settings require approval for Private content.';
       }

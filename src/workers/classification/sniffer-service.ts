@@ -56,7 +56,7 @@ import {
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItemsOffThread } from '../connector-store/tier-names-only-settle.ts';
 import { recoverStoredLabelPage } from '../connector-store/tier-label-observations.ts';
-import { settleLegacyPersonalBodiesOffThread } from '../connector-store/legacy-personal-bodies.ts';
+import { settleLegacyPersonalBodiesOffThread, settleRecordedPersonalBodiesOffThread } from '../connector-store/legacy-personal-bodies.ts';
 import { settlePersonalFirstItemsOffThread } from '../connector-store/tier-held-settle.ts';
 import { applicableProviderLabelRules, currentTierRulePolicy, mutableItemLabels, tierMoveRuleAuthorization, withCurrentMoveLabels, withTierRuleFence } from '../connector-store/tier-move-rule-policy.ts';
 import { ownerRuleSweepsComplete, sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
@@ -132,10 +132,8 @@ function unrefTimer(timer: unknown): void {
   (timer as { unref?: () => void } | undefined)?.unref?.();
 }
 
-export interface TierSnifferServiceOptions {
+interface TierSnifferServiceBaseOptions {
   installed: InstalledTierClassification;
-  lane: SnifferLane;
-  model: AnalystModel;
   stores: () => readonly TierSnifferServiceStore[];
   classificationLedgerPath: string;
   /** Test seam: ledger and queue rows at or below which the backlog is counted on every read. */
@@ -279,6 +277,10 @@ export interface TierSnifferServiceOptions {
   };
 }
 
+/** Without a judge, the service only settles and moves already decided legacy items. */
+export type TierSnifferServiceOptions = TierSnifferServiceBaseOptions
+  & ({ lane: SnifferLane; model: AnalystModel } | { lane?: never; model?: never });
+
 /** Each tick has at most two recovery phases; each yields after this much work. */
 export const MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
 export const DEFAULT_AUTO_MOVES_PER_PASS = 1000;
@@ -363,7 +365,7 @@ const BACKLOG_REFRESH_MS = 60_000;
 const BACKLOG_SLICE_ROWS = 5_000;
 const STORED_WALK_BACKSTOP_MS = 60 * 60_000;
 
-type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'labelObservations' | 'legacyPersonalBodies' | 'rejudge' | 'staleEmbedHolds' | 'personalLowerings';
+type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'labelObservations' | 'legacyRecordedDecisions' | 'legacyPersonalBodies' | 'rejudge' | 'staleEmbedHolds' | 'personalLowerings';
 type StoredWalkResult = 'no_work' | 'changed' | 'more_rows' | 'read_failed' | 'inputs_unavailable' | 'queue_full' | 'retired';
 interface StoredWalkStatus {
   lastRanAt: string;
@@ -595,6 +597,7 @@ function emptyThroughput(): TierSnifferThroughput {
 
 export type TierSnifferTick =
   | { state: 'skipped_running' }
+  | { state: 'settling_recorded'; more: boolean }
   | { state: 'awaiting_owner_approval'; lane: SnifferLaneKind; profileId: string; modelId: string; promptVersion: string }
   | { state: 'model_unavailable'; modelId: string }
   | { state: 'ran'; report: SnifferPassReport; rejudged?: TierRejudgeReport; autoMoves?: TierAutoMoveReport }
@@ -684,8 +687,9 @@ export class TierSnifferService {
       ...(options.now ? { now: options.now } : {}),
       ...(options.budgetStatePath ? { statePath: options.budgetStatePath } : {}),
     });
+    const { lane, model } = options;
+    if (!lane) return;
     options.installed.setReleaseWindowResolver(async (ledgerPath, request, signal, expected) => {
-      const lane = options.lane;
       if (this.stopped || signal.aborted || options.modelAvailable?.() === false || options.breakerOpen?.()
         || lane.rejudgeReady === false) return { verdict: 'undecided' };
       const ownerContext = options.ownerContext?.();
@@ -696,7 +700,7 @@ export class TierSnifferService {
       const builtInDefault = options.autoApproveBuiltIn === true && isBuiltInLane(lane);
       if (!isClassifierApproved(ledger.entries, key, { builtInDefault })) return { verdict: 'undecided' };
       return resolveReleaseWindow({
-        store: options.installed.snifferStoreForLedger(ledgerPath), lane, model: options.model,
+        store: options.installed.snifferStoreForLedger(ledgerPath), lane, model,
         request, promptVersion: versions.cache, ...(ownerContext ? { ownerContext } : {}), signal, budget: this.budget,
       });
     });
@@ -1174,8 +1178,8 @@ export class TierSnifferService {
 
   status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting; throughput?: { last: TierSnifferThroughput; total: TierSnifferThroughput } } {
     return {
-      lane: this.options.lane.kind,
-      modelId: this.options.lane.modelId,
+      lane: this.options.lane?.kind ?? 'off',
+      modelId: this.options.lane?.modelId ?? '',
       callsToday: this.budget.usedToday(),
       ...(this.lastTick ? { lastTick: this.lastTick } : {}),
       ...(this.waiting ? { waiting: { ...this.waiting } } : {}),
@@ -1261,7 +1265,7 @@ export class TierSnifferService {
       tickReturnedAt = this.monotonicNow();
       // The judge's deadline and tick timing have ended. Lowerings get their
       // own bounded slice before another pass starts, never its call budget.
-      const lowerMoves = await this.drainMoves('lower');
+      const lowerMoves = this.options.lane ? await this.drainMoves('lower') : undefined;
       if (tick.state === 'ran' && lowerMoves) {
         tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
       }
@@ -1304,7 +1308,7 @@ export class TierSnifferService {
       this.notAnsweringUntilMs = this.clockMs()
         + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
     }
-    if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
+    if (this.options.lane && this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
       if (backlog.checkingItems > 0) this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs} at=${new Date(this.clockMs()).toISOString()}.`);
@@ -1312,6 +1316,7 @@ export class TierSnifferService {
     // Going easy: the pass made its one call; the next scheduled one waits.
     if (tick.state === 'ran' && tick.report.calls > 0 && this.trickle()) this.pacedUntilMs = this.clockMs() + (this.options.pacing?.trickleGapMs ?? 0);
     if (this.stopped) this.closeLedgers();
+    else if (this.timer && tick.state === 'settling_recorded' && tick.more && !this.yieldNow()) this.wake();
     else if (this.timer && tick.state === 'ran' && !this.yieldNow()
       && tick.report.stoppedBy !== 'daily_budget' && tick.report.stoppedBy !== 'transport_failures' && tick.report.stoppedBy !== 'cloud_stopped'
       && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls
@@ -1331,7 +1336,7 @@ export class TierSnifferService {
 
   /** Local work goes easy while the owner uses this computer (#922); never for a cloud or remote judge. */
   private trickle(): boolean {
-    if (!this.options.pacing || !isBuiltInLane(this.options.lane)) return false;
+    if (!this.options.pacing || !this.options.lane || !isBuiltInLane(this.options.lane)) return false;
     try {
       return this.options.pacing.trickle();
     } catch {
@@ -1696,7 +1701,24 @@ export class TierSnifferService {
   }
 
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
-    const { lane } = this.options;
+    const { lane, model } = this.options;
+    if (!lane) {
+      const recorded = await this.settleRecordedDecisions();
+      await this.drainMoves();
+      // Without a judge this is a one-time boot job. Stop its timer after
+      // every indexed page and every previously queued receipt move has landed.
+      if (!recorded) {
+        let pendingMove = false;
+        for (const path of this.ledgerPaths()) {
+          const set = tierSetForLedger(path);
+          if (set && (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({
+            limit: 1, direction: 'raise', recordedOnly: true,
+          }), { lane: 'background' })).length) { pendingMove = true; break; }
+        }
+        if (!pendingMove) this.stop();
+      }
+      return { state: 'settling_recorded', more: recorded === 'more' };
+    }
     // Wall time of each step around the pass, for its log line: on Sparta
     // (2026-11-06) 30 s passes came 32-134 s apart, and nothing said where
     // the rest of the time went.
@@ -1715,11 +1737,17 @@ export class TierSnifferService {
     };
     // Owner rules that raise, and names-only folders, apply to stored items
     // whatever the model's state: no model is asked.
+    await this.applyOwnerOverrides();
+    const recorded = await this.settleRecordedDecisions();
+    if (recorded) {
+      await this.drainMoves();
+      return { state: 'settling_recorded', more: recorded === 'more' };
+    }
     await this.settleStoredItems();
     phase('settle');
     const targets = this.snifferTargets();
     phase('targets');
-    await this.recoverMissingQuestions(signal);
+    await this.recoverMissingQuestions(signal, lane);
     phase('recover');
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       // Nothing is asked and nothing is counted: flagged items wait, pending
@@ -1777,12 +1805,12 @@ export class TierSnifferService {
       return { state: 'awaiting_owner_approval', lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
     }
     phase('approval');
-    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
+    const preparationStopped = await prepareSnifferModel({ model, signal, shouldYield: () => this.yieldNow() });
     phase('prepare');
     // Items decided under another classifier, owner words or judge model are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
-    if (!preparationStopped) await this.recoverMissingQuestions(signal, true);
+    if (!preparationStopped) await this.recoverMissingQuestions(signal, lane, true);
     phase('recover');
     const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge(snifferId(lane, versions.cache));
     phase('rejudge');
@@ -1793,7 +1821,7 @@ export class TierSnifferService {
     const report = await runSnifferPass({
       targets,
       lane,
-      model: this.options.model,
+      model,
       promptVersion: versions.cache,
       ...(ownerContext ? { ownerContext } : {}),
       budget: this.budget,
@@ -1841,7 +1869,7 @@ export class TierSnifferService {
    * an unread item with no possible excerpt, or an orphaned ledger row.
    * Reconcile a bounded, durable page before model availability/approval.
    */
-  private async recoverMissingQuestions(signal: AbortSignal, allowReask = false): Promise<void> {
+  private async recoverMissingQuestions(signal: AbortSignal, lane: SnifferLane, allowReask = false): Promise<void> {
     // Cooperative bound: one row (including its synchronous store reads) may
     // finish after the deadline. Two phases cost at most two such overruns.
     const deadline = this.monotonicNow() + MISSING_QUESTION_RECOVERY_PHASE_MS;
@@ -1940,7 +1968,7 @@ export class TierSnifferService {
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
               missingMetadata, missingContent: missingContent && !waitingForText && !legacyHold,
-              snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
+              snifferId: snifferId(lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, 'metadata'))
                 && (!missingContent || !queue.questionFor(identity, 'content')),
               ...(planner ? { placementFor: planner } : {}),
@@ -2087,7 +2115,7 @@ export class TierSnifferService {
     name: StoredWalker,
     inputs: string | undefined,
     readPage: (after: TierLedgerIdentity | undefined) => Promise<StoredWalkPage>,
-  ): Promise<void> {
+  ): Promise<StoredWalkStatus> {
     const path = set.ledger.dbPath;
     let entry = this.storedWalks.get(path);
     if (entry?.set !== set) {
@@ -2100,14 +2128,35 @@ export class TierSnifferService {
       entry.walks.set(name, walk);
     }
     await runStoredWalk(walk, inputs, readPage, () => this.clockMs());
+    return walk.status;
+  }
+
+  // The start wake and each continuation process at most one recorded page per
+  // set. Model pacing starts after this pass, and the engine never awaits it at boot.
+  private async settleRecordedDecisions(): Promise<'more' | 'retry' | undefined> {
+    let pending: 'more' | 'retry' | undefined;
+    const paths = new Set(this.ledgerPaths());
+    for (const path of this.storedWalks.keys()) if (!paths.has(path)) this.storedWalks.delete(path);
+    for (const path of paths) {
+      const set = tierSetForLedger(path);
+      if (!set) continue;
+      const status = await this.runStoredWalker(set, 'legacyRecordedDecisions', undefined, async () => {
+        const page = await settleRecordedPersonalBodiesOffThread({
+          set, queue: this.options.installed.snifferStoreForLedger(path),
+          movesAvailable: () => !!this.options.autoMoves?.localEmbeddingsOnly() && (this.options.autoMoves.maxPerPass ?? 25) > 0,
+          turn: () => { this.progress(); return this.ingestionTurn(); },
+        });
+        return { complete: page.retired, retired: page.retired, changed: page.settled + page.secrets + page.held > 0, failed: page.failed > 0 };
+      });
+      if (status.lastResult === 'read_failed') pending ??= 'retry';
+      else if (status.reason !== 'retired') pending = 'more';
+    }
+    return pending;
   }
 
   /** Settles stored items even while model availability or approval is pending. */
   private async settleStoredItems(): Promise<void> {
-    await this.applyOwnerOverrides();
-    const paths = new Set(this.ledgerPaths());
-    for (const path of this.storedWalks.keys()) if (!paths.has(path)) this.storedWalks.delete(path);
-    for (const ledgerPath of paths) {
+    for (const ledgerPath of this.ledgerPaths()) {
       await this.ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
@@ -2316,7 +2365,7 @@ export class TierSnifferService {
       const builtInOnly = !recoveryOnly && setEmbedsWithBuiltInOnly(set);
       const legacyHoldsOnly = direction === 'raise' && !builtInOnly;
       const queued = (await ledgerReadOffThread(set.ledger,
-        set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly }))).filter(isAutoMoveCandidate);
+        set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly, recordedOnly: !this.options.lane }))).filter(isAutoMoveCandidate);
       if (set.openStores().some(store => store.reclaiming)) continue;
       if (!builtInOnly && direction === 'lower') { report.notEligible += queued.length; continue; }
       // A stopped installation may have hidden the source of an authorized raise
@@ -2352,7 +2401,7 @@ export class TierSnifferService {
           this.moveRefusalAttempts += 1;
           this.movesRefusedNow.set(refusedKey, why);
         } else this.movesRefusedNow.delete(refusedKey);
-        if (error instanceof TierMoveContentChangedError) {
+        if (error instanceof TierMoveContentChangedError && this.options.lane) {
           // A stale lowering was refused before import and taken out of
           // moving. Re-read the actual stored body, even when this model
           // already judged the discarded edit. Its old verdict cannot

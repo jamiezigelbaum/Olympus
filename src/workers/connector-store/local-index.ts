@@ -4170,6 +4170,7 @@ export class LocalConnectorStore {
   private tierLedgerOwned: boolean | undefined;
   private tierLedgerDisabled: boolean | undefined;
   private preRoutingLedger: TierLedger | undefined;
+  private preRoutingReadLedger: TierLedger | undefined;
   private boundLedgerHandle: TierLedger | undefined;
   /**
    * Items a sync handed to this store's embedding sweep instead of embedding
@@ -4561,6 +4562,7 @@ export class LocalConnectorStore {
       if (!this.readOnly && !reclaiming) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
       this.preRoutingLedger?.close();
+      this.preRoutingReadLedger?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
     } finally {
@@ -4693,17 +4695,25 @@ export class LocalConnectorStore {
 
   /** Batch current item verdicts, independent of placement; unreadable ledgers hold Private. */
   effectiveItemTiers(identities: readonly TierLedgerIdentity[], layer?: 'names'): ReleaseInputVerdict['tier'][] {
+    return this.effectiveStoreVerdicts(identities, layer).map(verdict => verdict.tier);
+  }
+
+  private effectiveStoreVerdicts(identities: readonly TierLedgerIdentity[], layer?: 'names'): ReleaseInputVerdict[] {
     try {
       const ledger = this.governingTierLedger();
       return visibilityHere(effectiveItemVerdicts(
-        () => ledger ? [{ ledger, corpusIds: new Set([this.corpusId]) }] : [],
+        () => ledger ? [{
+          ledger,
+          corpusIds: new Set([this.corpusId]),
+          preRoutingLedger: () => this.preRoutingReadLedgerFor(ledger),
+        }] : [],
         identities.map(identity => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...(layer ? { layer } : {}) })),
         // An item the release check calls gone (routed, no current copy here)
         // is never eligible for a remote exit: held Private unless Secret.
-      )).map(verdict => (verdict.gone && verdict.tier !== 'secret' ? 'private' : verdict.tier));
+      )).map(verdict => verdict.gone && verdict.tier !== 'secret' ? { ...verdict, tier: 'private' } : verdict);
     } catch {
       // An unreadable governing ledger never authorizes this exit.
-      return identities.map(() => 'private');
+      return identities.map(() => ({ tier: 'private', gone: true }));
     }
   }
 
@@ -4726,6 +4736,14 @@ export class LocalConnectorStore {
     if (path === ':memory:' || path === setLedger.dbPath) return undefined;
     if (!this.preRoutingLedger && existsSync(path)) this.preRoutingLedger = new TierLedger({ dbPath: path });
     return this.preRoutingLedger;
+  }
+
+  /** Read the old Personal ledger from an egress path, including a read-only front. */
+  preRoutingReadLedgerFor(setLedger: TierLedger): TierLedger | undefined {
+    if (this.trustDomain !== 'internal') return undefined;
+    const path = tierLedgerPathForStore(this.dbPath);
+    if (path === ':memory:' || path === setLedger.dbPath || !existsSync(path)) return undefined;
+    return this.preRoutingReadLedger ??= new TierLedger({ dbPath: path, readOnly: true, allowWalLessRead: true });
   }
 
   /** The ledger this store records tier decisions in, opening the default one on first use. */
@@ -8006,6 +8024,28 @@ export class LocalConnectorStore {
       params: after ? [after.date, pageSize - sameDate.length] : [pageSize],
     }) as PersonalBodyRow[] : [];
     const rows = [...sameDate, ...older];
+    return yield* this.readPersonalBodyRows(rows, after, pageSize, chunkLimit);
+  }
+
+  /** An exact ledger identity, using the same bounded body reader as the recency walk. */
+  personalBodyForIdentityFinder(identity: TierLedgerIdentity, chunkLimit: number): LoopFinder<PersonalBodyPage> {
+    const steps = () => this.personalBodyForIdentitySteps(identity, chunkLimit);
+    return { here: () => this.readHere(steps()), offThread: () => this.readStepsInBackground(steps()) };
+  }
+
+  private *personalBodyForIdentitySteps(identity: TierLedgerIdentity, chunkLimit: number): Generator<StoreRead, PersonalBodyPage, unknown> {
+    const rows = (yield {
+      sql: `SELECT item_pk, 0 AS source_date, family, provider, account_scope, provider_item_id,
+          provider_conversation_id, local_item_id, mime_type, content_hash FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`,
+      params: [identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId],
+      mode: 'all',
+    }) as PersonalBodyRow[];
+    return yield* this.readPersonalBodyRows(rows, undefined, 1, chunkLimit);
+  }
+
+  private *readPersonalBodyRows(rows: PersonalBodyRow[], after: PersonalBodyCursor | undefined, pageSize: number,
+    chunkLimit: number): Generator<StoreRead, PersonalBodyPage, unknown> {
     const items: PersonalBodyCandidate[] = [];
     let next = after;
     let remaining = Math.max(1, Math.min(PERSONAL_BODY_CHUNKS_PER_PAGE, Math.floor(chunkLimit)));
@@ -14462,14 +14502,15 @@ export class LocalConnectorStore {
    * from the store and one batched ledger read: a row whose item is now
    * Private by its stored tier or effective text verdict (unknown included)
    * is counted `privateTier`; one deleted, Secret, or kept out of view by the
-   * ledger is counted `notVisible`. With no `embeddableTiers` (an embedder
-   * approved for Private content), Private text remains eligible. Synchronous, so the caller can dispatch
-   * with no await in between. Visibility is looked up for the batch's items
-   * alone, not by rebuilding the store's whole hidden-copy set.
+   * ledger is counted `notVisible`. An unrouted Private verdict holds the
+   * body from every cloud embedder until placement. Synchronous, so the
+   * caller can dispatch with no await in between. Visibility is looked up for
+   * the batch's items alone, not by rebuilding the whole hidden-copy set.
    */
   private embeddingBatchRecheck<T extends { item_pk: number }>(
     batch: readonly T[],
     embeddableTiers: readonly SourceTrustTier[] | undefined,
+    cloud: boolean,
     allowHeld: boolean,
     scope: ReturnType<typeof statusScopeContentFilter>,
   ): { kept: T[]; privateTier: number; notVisible: number } {
@@ -14488,20 +14529,22 @@ export class LocalConnectorStore {
     }>;
     const current = new Map(currentRows.map((row) => [row.item_pk, row] as const));
     const hidden = this.embeddingHiddenAmong(currentRows, allowHeld);
-    const verdicts = this.effectiveItemTiers(currentRows.map(item => ({
+    const verdicts = this.effectiveStoreVerdicts(currentRows.map(item => ({
       provider: item.provider, accountScope: item.account_scope, providerItemId: item.provider_item_id,
       ...(item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}),
     })));
-    const tiers = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]]));
+    const verdictByPk = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]!]));
     const kept: T[] = [];
     let privateTier = 0;
     let notVisible = 0;
     for (const row of batch) {
       const item = current.get(row.item_pk);
-      if (!item || item.tombstoned !== 0 || item.trust_tier === 'S5' || tiers.get(row.item_pk) === 'secret' || hidden.has(row.item_pk)) {
+      const verdict = verdictByPk.get(row.item_pk);
+      if (!item || item.tombstoned !== 0 || item.trust_tier === 'S5' || verdict?.tier === 'secret' || hidden.has(row.item_pk)) {
         notVisible += 1;
-      } else if (embeddableTiers !== undefined && (!(embeddableTiers as readonly string[]).includes(item.trust_tier)
-        || tiers.get(row.item_pk) === 'private' || tiers.get(row.item_pk) === 'unknown')) {
+      } else if ((cloud && (verdict?.gone || verdict?.unroutedPrivate))
+        || (embeddableTiers !== undefined && (!(embeddableTiers as readonly string[]).includes(item.trust_tier)
+          || verdict?.tier === 'private' || verdict?.tier === 'unknown'))) {
         privateTier += 1;
       } else {
         kept.push(row);
@@ -14983,7 +15026,7 @@ export class LocalConnectorStore {
       // Item and classification writes are not serialized by the embedding
       // lease. Recheck after any imageSupport await, immediately before dispatch.
       {
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === 'cloud', allowHeld(), dispatchScope);
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
@@ -15053,7 +15096,7 @@ export class LocalConnectorStore {
         staleSkipped += failedRows.size;
         batch = batch.filter((row) => !failedRows.has(row));
         if (batch.length === 0) continue;
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === 'cloud', allowHeld(), dispatchScope);
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
@@ -15074,7 +15117,7 @@ export class LocalConnectorStore {
       const writtenItemPks: number[] | undefined = options.onBatchWritten ? [] : undefined;
       this.db.transaction(() => {
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
-        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope).kept);
+        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === 'cloud', allowHeld(), dispatchScope).kept);
         for (let index = 0; index < batch.length; index += 1) {
           const row = batch[index]!;
           if (!stillEligible.has(row)) continue;
