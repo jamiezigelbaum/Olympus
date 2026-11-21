@@ -18415,9 +18415,12 @@ function publishPartialRows<T extends ConnectorStoreSearchRow>(
   store: LocalConnectorStore, request: GrantSearchRequest, rows: readonly T[],
   filters: ConnectorStoreSearchFilters | undefined, score: (row: T) => number, projector?: ConnectorStoreResultProjector,
   lane: NonNullable<Parameters<NonNullable<SourceIndexCorpusSearchRequest['onPartialResponse']>>[1]> = 'keyword',
+  searchEligibility?: ConnectorStoreSearchEligibility,
 ): void {
   if (!request.onPartialResponse) return;
-  const prefix = rows.slice(0, request.maxResults);
+  // Names can turn Private while a lane awaits (a metadata-fallback read): recheck right before a partial leaves.
+  const eligible = searchEligibility?.(rows);
+  const prefix = (eligible ? rows.filter((_, index) => eligible[index]) : rows).slice(0, request.maxResults);
   const hits = prefix.map(row => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
   const response = withSearchGrantDelivery(store, filters, request,
     { hits, latencyMs: 0, incomplete: true, rawExposed: false }, prefix);
@@ -18426,11 +18429,11 @@ function publishPartialRows<T extends ConnectorStoreSearchRow>(
 
 function partialKeywordRows(
   store: LocalConnectorStore, request: GrantSearchRequest, filters?: ConnectorStoreSearchFilters,
-  projector?: ConnectorStoreResultProjector,
+  projector?: ConnectorStoreResultProjector, searchEligibility?: ConnectorStoreSearchEligibility,
 ): ConnectorStoreKeywordFtsOptions['onPartialRows'] {
   return request.onPartialResponse
     ? (rows, contentOnly) => publishPartialRows(store, request, rows, filters, row => -row.rank, projector,
-      contentOnly ? 'keyword_content' : 'keyword') : undefined;
+      contentOnly ? 'keyword_content' : 'keyword', searchEligibility) : undefined;
 }
 
 function publishKeywordLane(
@@ -18549,7 +18552,7 @@ export function createConnectorStoreCorpusAdapter(
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
       const markStage = startStoreStageClock(stages);
       const { searchEligibility } = options;
-      const emitPartial = partialKeywordRows(store, request, filters, options.resultProjector);
+      const emitPartial = partialKeywordRows(store, request, filters, options.resultProjector, searchEligibility);
       let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters,
         { searchEligibility, onPartialRows: emitPartial }, request.deadlineAtMs);
       markStage?.('keyword_lane_ms');
@@ -18739,7 +18742,7 @@ export function createConnectorStoreCorpusAdapter(
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
       && store.vectorLaneServable(embeddingProvider.modelId);
     const { searchEligibility } = options;
-    const emitPartial = partialKeywordRows(store, request, filters);
+    const emitPartial = partialKeywordRows(store, request, filters, undefined, searchEligibility);
     const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, searchEligibility, onPartialRows: emitPartial };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
@@ -18770,7 +18773,7 @@ export function createConnectorStoreCorpusAdapter(
         const rows = lane.rows.filter(row => row.bestCosine >= bar);
         const matches = await withVectorMetadataFallbacks(store, request, rows, options.accountScope, filters, searchEligibility);
         semanticRows.push(...matches);
-        publishPartialRows(store, request, matches, filters, row => -row.rank, undefined, 'vector');
+        publishPartialRows(store, request, matches, filters, row => -row.rank, undefined, 'vector', searchEligibility);
       }
     }
     const { keyword: keywordLane, vectors } = await refreshSearchTierVisibility(store, readKeywordLane, semanticRows, searchEligibility);
@@ -18984,7 +18987,7 @@ async function hybridConnectorStoreSearch(
   // lane the remainder of the budget, and it missed the deadline on every
   // question (Sparta 2026-11-10, #1242).
   const markStage = startStoreStageClock(stages);
-  const emitPartial = partialKeywordRows(store, request, filters, resultProjector);
+  const emitPartial = partialKeywordRows(store, request, filters, resultProjector, searchEligibility);
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
@@ -19011,7 +19014,7 @@ async function hybridConnectorStoreSearch(
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
     const vetted = bar === undefined ? [] : lane.rows.filter(row => row.bestCosine >= bar);
     const rows = await withVectorMetadataFallbacks(store, request, vetted, accountScope, filters, searchEligibility);
-    publishPartialRows(store, request, rows, filters, row => row.bestCosine, resultProjector, 'vector');
+    publishPartialRows(store, request, rows, filters, row => row.bestCosine, resultProjector, 'vector', searchEligibility);
     const byVersion = new Map(rows.map(row => [searchGrantIdentityKey(row.sourceItem), row]));
     if (stages) stages.vector_lane_ms = performance.now() - laneStartedAt;
     return { lane: { ...lane, rows: lane.rows.map(row => byVersion.get(searchGrantIdentityKey(row.sourceItem)) ?? row) },
