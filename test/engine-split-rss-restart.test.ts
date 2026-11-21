@@ -221,7 +221,7 @@ describe('the background\'s wiring', () => {
     const wiring = server.slice(at, server.indexOf('});', at));
     expect(wiring).toContain('thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,');
     // Between batches: no judge pass and no scheduler task running.
-    expect(wiring).toContain('batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),');
+    expect(wiring).toContain('batchRunning: () => (tierWork?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),');
     // The reload a model change uses: a clean shutdown that records a pass it
     // cuts short as interrupted, not failed (#803), then exit for the host to restart.
     expect(wiring).toContain('restart: () => requestModelReload(),');
