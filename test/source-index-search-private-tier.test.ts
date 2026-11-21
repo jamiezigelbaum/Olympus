@@ -13,6 +13,7 @@ import { createInProcessOperationContext } from '../src/workers/remote-mcp.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
+import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
@@ -265,6 +266,26 @@ describe('source_index_search and rows Private by their own tier', () => {
         expect(result).toMatchObject({ hits: [{ corpus_id: corpusId, selected_item: { provider_item_id: 'plan' } }] });
       }
     } finally { personal.close(); }
+  });
+
+  test('ancestor admission does not open an existing lazy leg outside the search', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const internal = await store(INTERNAL, 'internal', [
+      { id: 'plan', name: 'plan', text: 'plan', tier: 'S3' },
+      { id: 'plan#child:notes', parentId: 'plan', name: 'orchard notes', text: 'orchard', tier: 'S3' },
+    ], ledger);
+    let opens = 0;
+    const worker = createEmailSourceWorker({ connectorStores: [internal], searchableCorpusIds: new Set([INTERNAL]) });
+    try {
+      new TieredStoreSet({ setId: 'fixture', ledger, registerWithLedger: false, skipOpeningMaintenance: true, legs: [
+        { corpusId: INTERNAL, trustDomain: 'internal', store: internal },
+        { corpusId: SECURE, trustDomain: 'secure_local', exists: () => true,
+          open: () => { opens++; throw new Error('unexpected open'); } },
+      ] });
+      const result = await search(worker, { query: 'orchard', corpus_ids: [INTERNAL] });
+      expect(opens).toBe(0);
+      expect(result.results[0].hits).toMatchObject([{ selected_item: { provider_item_id: 'plan#child:notes' } }]);
+    } finally { worker.close(); internal.close(); ledger.close(); }
   });
 
   test('parent checks never read a skipped sibling or release a child through its parent there', async () => {

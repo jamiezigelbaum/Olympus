@@ -568,7 +568,7 @@ export class EmailClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       ...(options.signal ? { signal: options.signal } : {}),
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, corpus_ids: this.searchCorpora().map(corpus => corpus.corpusId) }),
     });
   }
 
@@ -904,10 +904,14 @@ export class EmailClient {
     });
   }
 
+  private searchCorpora() {
+    return createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list('search');
+  }
+
   /** The worker holds every source's hits until all reads finish, then releases their current names together. */
   async sourceIndexSearchMany(options: Pick<SourceIndexSearchOptions,
     'query' | 'retrievalMode' | 'maxResults' | 'includeLocators'>) {
-    const searchCorpora = createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list('search');
+    const searchCorpora = this.searchCorpora();
     if (!searchCorpora.length) throw new OperationError('invalid_params', 'No source is configured for search.');
     const response = await this.requestSourceIndexSearch({
       query: options.query,

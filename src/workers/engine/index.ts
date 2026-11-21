@@ -178,7 +178,6 @@ import {
 import {
   LocalConnectorStore,
   STATUS_COUNTS_MAX_AGE_MS,
-  normalizeConnectorStoreSearchFilters,
   createConnectorStoreCorpusAdapter,
   defineConnectorCorpus,
 } from '../connector-store/index.ts';
@@ -218,6 +217,8 @@ import {
   assertSourceIndexSearchQuery,
   parseConnectorStoreIndexSearchRequestRecord,
   searchNamesVisibility,
+  admittedSearchParent,
+  searchStoreAdmission,
 } from './http/connector-store-search-request.ts';
 import {
   type DashboardOAuthAttempt,
@@ -649,58 +650,71 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const record = await parseObjectBody(request);
           const action = url.pathname.slice(`${basePath}/privacy-item/`.length);
-          if (action === 'find') {
-            const query = asOptionalString(record.query);
-            const recent = asOptionalBoolean(record.recent);
-            const limit = asOptionalNumber(record.limit, 'limit');
-            options.refreshConnectorStores?.();
+          if (action === 'find' || action === 'raise') {
+            const ids = record.corpus_ids;
+            if (ids !== undefined && (!Array.isArray(ids) || !ids.every(id => typeof id === 'string' && id.trim()))) {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'corpus_ids must be an array of corpus ids.');
+            }
+            const admission = searchStoreAdmission(options);
+            const mounted = admission.mounted(ids ?? options.searchableCorpusIds ?? connectorStores.map(store => store.corpusId));
             const scopes = new Map<string, OwnerItemNamesScope>();
-            const releaseChecks = new Set<() => boolean>();
-            const namesScope = (store: LocalConnectorStore) => {
-              const read = connectorStoreReadScope?.(store);
-              if (read?.allowed === false) return undefined;
-              return { account: read?.accountScope ?? connectorStoreAccountScopes.get(store.corpusId), filters: read?.filters };
-            };
-            for (const store of connectorStores) {
-              const scope = namesScope(store);
-              if (!scope || store.fileReplacedOrRemoved()) continue;
-              // The background may replace names or change a tier while find reads another store.
-              const stamp = JSON.stringify([scope, store.changeMarker(), store.visibilityMarker()]);
-              const stillCurrent = () => !store.fileReplacedOrRemoved()
-                && stamp === JSON.stringify([namesScope(store), store.changeMarker(), store.visibilityMarker()]);
-              const { sql, params } = connectorStoreFilterSql(scope.filters);
-              scopes.set(store.dbPath, {
-                sql: scope.account ? sql + ' AND i.account_scope = ?' : sql,
-                params: scope.account ? [...params, scope.account] : params,
-                visible(sourceItem, trustTier) {
-                  if (!store.selectedItemServable(sourceItem, scope.account, scope.filters, 'metadata')) return false;
-                  const [tier] = store.effectiveItemTiers([sourceItem], 'names');
-                  if (searchNamesVisibility(store, trustTier, tier) !== 'personal') return false;
-                  // The opaque raise id encodes the provider identity, including any parent ids.
-                  if (store.childrenWithWithheldSearchIdentifiers([sourceItem], false).size) return false;
-                  const hit = { sourceItem, trustTier, corpusId: store.corpusId, trustDomain: store.trustDomain,
-                    servingLayer: 'metadata' as const, rawExposed: false as const };
-                  if (options.sourceIndexVisibilityGate && !options.sourceIndexVisibilityGate([hit]).includes(hit)) return false;
-                  releaseChecks.add(stillCurrent);
-                  return true;
-                },
-              });
+            const plans = new Map<string, NonNullable<ReturnType<typeof admission.admit>>>();
+            for (const store of mounted.values()) {
+              const grant = admission.admit(store);
+              if (grant && !store.fileReplacedOrRemoved()) plans.set(store.corpusId, grant);
             }
-            const result = ownerTierItems.find({
-              ...(query !== undefined ? { query } : {}),
-              ...(recent !== undefined ? { recent } : {}),
-              ...(limit !== undefined ? { limit } : {}),
-              personalNamesOnly: true,
-            }, scopes);
-            if ([...releaseChecks].some(stillCurrent => !stillCurrent())) {
-              throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'Source visibility changed during the lookup. Retry under the current scope.');
-            }
-            return json(result);
-          }
-          if (action === 'raise') {
-            const itemId = asOptionalString(record.item_id);
-            if (!itemId) throw new EmailSourceWorkerError(400, 'invalid_request', 'item_id is required.');
-            return json(ownerTierItems.set({ itemId, choice: 'private', allowLower: false }));
+            const contributing = new Set<LocalConnectorStore>();
+            return await withSearchVisibilityStores(candidate => {
+              const plan = admittedSearchParent(plans, candidate);
+              if (plan) contributing.add(plan.store);
+              return !!plan;
+            }, async () => {
+              const checks = new Map<LocalConnectorStore, () => boolean>();
+              const current = () => [...plans.values()].every(grant => grant.current() && !grant.store.fileReplacedOrRemoved())
+                && [...contributing].every(store => checks.get(store)!());
+              for (const grant of plans.values()) {
+                const { store } = grant;
+                const { accountScope, filters } = grant.scope();
+                const change = store.changeMarker();
+                const visibility = store.visibilityMarker();
+                const stillCurrent = () => change === store.changeMarker() && visibility === store.visibilityMarker();
+                checks.set(store, stillCurrent);
+                const { sql, params } = connectorStoreFilterSql(filters);
+                scopes.set(store.dbPath, {
+                  sql: accountScope ? sql + ' AND i.account_scope = ?' : sql,
+                  params: accountScope ? [...params, accountScope] : params,
+                  visible(sourceItem, trustTier) {
+                    if (!store.selectedItemServable(sourceItem, accountScope, filters, 'metadata')) return false;
+                    const [tier] = store.effectiveItemTiers([sourceItem], 'names');
+                    if (searchNamesVisibility(store, trustTier, tier) !== 'personal') return false;
+                    if (store.childrenWithWithheldSearchIdentifiers([sourceItem], false).size) return false;
+                    const hit = { sourceItem, trustTier, corpusId: store.corpusId, trustDomain: store.trustDomain,
+                      servingLayer: 'metadata' as const, rawExposed: false as const };
+                    if (options.sourceIndexVisibilityGate && !options.sourceIndexVisibilityGate([hit]).includes(hit)) return false;
+                    contributing.add(store);
+                    return true;
+                  },
+                });
+              }
+              if (action === 'raise') {
+                const itemId = asOptionalString(record.item_id);
+                if (!itemId) throw new EmailSourceWorkerError(400, 'invalid_request', 'item_id is required.');
+                return json(ownerTierItems.set({ itemId, choice: 'private', allowLower: false }, { scopes, current }));
+              }
+              const query = asOptionalString(record.query);
+              const recent = asOptionalBoolean(record.recent);
+              const limit = asOptionalNumber(record.limit, 'limit');
+              const result = await ownerTierItems.find({
+                ...(query !== undefined ? { query } : {}),
+                ...(recent !== undefined ? { recent } : {}),
+                ...(limit !== undefined ? { limit } : {}),
+                personalNamesOnly: true,
+              }, { scopes, current });
+              if (!current()) {
+                throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'Source visibility changed during the lookup. Retry under the current scope.');
+              }
+              return json(result);
+            });
           }
           throw new EmailSourceWorkerError(404, 'not_found', 'No such privacy item route.');
         }
@@ -3651,7 +3665,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(400, 'invalid_request', 'tier_corpus_ids must be an array of corpus ids.');
           }
           const requestedTiers = tierCorpusIds === undefined ? undefined : new Set(tierCorpusIds);
-          const canSearch = (id: string) => (options.searchableCorpusIds?.has(id) ?? true) && (requestedTiers?.has(id) ?? true);
+          const admission = searchStoreAdmission(options, requestedTiers);
+          const { canSearch } = admission;
           assertSourceIndexSearchQuery(record.query);
           if (record.personal_names_only !== undefined && record.personal_names_only !== true) {
             throw new EmailSourceWorkerError(400, 'invalid_request', 'personal_names_only must be true when provided.');
@@ -3662,9 +3677,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const personalNamesOnly = record.include_private_names !== true;
           // Resolve each requested store's grant and filters before any ranked read can consult a sibling.
           const planStore = (store: LocalConnectorStore) => {
-            const mandatoryScope = connectorStoreReadScope?.(store);
-            if (mandatoryScope?.allowed === false) return undefined;
-            const readScopeSignature = JSON.stringify(mandatoryScope);
+            const grant = admission.admit(store);
+            if (!grant) return undefined;
             const searchRequest = parseConnectorStoreIndexSearchRequestRecord(
               { ...record, corpus_id: store.corpusId },
               store,
@@ -3675,15 +3689,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               connectorStorePrincipals.get(store.corpusId),
               connectorStoreFilterCapabilities,
             );
-            return { store, mandatoryScope, readScopeSignature, searchRequest };
+            return { ...grant, scope: grant.scope(searchRequest.accountScope, searchRequest.filters), searchRequest };
           };
           type SearchPlan = NonNullable<ReturnType<typeof planStore>>;
           const plans = new Map<string, SearchPlan>();
           const planErrors = new Map<string, unknown>();
-          const planStores = (ids: Iterable<string>, mounted = connectorStoresByCorpusId) => {
-            for (const id of ids) {
-              const store = mounted.get(id);
-              if (!store) continue;
+          const planStores = (mounted: ReadonlyMap<string, LocalConnectorStore>) => {
+            for (const [id, store] of mounted) {
               try {
                 const plan = planStore(store);
                 if (plan) plans.set(id, plan);
@@ -3692,9 +3704,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               }
             }
           };
-          const parentAllowed = (candidate: ChildVisibilityStore) => plans.get(candidate.corpusId)?.store === candidate;
+          const parentAllowed = (candidate: ChildVisibilityStore) => !!admittedSearchParent(plans, candidate);
           const prepare = (corpusId: string, ids: readonly string[]) => withSearchVisibilityStores(parentAllowed, async () => {
-            const searchConnectorStore = async ({ store, mandatoryScope, readScopeSignature, searchRequest }: SearchPlan) => {
+            const searchConnectorStore = async ({ store, current, scope, searchRequest }: SearchPlan) => {
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId)
                 ?? sourceIndexEmbeddingProvider;
               const searchEmbeddingProvider = connectorStoreEmbeddingProvider
@@ -3711,12 +3723,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ?? (searchEmbeddingProvider && store.vectorLaneServable(searchEmbeddingProvider.modelId)
                   ? 'hybrid'
                   : 'keyword');
-              const combinedFilters = searchRequest.filters || mandatoryScope?.filters
-                ? normalizeConnectorStoreSearchFilters({
-                    ...searchRequest.filters,
-                    ...mandatoryScope?.filters,
-                  })
-                : undefined;
+              const { accountScope, filters: combinedFilters } = scope;
               const privateMatches = new Set<string>();
               const adapter = createConnectorStoreCorpusAdapter({
                 store,
@@ -3731,9 +3738,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                     });
                   },
                 } : {}),
-                ...(mandatoryScope?.allowed === true && mandatoryScope.accountScope
-                  ? { accountScope: mandatoryScope.accountScope }
-                  : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {}),
+                ...(accountScope ? { accountScope } : {}),
                 ...(combinedFilters ? { filters: combinedFilters } : {}),
                 ...(searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {}),
                 ...(searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}),
@@ -3752,15 +3757,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   allowedCorpusIds: [store.corpusId],
                 },
               }));
-              const accountScope = mandatoryScope?.allowed === true && mandatoryScope.accountScope
-                ? mandatoryScope.accountScope
-                : searchRequest.accountScope;
               return {
                 store,
                 searchRequest,
                 result,
                 privateMatches,
-                readScopeSignature,
+                current,
                 scope: {
                   corpusId: store.corpusId,
                   ...(accountScope ? { accountScope } : {}),
@@ -3795,8 +3797,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const tagged = [...taggedByHit.values()];
             // A cross-source search defers every names, grant and scope check until all ranked reads settle.
             return () => withSearchVisibilityStores(candidate => {
-              const plan = plans.get(candidate.corpusId);
-              return plan?.store === candidate && JSON.stringify(connectorStoreReadScope?.(plan.store)) === plan.readScopeSignature;
+              return admittedSearchParent(plans, candidate)?.current() ?? false;
             }, () => {
               // One tier-ledger snapshot judges every tier's hits together, and
               // a single pinned corpus (`all_tiers: false`) too: an item whose
@@ -3957,7 +3958,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               assertNoRawEmailFields(safeResult);
               // A query embedding or another tier's search may have awaited
               // while the account or its approval changed.
-              if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
+              if (runs.some(run => !run.current())) {
                 throw new EmailSourceWorkerError(
                   403,
                   'source_index_policy_violation',
@@ -3976,7 +3977,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(', ')}.`,
               );
             }
-            const connectorStore = connectorStoresByCorpusId.get(corpusId);
             const siblingIds = record.all_tiers === false || record.trust_domain !== undefined
               ? []
               : options.connectorStoreTierSiblings?.(corpusId) ?? [];
@@ -3984,26 +3984,26 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             if (!searchableIds.length) {
               throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'This corpus is not enabled for search.');
             }
+            const mounted = admission.mounted(searchableIds);
+            const connectorStore = mounted.get(corpusId);
             if (canSearch(corpusId) && !connectorStore) throw new EmailSourceWorkerError(
               501, 'source_index_search_not_supported', `The connector store for ${corpusId} is not mounted.`,
             );
             if (!personalNamesOnly && connectorStore?.trustDomain !== 'secure_local') {
               throw new EmailSourceWorkerError(400, 'invalid_request', 'include_private_names requires a Private corpus.');
             }
-            planStores(searchableIds);
+            planStores(mounted);
             return json((await prepare(corpusId, searchableIds))());
           }
           if (record.corpus_id !== undefined || !Array.isArray(corpusIds) || !corpusIds.length
             || !corpusIds.every(id => typeof id === 'string' && id.trim()) || new Set(corpusIds).size !== corpusIds.length) {
             throw new EmailSourceWorkerError(400, 'invalid_request', 'Supply distinct corpus_ids for a multi-source search.');
           }
-          const eligible = new Set(corpusIds.filter(canSearch));
-          options.refreshConnectorStores?.(eligible);
-          const mounted = new Map(connectorStores.map(store => [store.corpusId, store]));
-          planStores(eligible, mounted);
+          const mounted = admission.mounted(corpusIds);
+          planStores(mounted);
           const skipped: string[] = [];
           const prepared = await Promise.allSettled(corpusIds.map(id => {
-            if (eligible.has(id) && mounted.has(id)) return prepare(id, [id]);
+            if (mounted.has(id)) return prepare(id, [id]);
             skipped.push(id);
             return null;
           }));
