@@ -13,7 +13,7 @@ import {
 } from './source-index/types.ts';
 import { V0_4_PUBLIC_SOURCE_IDS } from './public-surface.ts';
 
-export const SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION = 1;
+export const SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION = 2;
 export const READWISE_LIBRARY_CORPUS_ID = 'internal.readwise.library';
 export const LEGACY_READWISE_LIBRARY_CORPUS_ID = 'public_safe.readwise.library';
 export const PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID = 'secure_local.telegram.protected.messages';
@@ -48,7 +48,7 @@ export interface SourceCorpusConfig {
 }
 
 export interface SourceCorpusRegistryConfig {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   corpora: SourceCorpusConfig[];
 }
 
@@ -143,7 +143,7 @@ const DEFAULT_SOURCE_CORPORA: SourceCorpusConfig[] = [
     // Hybrid on the vectors the lane already stores (owner decision
     // 2026-09-24, embedding ledger entry decision-2026-09-24-readwise-hybrid).
     activationMode: 'hybrid_primary',
-    capabilities: ['answer', 'status', 'sync'],
+    capabilities: ['answer', 'status', 'sync', 'search'],
     description: 'S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias.',
   },
   {
@@ -156,7 +156,7 @@ const DEFAULT_SOURCE_CORPORA: SourceCorpusConfig[] = [
     // secure analyst route like every Private corpus (owner decision 2026-09-24).
     activationMode: 'hybrid_primary',
     // No 'sync' of its own: the Readwise lane's tier set fills it.
-    capabilities: ['answer', 'status'],
+    capabilities: ['answer', 'status', 'search'],
     createdOnDemand: true,
     description: 'Readwise items raised to Private by per-item four-tier classification (for example a private highlight).',
   },
@@ -513,13 +513,20 @@ function orderCorporaForCapability(corpora: SourceCorpusConfig[], capability: So
   return ordered;
 }
 
+// Only these complete v1 declarations gain search. A narrower v1 list or
+// any explicit v2 list keeps exactly the capabilities its owner configured.
+const V1_SEARCH_UPGRADES = new Map<string, readonly SourceCorpusCapability[]>([
+  [READWISE_LIBRARY_CORPUS_ID, ['answer', 'status', 'sync']],
+  ['secure_local.readwise.library', ['answer', 'status']],
+]);
+
 export function parseSourceCorpusRegistryConfig(rawConfig: unknown): SourceCorpusRegistryConfig {
   const root = asRecord(rawConfig);
   if (!root) {
     throw new OperationError('config_error', 'sourceIndex corpus registry must be an object.');
   }
-  if (root.schemaVersion !== SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION) {
-    throw new OperationError('config_error', 'sourceIndex corpus registry schemaVersion must be 1.');
+  if (root.schemaVersion !== 1 && root.schemaVersion !== SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION) {
+    throw new OperationError('config_error', 'sourceIndex corpus registry schemaVersion must be 1 or 2.');
   }
   if (!Array.isArray(root.corpora)) {
     throw new OperationError('config_error', 'sourceIndex corpus registry requires a corpora array.');
@@ -531,6 +538,12 @@ export function parseSourceCorpusRegistryConfig(rawConfig: unknown): SourceCorpu
       throw new OperationError('config_error', `Duplicate source-index corpus id "${corpus.corpusId}" in registry.`);
     }
     seen.add(corpus.corpusId);
+    const former = root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
+    if (former && former.length === corpus.capabilities.length
+      && former.every(capability => corpus.capabilities.includes(capability))
+      && !narrowSourceCorpusToPublic(corpus).violation) {
+      corpus.capabilities.push('search');
+    }
   }
   return { schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION, corpora };
 }

@@ -1907,7 +1907,7 @@ var PUBLIC_OPERATION_NAMES = {
 };
 
 // src/core/source-corpus-registry.ts
-var SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION = 1;
+var SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION = 2;
 var READWISE_LIBRARY_CORPUS_ID = "internal.readwise.library";
 var LEGACY_READWISE_LIBRARY_CORPUS_ID = "public_safe.readwise.library";
 var PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.protected.messages";
@@ -1995,7 +1995,7 @@ var DEFAULT_SOURCE_CORPORA = [
     family: "readwise",
     trustDomain: "internal",
     activationMode: "hybrid_primary",
-    capabilities: ["answer", "status", "sync"],
+    capabilities: ["answer", "status", "sync", "search"],
     description: "S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias."
   },
   {
@@ -2005,7 +2005,7 @@ var DEFAULT_SOURCE_CORPORA = [
     family: "readwise",
     trustDomain: "secure_local",
     activationMode: "hybrid_primary",
-    capabilities: ["answer", "status"],
+    capabilities: ["answer", "status", "search"],
     createdOnDemand: true,
     description: "Readwise items raised to Private by per-item four-tier classification (for example a private highlight)."
   },
@@ -2158,13 +2158,17 @@ function canonicalSourceCorpusId(corpusId) {
     return PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID;
   return corpusId;
 }
+var V1_SEARCH_UPGRADES = new Map([
+  [READWISE_LIBRARY_CORPUS_ID, ["answer", "status", "sync"]],
+  ["secure_local.readwise.library", ["answer", "status"]]
+]);
 function parseSourceCorpusRegistryConfig(rawConfig) {
   const root = asRecord2(rawConfig);
   if (!root) {
     throw new OperationError("config_error", "sourceIndex corpus registry must be an object.");
   }
-  if (root.schemaVersion !== SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION) {
-    throw new OperationError("config_error", "sourceIndex corpus registry schemaVersion must be 1.");
+  if (root.schemaVersion !== 1 && root.schemaVersion !== SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION) {
+    throw new OperationError("config_error", "sourceIndex corpus registry schemaVersion must be 1 or 2.");
   }
   if (!Array.isArray(root.corpora)) {
     throw new OperationError("config_error", "sourceIndex corpus registry requires a corpora array.");
@@ -2176,6 +2180,10 @@ function parseSourceCorpusRegistryConfig(rawConfig) {
       throw new OperationError("config_error", `Duplicate source-index corpus id "${corpus.corpusId}" in registry.`);
     }
     seen.add(corpus.corpusId);
+    const former = root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
+    if (former && former.length === corpus.capabilities.length && former.every((capability) => corpus.capabilities.includes(capability)) && !narrowSourceCorpusToPublic(corpus).violation) {
+      corpus.capabilities.push("search");
+    }
   }
   return { schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION, corpora };
 }

@@ -3694,8 +3694,8 @@ function parseSourceCorpusRegistryConfig(rawConfig) {
   if (!root) {
     throw new OperationError("config_error", "sourceIndex corpus registry must be an object.");
   }
-  if (root.schemaVersion !== SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION) {
-    throw new OperationError("config_error", "sourceIndex corpus registry schemaVersion must be 1.");
+  if (root.schemaVersion !== 1 && root.schemaVersion !== SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION) {
+    throw new OperationError("config_error", "sourceIndex corpus registry schemaVersion must be 1 or 2.");
   }
   if (!Array.isArray(root.corpora)) {
     throw new OperationError("config_error", "sourceIndex corpus registry requires a corpora array.");
@@ -3707,6 +3707,10 @@ function parseSourceCorpusRegistryConfig(rawConfig) {
       throw new OperationError("config_error", `Duplicate source-index corpus id "${corpus.corpusId}" in registry.`);
     }
     seen.add(corpus.corpusId);
+    const former = root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
+    if (former && former.length === corpus.capabilities.length && former.every((capability) => corpus.capabilities.includes(capability)) && !narrowSourceCorpusToPublic(corpus).violation) {
+      corpus.capabilities.push("search");
+    }
   }
   return { schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION, corpora };
 }
@@ -3807,7 +3811,7 @@ function requiredEnum(value, allowed, label) {
     return value;
   throw new OperationError("config_error", `${label} must be one of: ${allowed.join(", ")}.`);
 }
-var SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION = 1, READWISE_LIBRARY_CORPUS_ID = "internal.readwise.library", LEGACY_READWISE_LIBRARY_CORPUS_ID = "public_safe.readwise.library", PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.protected.messages", LEGACY_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.messages", SOURCE_CORPUS_CAPABILITIES, DEFAULT_SOURCE_CORPORA, DEFAULT_CAPABILITY_ORDER, PUBLIC_SOURCE_IDS, PUBLIC_CORPUS_DECLARATIONS;
+var SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION = 2, READWISE_LIBRARY_CORPUS_ID = "internal.readwise.library", LEGACY_READWISE_LIBRARY_CORPUS_ID = "public_safe.readwise.library", PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.protected.messages", LEGACY_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.messages", SOURCE_CORPUS_CAPABILITIES, DEFAULT_SOURCE_CORPORA, DEFAULT_CAPABILITY_ORDER, V1_SEARCH_UPGRADES, PUBLIC_SOURCE_IDS, PUBLIC_CORPUS_DECLARATIONS;
 var init_source_corpus_registry = __esm(() => {
   init_operation_error();
   init_corpus();
@@ -3896,7 +3900,7 @@ var init_source_corpus_registry = __esm(() => {
       family: "readwise",
       trustDomain: "internal",
       activationMode: "hybrid_primary",
-      capabilities: ["answer", "status", "sync"],
+      capabilities: ["answer", "status", "sync", "search"],
       description: "S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias."
     },
     {
@@ -3906,7 +3910,7 @@ var init_source_corpus_registry = __esm(() => {
       family: "readwise",
       trustDomain: "secure_local",
       activationMode: "hybrid_primary",
-      capabilities: ["answer", "status"],
+      capabilities: ["answer", "status", "search"],
       createdOnDemand: true,
       description: "Readwise items raised to Private by per-item four-tier classification (for example a private highlight)."
     },
@@ -4130,6 +4134,10 @@ var init_source_corpus_registry = __esm(() => {
     ],
     promotion_candidates: ["secure_local.dropbox.files", "secure_local.local.files"]
   };
+  V1_SEARCH_UPGRADES = new Map([
+    [READWISE_LIBRARY_CORPUS_ID, ["answer", "status", "sync"]],
+    ["secure_local.readwise.library", ["answer", "status"]]
+  ]);
   PUBLIC_SOURCE_IDS = new Set(V0_4_PUBLIC_SOURCE_IDS);
   PUBLIC_CORPUS_DECLARATIONS = new Map(DEFAULT_SOURCE_CORPORA.map((corpus) => [corpus.corpusId, corpus]));
 });
