@@ -156,6 +156,10 @@ export function startupAskCheck(ask: StartupAsk | undefined, startup?: { started
   if (!ask) return { id, title, status: 'skip', detail: 'No Ask was taken during start-up (start-up unobserved or too short)' };
   // linux-upgrade 44883598970: both copies built in 0.4 s, so the Ask landed on a ready engine and rightly never said "starting".
   const startupMs = startup ? startup.ended - startup.started : undefined;
+  // A private model still downloading after an update is the honest answer to an Ask then (plan, 21 Nov 2026).
+  if (!ask.completed && ask.status === 200 && ask.answer === 'model_downloading') {
+    return { id, title, status: 'pass', ms: ask.ms, detail: `said the private model is still downloading · ${ask.ms} ms` };
+  }
   if (ask.completed && !ask.saidStarting && startupMs !== undefined && startupMs < STARTUP_ASK_MIN_MS) {
     return { id, title, status: 'skip', ms: ask.ms, detail: `start-up took ${startupMs} ms, too short for an Ask to land in it; the Ask completed on the ready engine · ${ask.ms} ms` };
   }

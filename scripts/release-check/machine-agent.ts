@@ -883,6 +883,10 @@ async function smokeOwnerCookie(origin: string): Promise<string> {
 async function smoke(questionsFile: string): Promise<never> {
   const config = readConfig();
   const questions = JSON.parse(readFileSync(questionsFile, 'utf8')) as SmokeQuestionIn[];
+  // After an update the private model can still be downloading, and an Ask then honestly says so (plan, 21 Nov 2026,
+  // mac-upgrade 44900781180). The smoke's Private questions wait for the models first, and say how long that took.
+  let modelWaitMs: number | undefined;
+  try { modelWaitMs = await waitForEngine(30 * 60_000); } catch { /* the questions below then report what they meet */ }
   const stopBridge = startBridge(config.enginePort);
   const observed: Array<{ id: string; obs: SmokeObservation }> = [];
   const printed: string[] = [];
@@ -966,7 +970,7 @@ async function smoke(questionsFile: string): Promise<never> {
   });
   // "cannot start: …" is the smoke's reason when it never got a grant (no question ran): without it the report says only "no results".
   const lines = printed.filter((line) => /^\s+(FAIL|warn):/.test(line) || /^\s+(PASS|\d+ failure)/.test(line) || /^cannot start:/.test(line)).map((line) => line.trim());
-  emit({ ok: true, exit: exit ?? 1, tools, results, smokeChecks: lines });
+  emit({ ok: true, exit: exit ?? 1, tools, results, smokeChecks: lines, ...(modelWaitMs !== undefined ? { modelWaitMs } : {}) });
 }
 
 // ---------------------------------------------------------------------------

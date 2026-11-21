@@ -1021,6 +1021,7 @@ async function runProtocolAgent(run: Run, workDir: string): Promise<void> {
       return;
     }
     run.add({ id: 'relay.reachable', title: 'The machine is reachable through the production relay', status: 'pass', detail: `ChatGPT-protocol grant minted; ${(out.result.tools as string[]).length} tool(s) listed` });
+    if (typeof out.result.modelWaitMs === 'number') run.log(`agent chatgpt-protocol: private models ready after ${Math.round(out.result.modelWaitMs / 1000)} s of waiting`);
     // The smoke's own verdict stands: its private-content and panel checks are stronger than anything re-derived here.
     agent.checks.push(evaluateSmokeVerdict(out.result.exit, (out.result.smokeChecks ?? []) as string[], run.markers));
     for (const question of SUITE_QUESTIONS) {

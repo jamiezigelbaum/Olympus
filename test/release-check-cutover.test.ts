@@ -77,6 +77,7 @@ test('an Ask taken during start-up fails only if it is cancelled, lost or silent
   expect(startupAskCheck(undefined).status).toBe('skip');
   expect(startupAskCheck({ status: 200, ms: 190_600, saidStarting: true, completed: true })).toMatchObject({ id: 'qualify.ask-startup', status: 'pass', ms: 190_600 });
   expect(startupAskCheck({ status: 200, ms: 40_000, saidStarting: false, completed: true }).status).toBe('fail');
+  expect(startupAskCheck({ status: 200, ms: 85, saidStarting: false, completed: false, answer: 'model_downloading' }).status).toBe('pass');
   // A start-up too short for an Ask to land in it is not a silent Ask.
   expect(startupAskCheck({ status: 200, ms: 34_330, saidStarting: false, completed: true }, { started: 0, ended: 302 }).status).toBe('skip');
   expect(startupAskCheck({ status: 200, ms: 34_330, saidStarting: false, completed: true }, { started: 0, ended: 20_000 }).status).toBe('fail');
