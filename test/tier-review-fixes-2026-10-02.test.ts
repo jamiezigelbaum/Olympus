@@ -498,7 +498,7 @@ describe('4. a re-judge that finds a secret in stored text', () => {
     expect(secureRow?.vectors ?? []).toEqual([]);
     expect(secureRow?.columns.title ?? null).toBeNull();
     expect(secureRow?.columns.search_text ?? null).toBeNull();
-    expect(install.secrets.get(garden)).toMatchObject({ providerItemId: 'id:garden', findingKinds: expect.arrayContaining([expect.any(String)]) });
+    expect(install.secrets.get(garden)).toMatchObject({ findingKinds: expect.arrayContaining([expect.any(String)]) });
     const everything = await olympusSearch(install, 'orchard irrigation');
     expect(everything).not.toContain(FAKE_AWS_KEY);
     expect(everything).not.toContain('irrigation controller');
@@ -526,7 +526,7 @@ describe('4b. a new secret pattern reaches items already stored (#880)', () => {
     expect(install.lane.ledger.getCurrent(garden)!.reasons).toContain('content:secret:credential_assignment');
     expect(install.lane.ledger.copies(garden)).toEqual([]);
     expect(install.lane.internal.current()!.exportItemCopy(garden)).toBeUndefined();
-    expect(install.secrets.get(garden)).toMatchObject({ providerItemId: 'id:garden' });
+    expect(install.secrets.get(garden)).toBeDefined();
     expect(prompts.length).toBe(asked);
     expect(await olympusSearch(install, 'orchard account recovery')).not.toContain('ABCD-EFGH-1234');
     // The other stored item has no secret and keeps its decision.
@@ -558,8 +558,10 @@ describe('4b. a new secret pattern reaches items already stored (#880)', () => {
     expect(settled).toMatchObject({ metadataTier: 'secrets', contentTier: 'secrets', decidedBy: 'secret_detector' });
     expect(settled.reasons).toContain('metadata:secret:credential_assignment');
     expect(install.lane.ledger.copies(garden)).toEqual([]);
-    const location = install.secrets.get(garden)!;
-    expect(location).toMatchObject({ namesReleasable: false });
+    // get() returns no locator or title (they go out only screened); read the stored row.
+    const location = new Database(install.secrets.dbPath, { readonly: true })
+      .query('SELECT names_releasable, title, locator FROM secret_locations WHERE provider_item_id = ?').get(garden.providerItemId);
+    expect(location).toMatchObject({ names_releasable: 0 });
     expect(JSON.stringify(location)).not.toContain('ABCD-EFGH-1234');
   });
 
@@ -966,7 +968,7 @@ describe('12. a per-item owner override applies to an item already stored (no fi
     expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
 
     expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ secrets: 1 });
-    expect(install.secrets.get(garden)).toMatchObject({ providerItemId: 'id:garden', findingKinds: ['owner_marked_secret'] });
+    expect(install.secrets.get(garden)).toMatchObject({ findingKinds: ['owner_marked_secret'] });
     expect(install.lane.ledger.copies(garden)).toEqual([]);
     expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ secrets: 0 });
   });
