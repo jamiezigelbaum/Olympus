@@ -8,6 +8,7 @@ import { exposedOperations } from '../src/core/operation-exposure.ts';
 import {
   LEGACY_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+  createPublicSourceCorpusRegistry,
   createSourceCorpusRegistry,
   defaultSourceCorpusRegistryConfig,
   parsePublicSourceCorpusRegistryConfig,
@@ -63,7 +64,7 @@ describe('config-driven source corpus registry', () => {
     });
   });
 
-  test('canonicalizes the former Readwise id without adding a search capability or duplicate fan-out lane', () => {
+  test('canonicalizes the former Readwise id and searches both shipped tiers without duplicate fan-out', () => {
     const registry = createSourceCorpusRegistry(defaultSourceCorpusRegistryConfig());
     const legacyConfig = defaultSourceCorpusRegistryConfig();
     legacyConfig.corpora.find((corpus) => corpus.sourceId === 'readwise.library')!.corpusId =
@@ -78,13 +79,33 @@ describe('config-driven source corpus registry', () => {
       // The lane's Private store (P1c), created on demand; not the alias.
       'secure_local.readwise.library',
     ]);
-    expect(registry.ids('search')).not.toContain('internal.readwise.library');
+    expect(registry.ids('search').filter(id => id.includes('readwise'))).toEqual([
+      'internal.readwise.library', 'secure_local.readwise.library',
+    ]);
     expect(registryFromLegacyConfig.ids('answer')).toContain('internal.readwise.library');
     expect(registryFromLegacyConfig.ids('answer')).not.toContain('public_safe.readwise.library');
-    expect(() => registry.require('public_safe.readwise.library', 'search')).toThrow(
-      'configured search corpora',
-    );
+    expect(registryFromLegacyConfig.require('public_safe.readwise.library', 'search')).toBe('internal.readwise.library');
   }, 10_000);
+
+  test('upgrades former shipped Readwise lists while preserving a narrowed saved roster', () => {
+    const config = defaultSourceCorpusRegistryConfig();
+    config.schemaVersion = 1;
+    const personal = config.corpora.find(corpus => corpus.corpusId === 'internal.readwise.library')!;
+    const privateCorpus = config.corpora.find(corpus => corpus.corpusId === 'secure_local.readwise.library')!;
+    personal.capabilities = ['sync', 'answer', 'status'];
+    privateCorpus.capabilities = ['answer', 'status'];
+    const load = () => createSourceCorpusRegistry(parsePublicSourceCorpusRegistryConfig(config));
+    expect(load().has(personal.corpusId, 'search')).toBe(true);
+    expect(load().has(privateCorpus.corpusId, 'search')).toBe(true);
+    // With the current schema these same lists explicitly omit search.
+    const current = createSourceCorpusRegistry({ ...config, schemaVersion: 2 });
+    expect(current.has(personal.corpusId, 'search')).toBe(false);
+    expect(current.has(privateCorpus.corpusId, 'search')).toBe(false);
+    personal.capabilities = ['answer', 'status'];
+    privateCorpus.capabilities = ['status'];
+    expect(load().has(personal.corpusId, 'search')).toBe(false);
+    expect(load().list().find(corpus => corpus.corpusId === privateCorpus.corpusId)?.capabilities).toEqual(['status']);
+  });
 
   test('canonicalizes the former protected Telegram id without duplicate fan-out', () => {
     const registry = createSourceCorpusRegistry(defaultSourceCorpusRegistryConfig());
@@ -298,7 +319,7 @@ describe('config-driven source corpus registry', () => {
     // A declared corpus whose configured capabilities reach past its
     // declaration: the public view keeps the declared ones and drops the rest.
     corpora.find((corpus) => corpus.corpusId === 'internal.readwise.library')!.capabilities
-      .push('search');
+      .push('promotion_candidates');
     config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig({
       schemaVersion: 1,
       corpora: [
@@ -334,7 +355,9 @@ describe('config-driven source corpus registry', () => {
       { config },
     ) as { properties: { corpus_id: { enum: string[] } } }).properties.corpus_id.enum;
     expect(searchEnum).not.toContain('internal.dropbox.work');
-    expect(searchEnum).not.toContain('internal.readwise.library');
+    expect(searchEnum).toContain('internal.readwise.library');
+    expect(createPublicSourceCorpusRegistry(config.sourceIndex.corpusRegistry).ids('promotion_candidates'))
+      .not.toContain('internal.readwise.library');
 
     // The private surface still sees everything the permissive loader accepted.
     expect(createSourceCorpusRegistry(config.sourceIndex.corpusRegistry).ids('search'))
@@ -342,7 +365,7 @@ describe('config-driven source corpus registry', () => {
     // ...and the public plugin-config path still refuses both entries outright,
     // where the operator wrote them and can act on the message.
     expect(() => parsePublicSourceCorpusRegistryConfig(config.sourceIndex.corpusRegistry))
-      .toThrow('Public sourceIndex corpus internal.readwise.library cannot add capabilities: search.');
+      .toThrow('Public sourceIndex corpus internal.readwise.library cannot add capabilities: promotion_candidates.');
     expect(() => parsePublicSourceCorpusRegistryConfig({
       schemaVersion: 1,
       corpora: config.sourceIndex.corpusRegistry.corpora
@@ -528,6 +551,8 @@ describe('config-driven source corpus registry', () => {
       'secure_local.telegram.protected.messages',
       'secure_local.evernote.notes',
       'internal.evernote.notes',
+      'internal.readwise.library',
+      'secure_local.readwise.library',
       'secure_local.whatsapp.messages',
       'internal.whatsapp.messages',
     ]);

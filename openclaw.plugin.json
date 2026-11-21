@@ -928,8 +928,10 @@
               "schemaVersion": {
                 "type": "number",
                 "enum": [
-                  1
-                ]
+                  1,
+                  2
+                ],
+                "description": "Use version 2 for explicit capability lists. Version 1 upgrades the former shipped Readwise capabilities to include search."
               },
               "corpora": {
                 "type": "array",
@@ -1280,7 +1282,8 @@
                             "enum": [
                               "answer",
                               "status",
-                              "sync"
+                              "sync",
+                              "search"
                             ]
                           }
                         }
@@ -1308,7 +1311,8 @@
                           "items": {
                             "enum": [
                               "answer",
-                              "status"
+                              "status",
+                              "search"
                             ]
                           }
                         }
@@ -2054,7 +2058,8 @@
                         "enum": [
                           "answer",
                           "status",
-                          "sync"
+                          "sync",
+                          "search"
                         ]
                       }
                     }
@@ -2082,7 +2087,8 @@
                       "items": {
                         "enum": [
                           "answer",
-                          "status"
+                          "status",
+                          "search"
                         ]
                       }
                     }
