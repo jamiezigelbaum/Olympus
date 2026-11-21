@@ -2162,7 +2162,7 @@ var V1_SEARCH_UPGRADES = new Map([
   [READWISE_LIBRARY_CORPUS_ID, ["answer", "status", "sync"]],
   ["secure_local.readwise.library", ["answer", "status"]]
 ]);
-function parseSourceCorpusRegistryConfig(rawConfig) {
+function parseSourceCorpusRegistryConfig(rawConfig, options = {}) {
   const root = asRecord2(rawConfig);
   if (!root) {
     throw new OperationError("config_error", "sourceIndex corpus registry must be an object.");
@@ -2180,7 +2180,7 @@ function parseSourceCorpusRegistryConfig(rawConfig) {
       throw new OperationError("config_error", `Duplicate source-index corpus id "${corpus.corpusId}" in registry.`);
     }
     seen.add(corpus.corpusId);
-    const former = root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
+    const former = options.migrateStoredV1 && root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
     if (former && former.length === corpus.capabilities.length && former.every((capability) => corpus.capabilities.includes(capability)) && !narrowSourceCorpusToPublic(corpus).violation) {
       corpus.capabilities.push("search");
     }
@@ -5639,7 +5639,7 @@ function applyEnvironmentOverrides(config, env) {
     config.sourceIndex.enabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
   }
   if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
-    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync9(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
+    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync9(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")), { migrateStoredV1: true });
   }
   if (env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()) {
     config.sourceIndex.ingestionExclusionsPath = env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV].trim();
@@ -5942,7 +5942,7 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   const corpora = sourceIndex?.corpora;
   if (Array.isArray(corpora)) {
     config.sourceIndex.corpusRegistry = parsePublicSourceCorpusRegistryConfig({
-      schemaVersion: 1,
+      schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION,
       corpora
     });
   }
@@ -23940,13 +23940,22 @@ function parentIdentityField(child) {
   const identity = parentIdentityOf(child);
   return identity ? { identity } : {};
 }
-function childVisibilityUnchanged(lane) {
+var searchStores;
+function searchVisibilityScoped() {
+  return searchStores?.getStore() !== undefined;
+}
+function childVisibilityStores(lane) {
+  const allowed = searchStores?.getStore();
   const stores = lane.stores();
+  return allowed ? stores.filter(allowed) : stores;
+}
+function childVisibilityUnchanged(lane) {
+  const stores = childVisibilityStores(lane);
   const ledger = lane.ledger();
   const ledgerMarker = ledger?.changeMarker();
   const markers = stores.map((store) => store.childVisibilityMarker?.());
   return () => {
-    const current = lane.stores();
+    const current = childVisibilityStores(lane);
     return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker && current.length === stores.length && current.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
   };
 }
@@ -23975,7 +23984,7 @@ function* judge(lane, parents, depth) {
     return verdicts;
   }
   const rows = new Map;
-  for (const store of lane.stores()) {
+  for (const store of childVisibilityStores(lane)) {
     for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
       const key = parentKey(row);
       const list = rows.get(key) ?? [];
@@ -24059,7 +24068,7 @@ function* itemVerdictsSteps(lane, items) {
   try {
     const refs = new Map;
     const refKeyOf = new Map;
-    for (const store of lane.stores()) {
+    for (const store of childVisibilityStores(lane)) {
       for (const [key, row] of yield* visibilityRead(() => store.itemStandings([...asked.values()]), () => store.itemStandingsOffThread?.([...asked.values()]) ?? Promise.resolve(store.itemStandings([...asked.values()])))) {
         const ref = {
           provider: row.provider,
@@ -24111,7 +24120,7 @@ function* childrenWithHiddenParentsSteps(lane, children) {
 function* childLinksSteps(lane, probes) {
   const found = new Map;
   let remaining = probes;
-  for (const store of lane.stores()) {
+  for (const store of childVisibilityStores(lane)) {
     if (remaining.length === 0)
       break;
     const asked = remaining;
@@ -27483,6 +27492,8 @@ class LocalConnectorStore {
   tierHiddenCountsMemo;
   tierHiddenCountsRefresh;
   refreshTierHiddenCountsInTurns() {
+    if (searchVisibilityScoped())
+      return Promise.resolve();
     const prior = this.tierHiddenCountsMemo;
     this.tierHiddenCountsRefresh ??= (async () => {
       try {
@@ -28420,13 +28431,19 @@ class LocalConnectorStore {
     };
   }
   childrenWithWithheldSearchIdentifiers(identities, includePrivateNames) {
+    const links = this.parentLinksOf(identities);
     const withheld = new Set;
-    let pending = [...this.parentLinksOf(identities)].map(([child, parent]) => ({ child, parent }));
+    for (const identity of identities) {
+      const key = tierLedgerIdentityKey(identity);
+      if (!links.has(key) && parentIdentityOf(identity))
+        withheld.add(key);
+    }
+    let pending = [...links].map(([child, parent]) => ({ child, parent }));
     if (pending.length === 0)
       return withheld;
     const lane = this.childVisibilityLane();
     const ledger = lane.ledger();
-    const stores = lane.stores();
+    const stores = childVisibilityStores(lane);
     const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }] : [];
     for (let depth = 0;pending.length > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
       const refs = [...new Map(pending.map(({ parent }) => [parentKey(parent), parent])).values()];
@@ -28658,7 +28675,7 @@ class LocalConnectorStore {
     const storeChanges = new Map;
     try {
       ledger = lane.ledger();
-      const members = lane.stores();
+      const members = childVisibilityStores(lane);
       if (!ledger || this.visibilityLedger() !== ledger || !members.includes(this) || !members.every((store) => store instanceof LocalConnectorStore && store.visibilityFeedPresent)) {
         this.hiddenChildMemo = undefined;
         return yield* this.hiddenChildFullReadSteps();
@@ -28734,7 +28751,7 @@ class LocalConnectorStore {
       return yield* this.hiddenChildReadSteps();
     let stable = false;
     try {
-      const current = lane.stores();
+      const current = childVisibilityStores(lane);
       stable = lane.ledger() === ledger && this.visibilityLedger() === ledger && current.length === stores.length && stores.every((store) => current.includes(store) && store.visibilityFeedPresent);
     } catch {}
     if (!stable) {
@@ -28833,7 +28850,7 @@ class LocalConnectorStore {
       }
       const refs = [...new Map(climbing.map(({ ref }) => [parentKey(ref), ref])).values()];
       const next = new Map;
-      for (const store of lane.stores()) {
+      for (const store of childVisibilityStores(lane)) {
         const standings = yield* visibilityRead(() => store.parentStandings(refs), () => store.parentStandingsOffThread?.(refs) ?? Promise.resolve(store.parentStandings(refs)));
         for (const row of standings)
           for (const origin of origins.get(parentKey(row)) ?? []) {
@@ -30151,7 +30168,7 @@ ${parentKey(ref)}`, { ref, origin });
       this.visibilityStamp = undefined;
       return this.visibilityEpoch = randomUUID9();
     }
-    const siblings = new Map(children ? lane.stores().filter((store) => store !== this).map((store) => {
+    const siblings = new Map(children ? childVisibilityStores(lane).filter((store) => store !== this).map((store) => {
       const marker = store.childVisibilityMarker?.() ?? randomUUID9();
       return [store, store instanceof LocalConnectorStore && !store.visibilityFeedPresent ? `${store.visibilityOwner}:${marker}` : marker];
     }) : []);
@@ -34764,7 +34781,7 @@ ${parentKey(ref)}`, { ref, origin });
     let children;
     try {
       base = this.tierLedgerHiddenItemPks();
-      children = this.hiddenChildItemPks();
+      children = searchVisibilityScoped() ? [] : this.hiddenChildItemPks();
     } catch {
       return;
     }

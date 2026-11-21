@@ -894,7 +894,7 @@ export class EmailClient {
       ...(options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {}),
       ...(options.attachmentType ? { attachment_type: options.attachmentType } : {}),
       ...(options.maxResults !== undefined ? { max_results: options.maxResults } : {}),
-      ...(options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {}),
+      ...(options.includeLocators ? { include_locators: true } : {}),
       ...(options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}),
     });
     return parseSourceIndexSearchResult(data, {
@@ -915,7 +915,7 @@ export class EmailClient {
       personal_names_only: true,
       retrieval_mode: options.retrievalMode,
       max_results: options.maxResults,
-      include_locators: options.includeLocators,
+      ...(options.includeLocators ? { include_locators: true } : {}),
     });
     const slots = response.results;
     if (!Array.isArray(slots) || slots.length !== searchCorpora.length) {

@@ -42,6 +42,7 @@
 //
 // Source-neutral: nothing here names a source or a format.
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type LedgerRead, type TierVisibilityReads, type TierCopy } from '../classification/tier-ledger.ts';
 import { changeMemoryActivity } from '../../core/memory-counters.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
@@ -364,16 +365,35 @@ export interface ChildVisibilityLane {
   stores(): readonly ChildVisibilityStore[];
 }
 
+// Ranking and final release both use the same child checks as other store reads.
+// Keep their store boundary local to the request, including across awaits.
+let searchStores: AsyncLocalStorage<(store: ChildVisibilityStore) => boolean> | undefined;
+
+export function withSearchVisibilityStores<T>(allowed: (store: ChildVisibilityStore) => boolean, read: () => T): T {
+  searchStores ??= new AsyncLocalStorage();
+  return searchStores.run(allowed, read);
+}
+
+export function searchVisibilityScoped(): boolean {
+  return searchStores?.getStore() !== undefined;
+}
+
+export function childVisibilityStores(lane: ChildVisibilityLane): readonly ChildVisibilityStore[] {
+  const allowed = searchStores?.getStore();
+  const stores = lane.stores();
+  return allowed ? stores.filter(allowed) : stores;
+}
+
 // An awaited judgment spans store and ledger reads. Prove nothing changed
 // across them before serving any result; a tombstone during a pool wait must
 // hide the child just as it does for a synchronous reader.
 export function childVisibilityUnchanged(lane: ChildVisibilityLane): () => boolean {
-  const stores = lane.stores();
+  const stores = childVisibilityStores(lane);
   const ledger = lane.ledger();
   const ledgerMarker = ledger?.changeMarker();
   const markers = stores.map(store => store.childVisibilityMarker?.());
   return () => {
-    const current = lane.stores();
+    const current = childVisibilityStores(lane);
     return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker
       && current.length === stores.length
       && current.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
@@ -423,7 +443,7 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
   }
 
   const rows = new Map<string, Array<ParentStandingRow & { corpusId: string }>>();
-  for (const store of lane.stores()) {
+  for (const store of childVisibilityStores(lane)) {
     for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
       const key = parentKey(row);
       const list = rows.get(key) ?? [];
@@ -568,7 +588,7 @@ export function* itemVerdictsSteps(lane: ChildVisibilityLane, items: readonly Ch
   try {
     const refs = new Map<string, ParentRef>();
     const refKeyOf = new Map<string, string>();
-    for (const store of lane.stores()) {
+    for (const store of childVisibilityStores(lane)) {
       for (const [key, row] of yield* visibilityRead(() => store.itemStandings([...asked.values()]), () => store.itemStandingsOffThread?.([...asked.values()]) ?? Promise.resolve(store.itemStandings([...asked.values()])))) {
         const ref: ParentRef = {
           provider: row.provider,
@@ -673,7 +693,7 @@ export function childLinks(lane: ChildVisibilityLane, probes: readonly ChildProb
 function* childLinksSteps(lane: ChildVisibilityLane, probes: readonly ChildProbe[]): Generator<VisibilityRead, ChildWithParent[], unknown> {
   const found = new Map<string, ParentRef>();
   let remaining = probes;
-  for (const store of lane.stores()) {
+  for (const store of childVisibilityStores(lane)) {
     if (remaining.length === 0) break;
     const asked = remaining;
     for (const [key, parent] of yield* visibilityRead(() => store.parentLinksOf(asked), () => store.parentLinksOfOffThread?.(asked) ?? Promise.resolve(store.parentLinksOf(asked)))) found.set(key, parent);

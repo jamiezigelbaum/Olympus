@@ -3689,7 +3689,7 @@ function orderCorporaForCapability(corpora, capability) {
   ordered.push(...corpora.filter((corpus) => byId.has(corpus.corpusId)));
   return ordered;
 }
-function parseSourceCorpusRegistryConfig(rawConfig) {
+function parseSourceCorpusRegistryConfig(rawConfig, options = {}) {
   const root = asRecord2(rawConfig);
   if (!root) {
     throw new OperationError("config_error", "sourceIndex corpus registry must be an object.");
@@ -3707,7 +3707,7 @@ function parseSourceCorpusRegistryConfig(rawConfig) {
       throw new OperationError("config_error", `Duplicate source-index corpus id "${corpus.corpusId}" in registry.`);
     }
     seen.add(corpus.corpusId);
-    const former = root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
+    const former = options.migrateStoredV1 && root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
     if (former && former.length === corpus.capabilities.length && former.every((capability) => corpus.capabilities.includes(capability)) && !narrowSourceCorpusToPublic(corpus).violation) {
       corpus.capabilities.push("search");
     }
@@ -38446,7 +38446,7 @@ function applyEnvironmentOverrides(config, env) {
     config.sourceIndex.enabled = parseBoolean2(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
   }
   if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
-    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync27(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
+    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync27(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")), { migrateStoredV1: true });
   }
   if (env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()) {
     config.sourceIndex.ingestionExclusionsPath = env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV].trim();
@@ -38754,7 +38754,7 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   const corpora = sourceIndex?.corpora;
   if (Array.isArray(corpora)) {
     config.sourceIndex.corpusRegistry = parsePublicSourceCorpusRegistryConfig({
-      schemaVersion: 1,
+      schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION,
       corpora
     });
   }
@@ -58421,6 +58421,7 @@ var init_parent_context = __esm(() => {
 });
 
 // src/workers/connector-store/child-visibility.ts
+import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
 function* visibilityRead(here, offThread) {
   return yield { here, offThread };
 }
@@ -58609,13 +58610,25 @@ function parentIdentityField(child) {
   const identity = parentIdentityOf(child);
   return identity ? { identity } : {};
 }
-function childVisibilityUnchanged(lane) {
+function withSearchVisibilityStores(allowed, read) {
+  searchStores ??= new AsyncLocalStorage12;
+  return searchStores.run(allowed, read);
+}
+function searchVisibilityScoped() {
+  return searchStores?.getStore() !== undefined;
+}
+function childVisibilityStores(lane) {
+  const allowed = searchStores?.getStore();
   const stores = lane.stores();
+  return allowed ? stores.filter(allowed) : stores;
+}
+function childVisibilityUnchanged(lane) {
+  const stores = childVisibilityStores(lane);
   const ledger = lane.ledger();
   const ledgerMarker = ledger?.changeMarker();
   const markers = stores.map((store) => store.childVisibilityMarker?.());
   return () => {
-    const current = lane.stores();
+    const current = childVisibilityStores(lane);
     return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker && current.length === stores.length && current.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
   };
 }
@@ -58645,7 +58658,7 @@ function* judge(lane, parents, depth) {
     return verdicts;
   }
   const rows = new Map;
-  for (const store of lane.stores()) {
+  for (const store of childVisibilityStores(lane)) {
     for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
       const key = parentKey(row);
       const list = rows.get(key) ?? [];
@@ -58757,7 +58770,7 @@ function* itemVerdictsSteps(lane, items) {
   try {
     const refs = new Map;
     const refKeyOf = new Map;
-    for (const store of lane.stores()) {
+    for (const store of childVisibilityStores(lane)) {
       for (const [key, row] of yield* visibilityRead(() => store.itemStandings([...asked.values()]), () => store.itemStandingsOffThread?.([...asked.values()]) ?? Promise.resolve(store.itemStandings([...asked.values()])))) {
         const ref = {
           provider: row.provider,
@@ -58830,7 +58843,7 @@ function* childrenWithHiddenParentsSteps(lane, children) {
 function* childLinksSteps(lane, probes) {
   const found = new Map;
   let remaining = probes;
-  for (const store of lane.stores()) {
+  for (const store of childVisibilityStores(lane)) {
     if (remaining.length === 0)
       break;
     const asked = remaining;
@@ -58854,7 +58867,7 @@ function* hiddenChildKeysSteps(lane, probes) {
   }
   return yield* childrenWithHiddenParentsSteps(lane, links);
 }
-var VisibilityChangedError, VISIBILITY_CHANGE_RETRIES = 3, askReads, ASK_LEDGER_READS, releasing, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var VisibilityChangedError, VISIBILITY_CHANGE_RETRIES = 3, askReads, ASK_LEDGER_READS, releasing, searchStores, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   init_memory_counters();
@@ -64857,22 +64870,22 @@ var init_tier_move = __esm(() => {
 });
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
 function runPrivacyReleaseInference(work) {
-  privacyReleaseInference ??= new AsyncLocalStorage12;
-  localInferencePriority ??= new AsyncLocalStorage12;
+  privacyReleaseInference ??= new AsyncLocalStorage13;
+  localInferencePriority ??= new AsyncLocalStorage13;
   return privacyReleaseInference.run(true, () => localInferencePriority.run("owner", work));
 }
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage12;
+  localInferenceGuards ??= new AsyncLocalStorage13;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage12;
+  localInferencePriority ??= new AsyncLocalStorage13;
   return localInferencePriority.run("background", work);
 }
 function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage12;
+  localInferencePriority ??= new AsyncLocalStorage13;
   return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
 }
 function currentLocalInferencePriority() {
@@ -73733,6 +73746,8 @@ var init_local_index = __esm(() => {
     tierHiddenCountsMemo;
     tierHiddenCountsRefresh;
     refreshTierHiddenCountsInTurns() {
+      if (searchVisibilityScoped())
+        return Promise.resolve();
       const prior = this.tierHiddenCountsMemo;
       this.tierHiddenCountsRefresh ??= (async () => {
         try {
@@ -74670,13 +74685,19 @@ var init_local_index = __esm(() => {
       };
     }
     childrenWithWithheldSearchIdentifiers(identities, includePrivateNames) {
+      const links = this.parentLinksOf(identities);
       const withheld = new Set;
-      let pending = [...this.parentLinksOf(identities)].map(([child, parent]) => ({ child, parent }));
+      for (const identity of identities) {
+        const key = tierLedgerIdentityKey(identity);
+        if (!links.has(key) && parentIdentityOf(identity))
+          withheld.add(key);
+      }
+      let pending = [...links].map(([child, parent]) => ({ child, parent }));
       if (pending.length === 0)
         return withheld;
       const lane = this.childVisibilityLane();
       const ledger = lane.ledger();
-      const stores = lane.stores();
+      const stores = childVisibilityStores(lane);
       const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }] : [];
       for (let depth = 0;pending.length > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
         const refs = [...new Map(pending.map(({ parent }) => [parentKey(parent), parent])).values()];
@@ -74908,7 +74929,7 @@ var init_local_index = __esm(() => {
       const storeChanges = new Map;
       try {
         ledger = lane.ledger();
-        const members = lane.stores();
+        const members = childVisibilityStores(lane);
         if (!ledger || this.visibilityLedger() !== ledger || !members.includes(this) || !members.every((store) => store instanceof LocalConnectorStore && store.visibilityFeedPresent)) {
           this.hiddenChildMemo = undefined;
           return yield* this.hiddenChildFullReadSteps();
@@ -74984,7 +75005,7 @@ var init_local_index = __esm(() => {
         return yield* this.hiddenChildReadSteps();
       let stable = false;
       try {
-        const current = lane.stores();
+        const current = childVisibilityStores(lane);
         stable = lane.ledger() === ledger && this.visibilityLedger() === ledger && current.length === stores.length && stores.every((store) => current.includes(store) && store.visibilityFeedPresent);
       } catch {}
       if (!stable) {
@@ -75083,7 +75104,7 @@ var init_local_index = __esm(() => {
         }
         const refs = [...new Map(climbing.map(({ ref }) => [parentKey(ref), ref])).values()];
         const next = new Map;
-        for (const store of lane.stores()) {
+        for (const store of childVisibilityStores(lane)) {
           const standings = yield* visibilityRead(() => store.parentStandings(refs), () => store.parentStandingsOffThread?.(refs) ?? Promise.resolve(store.parentStandings(refs)));
           for (const row of standings)
             for (const origin of origins.get(parentKey(row)) ?? []) {
@@ -76401,7 +76422,7 @@ ${parentKey(ref)}`, { ref, origin });
         this.visibilityStamp = undefined;
         return this.visibilityEpoch = randomUUID12();
       }
-      const siblings = new Map(children ? lane.stores().filter((store) => store !== this).map((store) => {
+      const siblings = new Map(children ? childVisibilityStores(lane).filter((store) => store !== this).map((store) => {
         const marker = store.childVisibilityMarker?.() ?? randomUUID12();
         return [store, store instanceof LocalConnectorStore && !store.visibilityFeedPresent ? `${store.visibilityOwner}:${marker}` : marker];
       }) : []);
@@ -81014,7 +81035,7 @@ ${parentKey(ref)}`, { ref, origin });
       let children;
       try {
         base = this.tierLedgerHiddenItemPks();
-        children = this.hiddenChildItemPks();
+        children = searchVisibilityScoped() ? [] : this.hiddenChildItemPks();
       } catch {
         return;
       }
@@ -122172,7 +122193,7 @@ var init_dropbox = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/command-runner.ts
-import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
 import { Buffer as Buffer4 } from "node:buffer";
 import { execFile as execFile3, spawn as spawn7 } from "node:child_process";
 import { readFile as readFile6, readdir } from "node:fs/promises";
@@ -122442,7 +122463,7 @@ var init_command_runner = __esm(() => {
   init_memory_counters();
   init_descendant_groups();
   init_native_process_service();
-  activeExtraction = new AsyncLocalStorage13;
+  activeExtraction = new AsyncLocalStorage14;
   ExtractionCommandError = class ExtractionCommandError extends Error {
     command;
     exitCode;
@@ -151193,7 +151214,7 @@ class EmailClient {
       ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
       ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
       ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
-      ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
+      ...options.includeLocators ? { include_locators: true } : {},
       ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
     });
     return parseSourceIndexSearchResult(data, {
@@ -151212,7 +151233,7 @@ class EmailClient {
       personal_names_only: true,
       retrieval_mode: options.retrievalMode,
       max_results: options.maxResults,
-      include_locators: options.includeLocators
+      ...options.includeLocators ? { include_locators: true } : {}
     });
     const slots = response.results;
     if (!Array.isArray(slots) || slots.length !== searchCorpora.length) {
@@ -171526,7 +171547,7 @@ var init_tier_cli = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-import-allowance.ts
-import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
 function withGmailImportRunOnce(run) {
   const permission = { active: true };
   return operatorImport.run(permission, async () => {
@@ -171612,7 +171633,7 @@ var init_gmail_import_allowance = __esm(() => {
   init_limit_stops();
   registerLimit({ id: "gmail.import_allowance", kind: "requests", scope: "source", label: "Gmail import request allowance reached", unit: "requests", continue: "run_once" });
   GMAIL_IMPORT_LIMIT_SUBJECT = JSON.stringify(["gmail.email", "internal.email", "gmail.import_allowance"]);
-  operatorImport = new AsyncLocalStorage14;
+  operatorImport = new AsyncLocalStorage15;
   GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
   GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
   GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
@@ -194743,7 +194764,7 @@ var init_built_in_reranker = __esm(() => {
 });
 
 // src/workers/classification/judge-pacing.ts
-import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
 import { createHash as createHash96 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
@@ -194760,7 +194781,7 @@ class JudgeRateLimitPacer {
   lastSeq = 0;
   reportSeq = 0;
   blockedUntil = 0;
-  calls = new AsyncLocalStorage15;
+  calls = new AsyncLocalStorage16;
   constructor(clock = realClock) {
     this.clock = clock;
   }
@@ -229792,13 +229813,33 @@ function createEmailSourceWorker(options = {}) {
             throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names is only available for a single Private search.");
           }
           const personalNamesOnly = record.include_private_names !== true;
-          const prepare = async (corpusId, ids, mounted = connectorStoresByCorpusId) => {
-            const searchConnectorStore = async (store) => {
-              const mandatoryScope = connectorStoreReadScope?.(store);
-              if (mandatoryScope?.allowed === false)
-                return;
-              const readScopeSignature = JSON.stringify(mandatoryScope);
-              const searchRequest = parseConnectorStoreIndexSearchRequestRecord({ ...record, corpus_id: store.corpusId }, store, connectorStoreAccountScopes.get(store.corpusId), store.family === "chat" ? connectorStorePrincipals.get(store.corpusId) : undefined, connectorStorePrincipals.get(store.corpusId), connectorStoreFilterCapabilities);
+          const planStore = (store) => {
+            const mandatoryScope = connectorStoreReadScope?.(store);
+            if (mandatoryScope?.allowed === false)
+              return;
+            const readScopeSignature = JSON.stringify(mandatoryScope);
+            const searchRequest = parseConnectorStoreIndexSearchRequestRecord({ ...record, corpus_id: store.corpusId }, store, connectorStoreAccountScopes.get(store.corpusId), store.family === "chat" ? connectorStorePrincipals.get(store.corpusId) : undefined, connectorStorePrincipals.get(store.corpusId), connectorStoreFilterCapabilities);
+            return { store, mandatoryScope, readScopeSignature, searchRequest };
+          };
+          const plans = new Map;
+          const planErrors = new Map;
+          const planStores = (ids, mounted = connectorStoresByCorpusId) => {
+            for (const id of ids) {
+              const store = mounted.get(id);
+              if (!store)
+                continue;
+              try {
+                const plan = planStore(store);
+                if (plan)
+                  plans.set(id, plan);
+              } catch (error) {
+                planErrors.set(id, error);
+              }
+            }
+          };
+          const parentAllowed = (candidate) => plans.get(candidate.corpusId)?.store === candidate;
+          const prepare = (corpusId, ids) => withSearchVisibilityStores(parentAllowed, async () => {
+            const searchConnectorStore = async ({ store, mandatoryScope, readScopeSignature, searchRequest }) => {
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
               const searchEmbeddingProvider = connectorStoreEmbeddingProvider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? connectorStoreEmbeddingProvider : undefined;
               const retrievalMode = searchRequest.retrievalMode ?? (searchEmbeddingProvider && store.vectorLaneServable(searchEmbeddingProvider.modelId) ? "hybrid" : "keyword");
@@ -229859,13 +229900,12 @@ function createEmailSourceWorker(options = {}) {
             };
             const runs = [];
             for (const id of ids) {
-              const store = mounted.get(id);
-              if (!store)
-                continue;
-              const run = await searchConnectorStore(store);
-              if (run)
-                runs.push(run);
-              else if (store.corpusId === corpusId)
+              if (planErrors.has(id))
+                throw planErrors.get(id);
+              const plan = plans.get(id);
+              if (plan)
+                runs.push(await searchConnectorStore(plan));
+              else if (id === corpusId)
                 break;
             }
             const primary = runs[0];
@@ -229883,7 +229923,10 @@ function createEmailSourceWorker(options = {}) {
               }]);
             })));
             const tagged = [...taggedByHit.values()];
-            return () => {
+            return () => withSearchVisibilityStores((candidate) => {
+              const plan = plans.get(candidate.corpusId);
+              return plan?.store === candidate && JSON.stringify(connectorStoreReadScope?.(plan.store)) === plan.readScopeSignature;
+            }, () => {
               const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
               const verdictScopes = new Map;
               const unreadCorpora = new Set;
@@ -230025,8 +230068,8 @@ function createEmailSourceWorker(options = {}) {
                 throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The source read scope changed during search. Retry under the current scope.");
               }
               return safeResult;
-            };
-          };
+            });
+          });
           if (corpusIds === undefined) {
             const corpusId = canonicalRequestCorpusId(record);
             if (!corpusId) {
@@ -230043,6 +230086,7 @@ function createEmailSourceWorker(options = {}) {
             if (!personalNamesOnly && connectorStore?.trustDomain !== "secure_local") {
               throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names requires a Private corpus.");
             }
+            planStores(searchableIds);
             return json((await prepare(corpusId, searchableIds))());
           }
           if (record.corpus_id !== undefined || !Array.isArray(corpusIds) || !corpusIds.length || !corpusIds.every((id) => typeof id === "string" && id.trim()) || new Set(corpusIds).size !== corpusIds.length) {
@@ -230051,10 +230095,11 @@ function createEmailSourceWorker(options = {}) {
           const eligible = new Set(corpusIds.filter(canSearch));
           options.refreshConnectorStores?.(eligible);
           const mounted = new Map(connectorStores.map((store) => [store.corpusId, store]));
+          planStores(eligible, mounted);
           const skipped = [];
           const prepared = await Promise.allSettled(corpusIds.map((id) => {
             if (eligible.has(id) && mounted.has(id))
-              return prepare(id, [id], mounted);
+              return prepare(id, [id]);
             skipped.push(id);
             return null;
           }));
@@ -246838,9 +246883,9 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/engine/runtime/source-answer-lanes.ts
-import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage17 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay, now = Date.now) {
-  const context = new AsyncLocalStorage16;
+  const context = new AsyncLocalStorage17;
   let inFlight = 0;
   let startedAt;
   let lastEndedAt;
@@ -252880,7 +252925,7 @@ var init_control_plane = __esm(() => {
 });
 
 // src/workers/engine-split/runtime.ts
-import { AsyncLocalStorage as AsyncLocalStorage17 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage18 } from "node:async_hooks";
 import { randomUUID as randomUUID44 } from "node:crypto";
 import { lstatSync as lstatSync56 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
@@ -253100,7 +253145,7 @@ function restartingResponse(request) {
 function createFrontGate() {
   let open = true;
   let generation = 0;
-  const current = new AsyncLocalStorage17;
+  const current = new AsyncLocalStorage18;
   return {
     isOpen: () => open,
     close() {
