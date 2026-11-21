@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, writeF
 import { join, relative } from 'node:path';
 import { DASHBOARD_UPDATE_COPY } from '../../src/workers/dashboard/vocabulary.ts';
 import { DASHBOARD_TOOL_NAME } from '../../src/workers/chatgpt/dashboard-contract.ts';
+import { DASHBOARD_UNLOCK_SHELL_HEADER } from '../../src/core/dashboard-launch.ts';
 import type { CheckResult } from './report.ts';
 
 export const CUTOVER_LOG = 'cutover-watch.jsonl';
@@ -104,7 +105,9 @@ export async function samplePage(fetch: WorkerFetch, page: Page, at: number): Pr
     const response = await fetch(PAGES[page], init);
     status = response.status;
     const body = await response.text();
-    authRefused = response.status === 401 || response.status === 403;
+    // The content-free unlock shell (#1187) answers a cookie without this origin's unlock key, which a session minted on a release
+    // before the key (1.4.4) never had (linux-upgrade 44883598970: 2,208 probes after READY). Like a refusal, it calls for a new session.
+    authRefused = response.status === 401 || response.status === 403 || response.headers.get(DASHBOARD_UNLOCK_SHELL_HEADER) !== null;
     if (response.status === 503 && body.includes('Olympus is starting:')) return true;
     if (response.status !== 200 || !response.headers.get('content-type')?.includes('text/html')) return false;
     if (page === 'Sources') return body.includes('class="srcrows"');
@@ -144,10 +147,18 @@ type WatchEntry = Sample | { pageSample: PageSample } | { startupStarted: number
 /** An Ask accepted during start-up: judged only on saying it is still starting and completing by itself; its time is reported. */
 export interface StartupAsk { status: number | null; ms: number; saidStarting: boolean; completed: boolean; error?: string }
 
-export function startupAskCheck(ask: StartupAsk | undefined): CheckResult {
+/** A start-up shorter than this ends before an Ask sent in it is accepted, so the Ask cannot see it. */
+const STARTUP_ASK_MIN_MS = 1_000;
+
+export function startupAskCheck(ask: StartupAsk | undefined, startup?: { started: number; ended: number }): CheckResult {
   const id = 'qualify.ask-startup';
   const title = 'An Ask accepted during start-up says Olympus is still starting and completes by itself (time reported)';
   if (!ask) return { id, title, status: 'skip', detail: 'No Ask was taken during start-up (start-up unobserved or too short)' };
+  // linux-upgrade 44883598970: both copies built in 0.4 s, so the Ask landed on a ready engine and rightly never said "starting".
+  const startupMs = startup ? startup.ended - startup.started : undefined;
+  if (ask.completed && !ask.saidStarting && startupMs !== undefined && startupMs < STARTUP_ASK_MIN_MS) {
+    return { id, title, status: 'skip', ms: ask.ms, detail: `start-up took ${startupMs} ms, too short for an Ask to land in it; the Ask completed on the ready engine · ${ask.ms} ms` };
+  }
   const ok = ask.completed && ask.saidStarting;
   const why = !ask.completed ? (ask.status === null ? `lost or cancelled (${ask.error ?? 'no response'})` : `cancelled (HTTP ${ask.status})`) : !ask.saidStarting ? 'silent: the answer never said Olympus was still starting' : 'completed and said it was still starting';
   return { id, title, status: ok ? 'pass' : 'fail', ms: ask.ms, detail: `${why} · ${ask.ms} ms` };
@@ -454,7 +465,7 @@ export function cutoverChecks(summary: CutoverSummary | undefined, gateStartup =
     if (notes.length) startup.detail += ` · ${notes.join(' · ')}`;
   }
   return [
-    ...(gateStartup ? [startup, startupAskCheck(summary?.startupAsk)] : []),
+    ...(gateStartup ? [startup, startupAskCheck(summary?.startupAsk, summary?.startup)] : []),
     { id: 'upgrade.cutover.wal', title: 'WAL sizes during the engine cutover', status: overLimit ? 'warn' : 'pass',
       detail: summary?.old_engine_down_at == null && summary ? `Shutdown unobserved · ${walDetail}` : walDetail },
     { id: 'upgrade.cutover.boot', title: 'Time from old engine down to new engine ready', status: 'reported', detail: number(summary?.boot_to_ready_ms, ' ms') },

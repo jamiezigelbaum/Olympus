@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.0 - Unreleased
+
+- **After updating from 1.4.x, run `olympus dashboard` once to unlock the dashboard.** A browser that last opened 1.4.x shows "Dashboard controls are locked" until then: the dashboard now also needs a per-browser unlock key, so a server on another port of this computer can't use the owner's cookie (#1187).
+
 ## 1.4.4 - 2026-11-10
 
 - **On a Mac, only the account that runs Olympus gets the owner controls.** Another standard account on the same Mac could open the dashboard as the owner. Olympus now checks that a local dashboard session comes from the account that runs it, and refuses any other (#1153, #1179).

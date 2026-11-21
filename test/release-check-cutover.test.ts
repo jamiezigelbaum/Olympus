@@ -67,6 +67,9 @@ test('Home requires the panel response and both pages accept the front’s start
   for (const page of ['Home', 'Sources'] as const) {
     expect((await samplePage(async () => html('Olympus is starting:', 503), page, Date.now())).answered).toBe(true);
     expect((await samplePage(async () => html('sign in'), page, Date.now())).answered).toBe(false);
+    // The unlock shell for a cookie without the unlock key asks for a new session, like a refusal.
+    const shell = await samplePage(async () => new Response('Opening Olympus…', { status: 200, headers: { 'content-type': 'text/html', 'X-Olympus-Dashboard-Shell': '1' } }), page, Date.now());
+    expect(shell).toMatchObject({ answered: false, authRefused: true });
   }
 });
 
@@ -74,6 +77,9 @@ test('an Ask taken during start-up fails only if it is cancelled, lost or silent
   expect(startupAskCheck(undefined).status).toBe('skip');
   expect(startupAskCheck({ status: 200, ms: 190_600, saidStarting: true, completed: true })).toMatchObject({ id: 'qualify.ask-startup', status: 'pass', ms: 190_600 });
   expect(startupAskCheck({ status: 200, ms: 40_000, saidStarting: false, completed: true }).status).toBe('fail');
+  // A start-up too short for an Ask to land in it is not a silent Ask.
+  expect(startupAskCheck({ status: 200, ms: 34_330, saidStarting: false, completed: true }, { started: 0, ended: 302 }).status).toBe('skip');
+  expect(startupAskCheck({ status: 200, ms: 34_330, saidStarting: false, completed: true }, { started: 0, ended: 20_000 }).status).toBe('fail');
   expect(startupAskCheck({ status: 503, ms: 1_000, saidStarting: true, completed: false }).detail).toContain('cancelled');
   expect(startupAskCheck({ status: null, ms: 0, saidStarting: false, completed: false, error: 'timeout' }).detail).toContain('lost or cancelled');
 });
