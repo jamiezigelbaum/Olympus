@@ -21,7 +21,7 @@
  * canary opened is closed again.
  *
  * With `--accounts <file>` the live accounts (live-accounts.ts) and the web clients (web-clients.ts) are checked after the
- * desktop; on test-mac and test-omarchy this also runs the ChatGPT protocol smoke against the installed engine.
+ * desktop; on test-mac and test-omarchy controlled engine timings and the ChatGPT protocol smoke run first.
  * The smoke uses the release suite's synthetic records and expects them to be indexed at their fixture tiers.
  * `--accounts-only` leaves out the update and the desktop checks. `--web-sign-in` only opens the canary browser on
  * the machine at each web app, for a person to sign the test accounts in and connect Olympus (over Screen Sharing).
@@ -40,6 +40,8 @@ import { BUN_LOCATE, bundleAgent, LEG_BUDGET_MINUTES, parseAgentLine } from './r
 import { forbiddenMarkers } from './fixture.ts';
 import { redactMarkers } from './leak.ts';
 import { protocolChecks } from './protocol.ts';
+import { canaryTimingChecks, type CanaryTimingReceipt } from './canary-timing.ts';
+import type { KnownCanaryAsk } from './qualify.ts';
 import { LegBudget } from './leg-budget.ts';
 import { liveChecks, publishFailedCheck } from './live-checks.ts';
 import { readAgentKey } from './agents.ts';
@@ -205,17 +207,27 @@ export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) 
 }
 
 const CANARY_SMOKE_TIMEOUT_MS = 60 * 60_000;
-const smokeMachine = (handle: string): boolean => handle === 'test-mac' || handle === 'test-omarchy';
+const CANARY_TIMING_TIMEOUT_MS = 40 * 60_000;
+const dedicatedCanary = (handle: string): boolean => handle === 'test-mac' || handle === 'test-omarchy';
 
-async function runCanarySmoke(machine: Machine, agent: string | undefined): Promise<CheckResult[]> {
-  const markers = forbiddenMarkers();
-  let code = 1;
-  let result: ReturnType<typeof parseAgentLine>;
+async function runInstalledCanaryAgent(machine: Machine, agent: string | undefined, accounts: CanaryAccounts): Promise<CheckResult[]> {
   try {
     if (!agent) throw new Error('the canary has no machine-agent bundle');
     const dir = await machine.exec('mkdir -p "$HOME/rc"', { timeoutMs: 15_000 });
     if (dir.code !== 0) throw new Error('could not create the machine-agent directory');
     await machine.put(agent, '~/rc/agent.js');
+  } catch (error) {
+    const problem = error instanceof Error ? error.message : String(error);
+    return [...canaryTimingChecks(undefined, problem), ...protocolChecks({ code: 1, stderr: '' }, { ok: false, detail: problem }, forbiddenMarkers())];
+  }
+  return [...await runCanaryTiming(machine, accounts), ...await runCanarySmoke(machine)];
+}
+
+async function runCanarySmoke(machine: Machine): Promise<CheckResult[]> {
+  const markers = forbiddenMarkers();
+  let code = 1;
+  let result: ReturnType<typeof parseAgentLine>;
+  try {
     const out = await machine.exec(`${BUN_LOCATE}\nexec "$BUN" --no-env-file ~/rc/agent.js canary-smoke\n`, { timeoutMs: CANARY_SMOKE_TIMEOUT_MS });
     code = out.code;
     result = parseAgentLine(out.stdout);
@@ -235,6 +247,26 @@ async function runCanarySmoke(machine: Machine, agent: string | undefined): Prom
   }));
 }
 
+async function runCanaryTiming(machine: Machine, accounts: CanaryAccounts): Promise<CheckResult[]> {
+  const source = accounts.sources.find(source => source.known?.expect.length);
+  const question = accounts.questions.find(question => question.kind === 'personal' && question.expect?.length && question.cite?.length);
+  const fallback: KnownCanaryAsk | undefined = question
+    ? { text: question.prompt, facts: question.expect!, citedTitle: question.cite![0]! }
+    : source?.known ? { text: source.known.question, facts: source.known.expect, source: source.label } : undefined;
+  const flag = fallback ? ` --known-ask ${shellQuote(JSON.stringify(fallback))}` : '';
+  try {
+    const out = await machine.exec(`${BUN_LOCATE}\nexec "$BUN" --no-env-file ~/rc/agent.js canary-timing${flag}\n`, { timeoutMs: CANARY_TIMING_TIMEOUT_MS });
+    const result = parseAgentLine(out.stdout);
+    if (out.code !== 0 || result?.ok !== true || !Array.isArray(result.interference)) {
+      const problem = out.timedOut ? 'The timing agent timed out' : `The timing agent returned no measurements (exit ${out.code})`;
+      return canaryTimingChecks(undefined, problem);
+    }
+    return canaryTimingChecks(result as unknown as CanaryTimingReceipt);
+  } catch {
+    return canaryTimingChecks(undefined, 'Could not run the timing agent');
+  }
+}
+
 /** Runs the canary's checks on one machine. Never throws for a product problem: every failure is a check. */
 export async function runCanary(machine: Machine, options: CanaryOptions): Promise<{ checks: CheckResult[]; screens: CanaryScreen[]; onDemandTiming?: OnDemandTimingResult }> {
   const desktop = options.accountsOnly ? { checks: [], screens: [] } : await runDesktopChecks(machine, options);
@@ -244,7 +276,7 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
   const checks = liveChecks(publishFailedCheck);
   Array.prototype.push.apply(checks, desktop.checks);
   const screens = [...desktop.screens];
-  if (smokeMachine(machine.handle)) checks.push(...await runCanarySmoke(machine, options.bridgeAgent));
+  if (dedicatedCanary(machine.handle)) checks.push(...await runInstalledCanaryAgent(machine, options.bridgeAgent, accounts));
   let onDemandTiming: OnDemandTimingResult | undefined;
   if (accounts.sources.length > 0 || options.onDemandTiming) {
     const started = Date.now();
@@ -675,8 +707,8 @@ if (import.meta.main) {
   if (bundle) expectVersion = bundle.version;
   const budgetChecks = liveChecks(publishFailedCheck);
   const kind = freshInstall ? 'fresh-install' : accounts ? 'accounts' : 'canary';
-  const protocolSmoke = kind === 'accounts' && smokeMachine(handle);
-  const budgetMs = LEG_BUDGET_MINUTES[kind] * 60_000 + (protocolSmoke ? CANARY_SMOKE_TIMEOUT_MS : 0);
+  const installedCanary = kind === 'accounts' && dedicatedCanary(handle);
+  const budgetMs = LEG_BUDGET_MINUTES[kind] * 60_000 + (installedCanary ? CANARY_SMOKE_TIMEOUT_MS + CANARY_TIMING_TIMEOUT_MS : 0);
   const budget = new LegBudget(kind, budgetMs, check => { budgetChecks.push(check); });
   const timedMachine = budget.machine(machine);
   const result = await (async () => {
@@ -696,7 +728,7 @@ if (import.meta.main) {
         accountsOnly: argv.includes('--accounts-only'),
         ...(onDemandTimingEnabled ? { onDemandTiming: true, cdp } : {}),
         screensDir: join(runDir, 'screens'),
-        ...(protocolSmoke || (os === 'linux' && accounts && (accounts.clients.length > 0 || onDemandTimingEnabled)) ? { bridgeAgent: await bundleAgent(runDir) } : {}),
+        ...(installedCanary || (os === 'linux' && accounts && (accounts.clients.length > 0 || onDemandTimingEnabled)) ? { bridgeAgent: await bundleAgent(runDir) } : {}),
       });
     } finally { budget.finish(); }
   })();

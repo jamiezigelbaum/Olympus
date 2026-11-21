@@ -4,6 +4,20 @@ import type { CheckResult } from './report.ts';
 
 export const QUALIFY_QUESTION = SUITE_QUESTIONS.find(question => question.id === 'personal-fact')!;
 
+export interface KnownCanaryAsk {
+  text: string;
+  facts: readonly string[];
+  citedTitle?: string;
+  source?: string;
+}
+
+export function expectedAskCitations(evidence: unknown, question: KnownCanaryAsk): { title?: string; source?: string }[] {
+  if (!Array.isArray(evidence)) return [];
+  const expected = question.citedTitle || question.source;
+  return evidence.filter(item => item && expected
+    && sourceNames([question.citedTitle ? item.title ?? '' : item.source ?? ''], expected));
+}
+
 export function citedFixture(evidence: unknown): boolean {
   return Array.isArray(evidence) && sourceNames(evidence.map(item =>
     [item?.title, item?.source].filter(Boolean).join(' · ')), QUALIFY_QUESTION.citedTitle!);
@@ -25,13 +39,13 @@ export function firstEvidenceMs(log: string): number | undefined {
   return receipt && Number(receipt[2]) > 0 ? Number(receipt[1]) : undefined;
 }
 
-export function observeAsk(status: number, body: any, ms: number, evidenceMs?: number): AskObservation {
+export function observeAsk(status: number, body: any, ms: number, evidenceMs?: number, question?: KnownCanaryAsk): AskObservation {
   return {
     status, ms,
     ...(evidenceMs !== undefined ? { firstEvidenceMs: evidenceMs } : {}),
     answered: status === 200 && body?.ok === true && body.status === 'answered',
-    factsStated: factsIn(String(body?.answer ?? ''), [...QUALIFY_QUESTION.facts]).every(Boolean),
-    cited: citedFixture(body?.citations),
+    factsStated: factsIn(String(body?.answer ?? ''), question?.facts ?? QUALIFY_QUESTION.facts).every(Boolean),
+    cited: question ? expectedAskCitations(body?.citations, question).length > 0 : citedFixture(body?.citations),
   };
 }
 

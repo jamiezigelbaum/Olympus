@@ -1,6 +1,6 @@
 import { DASHBOARD_UNLOCK_HEADER } from '../../src/core/dashboard-launch.ts';
 import { readBootProgress, readFrontProgress, type BootProgress } from '../../src/core/boot-progress.ts';
-import { citedFixture, firstEvidenceMs, observeAsk, QUALIFY_QUESTION, type AskObservation, type PrivacyObservation } from './qualify.ts';
+import { citedFixture, expectedAskCitations, firstEvidenceMs, observeAsk, QUALIFY_QUESTION, type AskObservation, type KnownCanaryAsk, type PrivacyObservation } from './qualify.ts';
 /**
  * The release check's in-machine half. The harness bundles this file, a driver
  * puts the bundle on a throwaway machine, and the harness then runs one
@@ -38,8 +38,8 @@ import noSensitivePreset from '../../config/sovereignty/presets/no-sensitive.jso
 import { spawn, spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, totalmem } from 'node:os';
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir, totalmem } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import type { SourceFamily } from '../../src/core/source-index/types.ts';
 import { archiveConnectorStoreDbPath } from '../../src/workers/archive-import/store.ts';
@@ -49,6 +49,7 @@ import { tierLedgerPathForStore } from '../../src/workers/classification/tier-le
 import { desktopSandboxOrigin, PRODUCTION_RELAY, runSmoke, type SmokeObservation, privateNoteKind, panelMeta, resultText } from '../chatgpt-live-smoke.ts';
 import { SUITE_QUESTIONS } from './fixture.ts';
 import { describeCanaryPrivateModel, waitForCanaryModels, type CanarySmokeSettings } from './canary-smoke.ts';
+import { canaryQuietWatch, type CanaryTimingReceipt } from './canary-timing.ts';
 import { LINUX_MACHINE_SAMPLE, MAC_MACHINE_SAMPLE } from './split-watch.ts';
 import { privateNoteKindIn } from './private-note.ts';
 import { FAKE_READWISE_PORT, FAKE_READWISE_TOKEN, startFakeReadwise } from './readwise-fake.ts';
@@ -72,7 +73,7 @@ import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './a
 import type { StoreView } from './archive-leg.ts';
 import { frontSteadyStage, logMark, logSince, seedFrontStoreSet, seedTelegramAfterUpdate, watchFront, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
 import { compareStoreFiles, leftoverFileNames, storeFiles } from './upgrade-split.ts';
-import { cutoverReport, hiddenCopyBuilds, markPlannedRestart, watchCutover, type StartupAsk } from './cutover.ts';
+import { CUTOVER_STOP, DASHBOARD_PAGES, cutoverReport, hiddenCopyBuilds, markPlannedRestart, samplePage, selfRestarts, watchCutover, watchNow, type StartupAsk } from './cutover.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -1004,34 +1005,44 @@ function readCanarySmokeSettings(timeoutMs: number): CanarySmokeSettings | undef
   catch { return undefined; }
 }
 
-function canaryPrivateRoute() {
+function canaryPrivateRoutes() {
   try {
     const env = environmentWithWorkerSetupEnv({ env: process.env, workerEnvPath: platform().workerEnvPath });
     const pool = loadSovereigntyEngine({ env }).resolveAnalystPool({ trustDomain: 'secure_local' });
-    return (pool.explicitOrder ?? pool.members)[0];
-  } catch { return undefined; }
+    return pool.explicitOrder ?? pool.members;
+  } catch { return []; }
 }
 
-async function canarySmoke(): Promise<never> {
-  const wait = await waitForCanaryModels(async remainingMs => {
+function waitForInstalledCanaryModels(
+  dashboard = dashboardJson,
+  settings?: CanarySmokeSettings,
+  allowLoading = true,
+) {
+  return waitForCanaryModels(async remainingMs => {
     const deadline = performance.now() + remainingMs;
     try {
-      const dash = await dashboardJson(Math.max(1, Math.min(5_000, Math.floor(remainingMs / 3))));
+      const dash = await dashboard(Math.max(1, Math.min(5_000, Math.floor(remainingMs / 3))));
       const setup = dash.status === 200 ? dash.json?.model_setup : undefined;
-      if (!setup?.ready || !setup.private_model || ['ready', 'loading'].includes(setup.private_model.state)) return setup;
+      if (!setup?.ready || !setup.private_model || setup.private_model.state === 'ready'
+        || (allowLoading && setup.private_model.state === 'loading')) return setup;
       // The dashboard also shows an unused built-in model. An external model can be ready while that download is still pending.
-      const current = readCanarySmokeSettings(Math.max(1, Math.min(5_000, Math.floor(deadline - performance.now()))))?.models?.local?.current;
+      const current = (settings ?? readCanarySmokeSettings(Math.max(1, Math.min(5_000, Math.floor(deadline - performance.now())))))?.models?.local?.current;
       return { ...setup, ready: !!current && !current.startsWith('builtin:') };
     } catch { return undefined; }
   }, { now: () => performance.now(), sleep });
-  const model = describeCanaryPrivateModel(readCanarySmokeSettings(15_000), canaryPrivateRoute());
+}
+
+function canaryMachineSample(): string {
+  const result = spawnSync('/bin/sh', ['-c', process.platform === 'darwin' ? MAC_MACHINE_SAMPLE : LINUX_MACHINE_SAMPLE], { encoding: 'utf8', timeout: 10_000 });
+  return result.stdout?.trim() || 'unavailable';
+}
+
+async function canarySmoke(): Promise<never> {
+  const wait = await waitForInstalledCanaryModels();
+  const model = describeCanaryPrivateModel(readCanarySmokeSettings(15_000), canaryPrivateRoutes()[0]);
   if (wait.problem) emit({ ok: false, detail: wait.problem, modelWaitMs: wait.ms, privateModel: model });
 
-  const sample = () => {
-    const result = spawnSync('/bin/sh', ['-c', process.platform === 'darwin' ? MAC_MACHINE_SAMPLE : LINUX_MACHINE_SAMPLE], { encoding: 'utf8', timeout: 10_000 });
-    return result.stdout?.trim() || 'unavailable';
-  };
-  const before = sample();
+  const before = canaryMachineSample();
   let receipt: Record<string, unknown>;
   try {
     receipt = await smokeQuestions(SUITE_QUESTIONS, {
@@ -1045,7 +1056,7 @@ async function canarySmoke(): Promise<never> {
   } catch (error) {
     receipt = { ok: false, detail: error instanceof Error ? error.message : String(error) };
   }
-  emit({ ...receipt, modelWaitMs: wait.ms, privateModel: model, sampleBefore: before, sampleAfter: sample() });
+  emit({ ...receipt, modelWaitMs: wait.ms, privateModel: model, sampleBefore: before, sampleAfter: canaryMachineSample() });
 }
 
 // ---------------------------------------------------------------------------
@@ -1943,21 +1954,237 @@ async function archiveSearch(question: string): Promise<{ ok: boolean; isError: 
   };
 }
 
-async function askWhileIndexing(local: Awaited<ReturnType<typeof mintLocalDashboard>>): Promise<AskObservation> {
+type LocalDashboard = Awaited<ReturnType<typeof mintLocalDashboard>>;
+
+async function measureLocalAsk(local: LocalDashboard, question = QUALIFY_QUESTION as KnownCanaryAsk, timeoutMs = 180_000) {
   const engineLogs = platform().engineLogPaths.slice(0, 2);
   const mark = logMark(engineLogs);
   const started = performance.now();
   let status = 0;
-  let body: unknown;
+  let body: { citations?: unknown } | undefined;
   try {
-    const response = await local('/dashboard/private-answers', { action: 'ask', question: QUALIFY_QUESTION.text }, 180_000);
+    const response = await local('/dashboard/private-answers', { action: 'ask', question: question.text }, timeoutMs);
     status = response.status;
-    body = await response.json();
+    body = await response.json() as typeof body;
   } catch {
     // A failed response can still have reached evidence retrieval.
   }
   const ms = Math.round(performance.now() - started);
-  return observeAsk(status, body, ms, firstEvidenceMs(logSince(engineLogs, mark)));
+  const evidenceMs = firstEvidenceMs(logSince(engineLogs, mark));
+  const observation = observeAsk(status, body, ms, evidenceMs, question === QUALIFY_QUESTION ? undefined : question);
+  return { observation, citations: expectedAskCitations(body?.citations, question) };
+}
+
+async function askWhileIndexing(local: LocalDashboard): Promise<AskObservation> {
+  return (await measureLocalAsk(local)).observation;
+}
+
+const PRIVACY_ITEMS = '/dashboard/privacy/items';
+
+async function findPrivacyItems(local: LocalDashboard, title: string) {
+  const response = await local(`${PRIVACY_ITEMS}/find`, { query: title });
+  const body = await response.json() as {
+    ok?: boolean;
+    items?: { title?: string; item_id?: string; tier?: string; owner_choice?: string; owner_set?: boolean; override_review?: unknown }[];
+  };
+  return response.ok && body.ok ? body.items?.filter(item => item.title === title) ?? [] : [];
+}
+
+async function findTimingItem(local: LocalDashboard, title: string) {
+  const matches = await findPrivacyItems(local, title);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+async function setPrivacyItem(local: LocalDashboard, itemId: string, tier: 'private' | 'personal' | 'judge') {
+  const read = async (response: Response) => {
+    const body = await response.json() as { ok?: boolean; state?: string; request_id?: string };
+    if (!response.ok || body.ok !== true) throw new Error(`Privacy control answered HTTP ${response.status}`);
+    return body;
+  };
+  const started = performance.now();
+  const initial = await read(await local(`${PRIVACY_ITEMS}/set`, { item_id: itemId, tier }));
+  const ackMs = Math.ceil(performance.now() - started);
+  return {
+    ackMs,
+    async settled(): Promise<number | undefined> {
+      if (initial.state !== 'pending') return ackMs;
+      const requestId = initial.request_id;
+      if (!requestId) throw new Error('The pending reply had no receipt id');
+      let body = initial;
+      while (body.state === 'pending' && performance.now() - started < 120_000) {
+        await sleep(250);
+        body = await read(await local(`${PRIVACY_ITEMS}/status`, { request_id: requestId }));
+      }
+      return body.state === 'pending' ? undefined : Math.round(performance.now() - started);
+    },
+  };
+}
+
+async function timeCanaryClick(local: LocalDashboard, item: Awaited<ReturnType<typeof findTimingItem>>): Promise<NonNullable<CanaryTimingReceipt['click']>> {
+  if (!item?.item_id || (item.owner_choice ?? item.tier) !== 'Personal' || item.override_review) {
+    return { problem: 'No unique Personal timing fixture for Make Private' };
+  }
+  const result: NonNullable<CanaryTimingReceipt['click']> = {};
+  try {
+    const change = await setPrivacyItem(local, item.item_id, 'private');
+    result.ackMs = change.ackMs;
+    if (await change.settled() === undefined) result.problem = 'The privacy receipt did not settle';
+  } catch {
+    result.problem = 'Make Private did not return a successful acknowledgement and settled receipt';
+  } finally {
+    // Undo the synthetic fixture's change, including when a lost response might have hidden a successful write.
+    try {
+      const current = await findTimingItem(local, item.title!);
+      if (result.ackMs !== undefined || !current || (current.owner_choice ?? current.tier) !== 'Personal' || current.owner_set !== item.owner_set) {
+        // Clearing an override alone waits for the next sync to reclassify. Restore the
+        // fixture's Personal tier first so the following account checks can still find it.
+        const restore = await setPrivacyItem(local, item.item_id, 'personal');
+        if (await restore.settled() === undefined) throw new Error('The restore receipt did not settle');
+        const deadline = performance.now() + 120_000;
+        let restored = await findTimingItem(local, item.title!);
+        while (restored?.tier !== 'Personal' && performance.now() < deadline) {
+          await sleep(1_000);
+          restored = await findTimingItem(local, item.title!);
+        }
+        if (restored?.tier !== 'Personal' || restored.item_id !== item.item_id) throw new Error('The fixture did not return to Personal');
+        if (!item.owner_set && restored.owner_set) {
+          const clear = await setPrivacyItem(local, item.item_id, 'judge');
+          if (await clear.settled() === undefined) throw new Error('The temporary owner choice did not clear');
+        }
+      }
+    } catch {
+      result.problem = [result.problem, 'The fixture privacy choice could not be restored'].filter(Boolean).join(' · ');
+    }
+  }
+  return result;
+}
+
+function startCanaryEngineRestart(bin: string): Promise<boolean> {
+  return new Promise(resolve => {
+    const child = spawn(bin, ['engine', 'restart'], { stdio: 'ignore', timeout: 180_000 });
+    child.once('error', () => resolve(false));
+    child.once('close', code => resolve(code === 0));
+  });
+}
+
+async function canaryTiming(fallback?: KnownCanaryAsk): Promise<never> {
+  const p = platform();
+  const quiet = canaryQuietWatch(p.olympusBin);
+  const receipt: CanaryTimingReceipt = { interference: [] };
+  const settings = readCanarySmokeSettings(15_000);
+  const routes = canaryPrivateRoutes();
+  const describeModel = (value: CanarySmokeSettings | undefined) => describeCanaryPrivateModel(value, canaryPrivateRoutes()[0]);
+  const snapshot = (privateModel: string) => {
+    const sample = canaryMachineSample();
+    if (sample === 'unavailable') quiet.interference.add('machine sample unavailable');
+    return { sample, topCpu: quiet.sample(), privateModel };
+  };
+  let timer: ReturnType<typeof setInterval> | undefined;
+  try {
+    const beforeModel = describeModel(settings);
+    const blockedRoute = routes.some(({ profile }) => {
+      if (!profile.baseUrl) return false;
+      const host = new URL(profile.baseUrl).hostname.toLowerCase();
+      return /(?:^|[.-])(?:sparta|delphi)(?:[.-]|$)/.test(host) ||
+        (profile.provider === 'local-openai-compatible' && !['localhost', '127.0.0.1', '[::1]'].includes(host));
+    });
+    const bearer = blockedRoute || !settings ? undefined : workerBearer(5_000);
+    const mint = () => ownerSession(5_000, bearer);
+    let session = bearer ? await mint().catch(() => undefined) : undefined;
+    receipt.before = snapshot(beforeModel);
+    if (blockedRoute) {
+      quiet.interference.add('private model route is outside the dedicated test machine');
+    } else if (settings && !quiet.interference.size) {
+      timer = setInterval(quiet.sample, 2_000);
+      const engineLogs = p.engineLogPaths.slice(0, 2);
+      const mark = logMark(engineLogs);
+      const instance = (progress: BootProgress | undefined) => progress && `${progress.pid}:${progress.startedAt}`;
+      const oldFront = instance(readFrontProgress());
+      const oldBackground = instance(readBootProgress());
+      const watchDir = mkdtempSync(join(tmpdir(), 'olympus-canary-timing-'));
+      const started = watchNow();
+      const restart = startCanaryEngineRestart(p.olympusBin);
+      const startup: NonNullable<CanaryTimingReceipt['startup']> = { started, through: started, pages: [] };
+      receipt.startup = startup;
+      const watch = watchCutover(watchDir, p.dataDir, 30 * 60, p.workerFetch, async () => {
+        session = await mint();
+        return session.request;
+      }, {
+        fresh: true,
+        ...(session?.request ? { initialPageSession: session.request } : {}),
+        onPageSample: sample => startup.pages.push(sample),
+      }).catch(() => { startup.problem = 'The cutover watcher could not complete'; });
+      try {
+        let built = false;
+        let readyAt: number | undefined;
+        const models = await waitForInstalledCanaryModels(async timeoutMs => {
+          const front = readFrontProgress();
+          const background = readBootProgress();
+          if (front?.phase !== 'done' || instance(front) === oldFront ||
+              background?.phase !== 'done' || instance(background) === oldBackground) return { status: 503, json: undefined, text: '' };
+          if (!built) {
+            const copies = hiddenCopyBuilds(logSince(engineLogs, mark));
+            built = !!copies.finished.front && !!copies.finished.background;
+          }
+          const signal = AbortSignal.timeout(timeoutMs ?? 5_000);
+          session ??= await mint();
+          const dash = await session.call('GET', '/dashboard.json', undefined, signal);
+          if (dash.status === 401 || dash.status === 403) session = undefined;
+          if (built) readyAt = watchNow();
+          return built ? dash : { ...dash, status: 503 };
+        }, settings, false);
+        if (!await restart) startup.problem = 'olympus engine restart failed';
+        else if (models.problem || readyAt === undefined) startup.problem = models.problem ?? 'Both worker roles did not report ready';
+        else startup.readyAt = readyAt;
+      } finally {
+        startup.through = watchNow();
+        writeFileSync(join(watchDir, CUTOVER_STOP), '');
+        try { await watch; }
+        finally { rmSync(watchDir, { recursive: true, force: true }); }
+      }
+      if (startup.readyAt !== undefined && !startup.problem) {
+        session = await mint();
+        const front = { pages: [] as typeof startup.pages, restarts: 0 };
+        receipt.front = front;
+        for (let round = 0; round < 5; round++) {
+          for (const page of DASHBOARD_PAGES) {
+            front.pages.push(await samplePage(session.request ?? p.workerFetch, page, watchNow(), false));
+          }
+          if (round < 4) await sleep(250);
+        }
+        front.restarts = selfRestarts(logSince(engineLogs, mark)).filter(restart => restart.start >= startup.readyAt!).length;
+
+        const local = await mintLocalDashboard(p.workerFetch, () => bearer!);
+        const fixture = await findTimingItem(local, QUALIFY_QUESTION.citedTitle!);
+        const question = fixture ? QUALIFY_QUESTION : fallback;
+        let item = fixture;
+        if (question) {
+          const ask = await measureLocalAsk(local, question, 60_000);
+          receipt.ask = ask.observation;
+          const citedTitle = ask.observation.answered && ask.observation.factsStated && ask.citations.length === 1
+            ? ask.citations[0]?.title : undefined;
+          const title = citedTitle ?? fallback?.citedTitle;
+          if (!item && title) item = await findTimingItem(local, title);
+        } else {
+          receipt.problem = 'No suite fixture or configured canary known-answer question';
+        }
+        receipt.click = await timeCanaryClick(local, item);
+      }
+    } else if (!settings) {
+      quiet.interference.add('private model settings unavailable');
+    }
+  } catch {
+    receipt.problem = 'The timing command could not complete its engine or dashboard requests';
+  } finally {
+    clearInterval(timer);
+    receipt.after = snapshot('unavailable');
+    const afterSettings = readCanarySmokeSettings(15_000);
+    if (afterSettings) receipt.after.privateModel = describeModel(afterSettings);
+    if (!afterSettings) quiet.interference.add('private model settings unavailable after the window');
+    else if (receipt.before && receipt.before.privateModel !== receipt.after.privateModel) quiet.interference.add('private model route changed during the window');
+    receipt.interference = [...quiet.interference];
+  }
+  emit({ ok: true, ...receipt });
 }
 
 /**
@@ -1992,7 +2219,6 @@ async function askDuringStartup(workerFetch: Platform['workerFetch'], bearer: ()
 async function qualifyPrivacyCommand(): Promise<never> {
   const obs: PrivacyObservation = {};
   const localSession = () => mintLocalDashboard(platform().workerFetch, () => workerBearer(5_000));
-  const path = '/dashboard/privacy/items';
   const title = QUALIFY_QUESTION.citedTitle!;
   const fixtureVisibility = async () => {
     const result = await archiveSearch(QUALIFY_QUESTION.text);
@@ -2001,31 +2227,16 @@ async function qualifyPrivacyCommand(): Promise<never> {
   };
   try {
     let local = await localSession();
-    const find = async () => {
-      const response = await local(`${path}/find`, { query: title });
-      const body = await response.json() as { ok?: boolean; items?: { title?: string; item_id?: string; tier?: string; owner_choice?: string; owner_set?: boolean }[] };
-      return response.ok && body.ok ? body.items?.find(item => item.title === title) : undefined;
-    };
+    const find = async () => (await findPrivacyItems(local, title))[0];
     const item = await find();
     if (!item?.item_id || (item.owner_choice ?? item.tier) !== 'Personal' || await fixtureVisibility() !== true) {
       throw new Error('The Personal fixture was not demonstrably visible before the change');
     }
-    const started = performance.now();
-    let response = await local(`${path}/set`, { item_id: item.item_id, tier: 'private' });
-    let body = await response.json() as { ok?: boolean; state?: string; request_id?: string };
-    if (!response.ok || body.ok !== true) throw new Error(`Make it Private answered HTTP ${response.status}`);
-    obs.ackMs = Math.ceil(performance.now() - started);
-    if (body.state !== 'pending') obs.finishMs = obs.ackMs;
+    const change = await setPrivacyItem(local, item.item_id, 'private');
+    obs.ackMs = change.ackMs;
     const hidden = fixtureVisibility().then(visible => visible === false, () => false);
-    const requestId = body.request_id;
-    while (body.state === 'pending' && performance.now() - started < 120_000) {
-      if (!requestId) throw new Error('The pending reply had no receipt id');
-      await sleep(250);
-      response = await local(`${path}/status`, { request_id: requestId });
-      body = await response.json() as typeof body;
-      if (!response.ok || body.ok !== true) throw new Error(`Privacy receipt answered HTTP ${response.status}`);
-    }
-    if (body.state !== 'pending') obs.finishMs ??= Math.round(performance.now() - started);
+    const finishMs = await change.settled();
+    if (finishMs !== undefined) obs.finishMs = finishMs;
     obs.withheldAfterAck = await hidden;
     const restarted = await restartEngine(300_000);
     if (!restarted.ok) throw new Error('The engine did not return ready after restart');
@@ -3001,6 +3212,7 @@ async function main(): Promise<void> {
     case 'mcp-call': return await mcpCall(rest[0] ?? '', rest[1] ?? '{}');
     case 'mcp-rpc': return await mcpRpcRelay(flag('--input'));
     case 'canary-smoke': return await canarySmoke();
+    case 'canary-timing': return await canaryTiming(JSON.parse(flag('--known-ask', 'null')) ?? undefined);
     case 'smoke': return await smoke(flag('--questions'));
     case 'helper-files': return emit({ ok: true, whatsappBridges: installedWhatsAppBridges() });
     case 'dashboard-json': {
@@ -3111,7 +3323,7 @@ async function main(): Promise<void> {
     case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
     case 'upgrade-selftest': return await upgradeSelftest(flag('--mode'));
     default:
-      console.error('usage: agent <prepare-source|connect-source|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|canary-smoke|dashboard-json|screenshots|inbox-check|journeys|explore|archive-import|archive-drain|archive-remove|archive-model|archive-changed|archive-cleanup|archive-collect|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|cutover-watch|cutover-report|upgrade-selftest>');
+      console.error('usage: agent <prepare-source|connect-source|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|canary-smoke|canary-timing|dashboard-json|screenshots|inbox-check|journeys|explore|archive-import|archive-drain|archive-remove|archive-model|archive-changed|archive-cleanup|archive-collect|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|cutover-watch|cutover-report|upgrade-selftest>');
       process.exit(2);
   }
 }

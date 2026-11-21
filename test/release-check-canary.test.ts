@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   canaryVerdict, isDashboard, macCloseCommand, isSystemPrompt, openedWindows, parseCanaryAccounts, parseWindows, pinnedVersion, renderCanaryHtml, renewals, runCanary,
-  SITE_INSTALLER, type CanaryOptions, type CanaryReport,
+  SITE_INSTALLER, type CanaryAccounts, type CanaryOptions, type CanaryReport,
 } from '../scripts/release-check/canary.ts';
 import { describeCanaryPrivateModel, waitForCanaryModels } from '../scripts/release-check/canary-smoke.ts';
 import { PRIVATE_MARKER, SUITE_QUESTIONS } from '../scripts/release-check/fixture.ts';
@@ -287,10 +287,16 @@ describe('release-check canary', () => {
     const { machine } = fakeDesktop(os);
     machine.handle = handle;
     const uploads: string[] = [];
+    const steps: string[] = [];
     machine.put = async (_from, to) => { uploads.push(to); };
     const exec = machine.exec;
     machine.exec = async (script, opts) => {
+      if (script.includes('~/rc/agent.js canary-timing')) {
+        steps.push('timing');
+        return { code: 0, stdout: JSON.stringify(timingReceipt()), stderr: '', timedOut: false, ms: 1 };
+      }
       if (!script.includes('canary-smoke')) return exec(script, opts);
+      steps.push('smoke');
       expect(script).toContain('~/rc/agent.js canary-smoke');
       expect(opts?.timeoutMs).toBeGreaterThan(30 * 60_000);
       const stdout = JSON.stringify({
@@ -310,6 +316,7 @@ describe('release-check canary', () => {
     const accounts = { sources: [], clients: [], questions: [] };
     const result = await runCanary(machine, options(os, { accounts, accountsOnly: true, bridgeAgent: '/bundle/agent.js' }));
     expect(uploads).toEqual(['~/rc/agent.js']);
+    expect(steps).toEqual(['timing', 'smoke']);
     const status = exit === 0 ? 'pass' : 'fail';
     expect(statusOf(result.checks)).toMatchObject({
       'protocol.smoke': status, 'private-medical.local-private-answer': status, 'personal-fact.cited': 'pass', 'file-fact.cited': 'pass',
@@ -323,6 +330,71 @@ describe('release-check canary', () => {
       expect(check.detail).not.toContain(PRIVATE_MARKER);
     }
     expect(result.checks.find(row => row.id === 'private-medical.local-private-answer')?.ms).toBe(121_000);
+  });
+
+  function timingReceipt(miss = false, interference: string[] = []) {
+    const snapshot = { sample: 'load 0.7 of 8 cpus', topCpu: 'browser 2%', privateModel: 'builtin:private' };
+    const startup = [0, 2_000, 4_000].flatMap(at => ['Home', 'Sources'].map(page => ({ page, at, ms: 100, answered: true, timeout: false })));
+    const front = ['Home', 'Sources'].map(page => ({ page, at: 6_000, ms: miss ? 1_001 : 1_000, answered: true, timeout: false }));
+    const readyAt = miss ? 15_000 : 6_000;
+    return {
+      ok: true, before: snapshot, after: snapshot, interference,
+      startup: { started: 0, readyAt, through: readyAt, pages: startup },
+      front: { pages: front, restarts: 0 },
+      click: { ackMs: miss ? 1_001 : 1_000 },
+      ask: { status: 200, answered: true, factsStated: true, cited: true, ms: miss ? 20_001 : 20_000, firstEvidenceMs: 10_000 },
+    };
+  }
+
+  test.each([
+    ['pass', false, []],
+    ['fail', true, []],
+    ['warn', false, ['another release-check process', 'browser averaged 24% CPU']],
+    ['warn', true, ['another release-check process', 'browser averaged 24% CPU']],
+  ] as const)('dedicated accounts timing reports %s with the full observables', async (status, miss, interference) => {
+    const { machine } = fakeDesktop('linux');
+    machine.handle = 'test-omarchy';
+    machine.tunnel = async () => { throw new Error('the fake browser should not open a tunnel'); };
+    const steps: string[] = [];
+    machine.exec = async script => {
+      let stdout = '';
+      if (script.includes('~/rc/agent.js canary-timing')) {
+        steps.push('timing');
+        expect(script).toContain('--known-ask');
+        expect(script).toContain('flight to Santa Fe');
+        stdout = JSON.stringify(timingReceipt(miss, [...interference]));
+      } else if (script.includes('~/rc/agent.js canary-smoke')) {
+        steps.push('smoke');
+      } else if (script.includes('connections add release-canary')) {
+        steps.push('live');
+      } else if (script.includes('--remote-debugging-port=')) {
+        steps.push('web');
+        return { code: 1, stdout: '', stderr: 'fake browser unavailable', timedOut: false, ms: 1 };
+      }
+      return { code: 0, stdout, stderr: '', timedOut: false, ms: 1 };
+    };
+    const accounts: CanaryAccounts = {
+      sources: [{ id: 'gmail', label: 'Gmail', known: { question: 'flight to Santa Fe', expect: ['K7Q2ZX'] } }],
+      clients: ['chatgpt'], questions: [],
+    };
+    const result = await runCanary(machine, options('linux', { accounts, accountsOnly: true, bridgeAgent: '/bundle/agent.js' }));
+    expect(steps).toEqual(['timing', 'smoke', 'live', 'web']);
+    const checks = result.checks.filter(check => check.id.startsWith('canary.timing.'));
+    expect(statusOf(checks)).toEqual({
+      'canary.timing.startup': status, 'canary.timing.front': status, 'canary.timing.click': status, 'canary.timing.ask': status,
+    });
+    for (const check of checks) {
+      expect(check.detail).toContain('Before: load 0.7');
+      expect(check.detail).toContain('After: load 0.7');
+      expect(check.detail).toContain('top CPU (all users): browser 2%');
+      expect(check.detail).toContain('private model: builtin:private');
+      if (status === 'warn') expect(check.detail).toContain('not clean: another release-check process, browser averaged 24% CPU');
+    }
+    expect(checks[0]?.detail).toContain(`Boot to ready: ${miss ? 15_000 : 6_000} ms`);
+    expect(checks[0]?.detail).toContain(`longest unanswered gap ${miss ? 10_900 : 2_000} ms`);
+    expect(checks[1]?.detail).toContain(`Home: p50 ${miss ? 1_001 : 1_000} ms`);
+    expect(checks[2]?.detail).toContain(`p95 ${miss ? 1_001 : 1_000} ms, max ${miss ? 1_001 : 1_000} ms`);
+    expect(checks[3]?.detail).toContain(`Evidence: 10000 ms (engine retrieval) · Whole answer: ${miss ? 20_001 : 20_000} ms · Cited: yes`);
   });
 
   test('the smoke only runs for an accounts check on a dedicated machine', async () => {
@@ -344,9 +416,10 @@ describe('release-check canary', () => {
     const result = await runCanary(machine, options('macos', {
       accountsOnly: true, accounts: { sources: [], clients: [], questions: [] }, bridgeAgent: '/bundle/agent.js',
     }));
-    expect(statusOf(result.checks)).toEqual({ 'protocol.ran': 'fail' });
-    expect(result.checks[0]?.detail).toContain('no progress for 5 minutes');
-    expect(result.checks[0]?.detail).toContain('300.0 s');
+    const smoke = result.checks.find(check => check.id === 'protocol.ran');
+    expect(smoke?.status).toBe('fail');
+    expect(smoke?.detail).toContain('no progress for 5 minutes');
+    expect(smoke?.detail).toContain('300.0 s');
   });
 
   test.each([

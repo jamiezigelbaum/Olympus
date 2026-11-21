@@ -16,8 +16,9 @@ const PAGE_SAMPLE_MS = 2_000;
 const PAGE_BOUND_MS = 10_000;
 const PAGES = { Home: '/dashboard', Sources: '/dashboard?connect' } as const;
 type Page = keyof typeof PAGES;
-const watchNow = () => Math.round(performance.timeOrigin + performance.now());
-type PageSample = { page: Page; at: number; ms: number; answered: boolean; timeout: boolean; authRefused?: boolean; status?: number; error?: string };
+export const DASHBOARD_PAGES = Object.keys(PAGES) as Page[];
+export const watchNow = () => Math.round(performance.timeOrigin + performance.now());
+export type PageSample = { page: Page; at: number; ms: number; answered: boolean; timeout: boolean; authRefused?: boolean; status?: number; error?: string };
 type PageWindow = { started: number; ended: number; pages: Record<Page, { longestMs: number; answers: number; timeouts: number; over1s: number; firstGapAt?: number }> };
 type BuildRole = 'front' | 'background';
 export interface HiddenCopyBuilds {
@@ -95,7 +96,7 @@ export function dashboardAvailabilityCheck(window: PageWindow | undefined, start
   };
 }
 
-export async function samplePage(fetch: WorkerFetch, page: Page, at: number): Promise<PageSample> {
+export async function samplePage(fetch: WorkerFetch, page: Page, at: number, startingCounts = true): Promise<PageSample> {
   const signal = AbortSignal.timeout(PAGE_BOUND_MS);
   let authRefused = false;
   let status: number | undefined;
@@ -108,7 +109,7 @@ export async function samplePage(fetch: WorkerFetch, page: Page, at: number): Pr
     // The content-free unlock shell (#1187) answers a cookie without this origin's unlock key, which a session minted on a release
     // before the key (1.4.4) never had (linux-upgrade 44883598970: 2,208 probes after READY). Like a refusal, it calls for a new session.
     authRefused = response.status === 401 || response.status === 403 || response.headers.get(DASHBOARD_UNLOCK_SHELL_HEADER) !== null;
-    if (response.status === 503 && body.includes('Olympus is starting:')) return true;
+    if (startingCounts && response.status === 503 && body.includes('Olympus is starting:')) return true;
     if (response.status !== 200 || !response.headers.get('content-type')?.includes('text/html')) return false;
     if (page === 'Sources') return body.includes('class="srcrows"');
     if (!body.includes('id="olympus-panel"')) return false;
@@ -260,7 +261,14 @@ async function checkOwnerSession(session: WorkerFetch): Promise<number | null> {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function watchCutover(workDir: string, dataDir: string, seconds: number, fetch: WorkerFetch, mint: () => Promise<WorkerFetch | undefined>, options: { fresh?: boolean; newFront?: () => string | undefined; observeBuilds?: () => HiddenCopyBuilds | undefined; startupAsk?: () => Promise<StartupAsk> } = {}): Promise<void> {
+export async function watchCutover(workDir: string, dataDir: string, seconds: number, fetch: WorkerFetch, mint: () => Promise<WorkerFetch | undefined>, options: {
+  fresh?: boolean;
+  newFront?: () => string | undefined;
+  observeBuilds?: () => HiddenCopyBuilds | undefined;
+  startupAsk?: () => Promise<StartupAsk>;
+  initialPageSession?: WorkerFetch;
+  onPageSample?: (sample: PageSample) => void;
+} = {}): Promise<void> {
   const log = join(workDir, CUTOVER_LOG);
   const stop = join(workDir, CUTOVER_STOP);
   writeFileSync(log, '', { mode: 0o600 });
@@ -278,12 +286,12 @@ export async function watchCutover(workDir: string, dataDir: string, seconds: nu
   let startupEnded = options.fresh === true;
   let lastBuildReceipt = '';
   let nextPage = 0;
-  let pageSession = session;
+  let pageSession = options.initialPageSession ?? session;
   let minting: Promise<void> | undefined;
   const refreshSession = () => {
     minting ??= mint().then(next => { if (next) pageSession = next; }, () => {}).finally(() => { minting = undefined; });
   };
-  if (options.fresh) refreshSession();
+  if (options.fresh && !pageSession) refreshSession();
   const pages = new Set<Promise<void>>();
   let startupAsking: Promise<void> | undefined;
   while (performance.now() < end && !existsSync(stop)) {
@@ -340,9 +348,10 @@ export async function watchCutover(workDir: string, dataDir: string, seconds: nu
     if (candidate && at >= nextPage) {
       nextPage = at + PAGE_SAMPLE_MS;
       // Remint after restarts if the old cookie no longer opens either page.
-      for (const page of Object.keys(PAGES) as Page[]) {
+      for (const page of DASHBOARD_PAGES) {
         const reading = samplePage(pageSession ?? fetch, page, at).then(sample => {
           append({ pageSample: sample });
+          options.onPageSample?.(sample);
           if (qualified && (!pageSession || sample.authRefused)) refreshSession();
         });
         pages.add(reading);
