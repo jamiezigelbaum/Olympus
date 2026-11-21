@@ -52,6 +52,33 @@ describe('live accounts: what each source is held to', () => {
     expect(corpusRows({ corpora: [degraded] })[0]!.retrieval).toEqual({ mode: 'keyword', state: 'degraded', reason: 'embedding_provider_unavailable' });
   });
 
+  test('a failed source status names its own last refresh error and redacts credentials', async () => {
+    const corpora = [
+      corpus('Gmail', { last_refresh: { status: 'completed', completed_at: ago(1500) } }),
+      corpus('Gmail', { corpus_id: 'gmail.private', last_refresh: { status: 'failed', completed_at: ago(2) } }),
+      corpus('Gmail', { corpus_id: 'gmail.public', last_refresh: { status: 'failed', completed_at: ago(3), error: 'Older sync failed' } }),
+      corpus('Dropbox', { last_refresh: { status: 'failed', completed_at: ago(1), error: 'Dropbox network failure' } }),
+    ];
+    const engine: EngineMcp = {
+      call: async () => ({ ok: true, structured: { kind: 'source_index_status', corpora }, text: '' }),
+      close: async () => {},
+    };
+    const checks = await runLiveAccounts(engine, {
+      sources: [{ id: 'gmail', label: 'Gmail' }, { id: 'dropbox', label: 'Dropbox' }],
+      refreshErrors: async failed => {
+        expect(failed).toEqual([{ corpus_id: 'gmail.private', completed_at: ago(2) }]);
+        return { 'gmail.private': 'Google sign-in expired. Sign in again. https://name:fake-password@example.test/oauth?code=fake-code, {"refresh_token":"fake-token"}' };
+      },
+    });
+    expect(checks).toHaveLength(2);
+    const gmail = checks[0]!;
+    expect(gmail).toMatchObject({ id: 'live.gmail.status', status: 'fail' });
+    expect(gmail.detail).toContain('Google sign-in expired. Sign in again.');
+    expect(gmail.detail).toContain('more than 24 h ago');
+    expect(gmail.detail).not.toMatch(/fake-|Dropbox network failure|Older sync failed/);
+    expect(checks[1]).toMatchObject({ id: 'live.dropbox.status', status: 'fail', detail: expect.stringContaining('Dropbox network failure') });
+  });
+
   test('a search passes only on an item of that source holding every expected string', () => {
     const structured = { evidence: [
       { id: 'E1', source: 'Gmail', title: 'Your trip to Santa Fe is booked', excerpt: 'Confirmation K7Q2ZX, departs 7:05' },

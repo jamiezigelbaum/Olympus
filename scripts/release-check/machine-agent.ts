@@ -23,7 +23,7 @@ import { citedFixture, expectedAskCitations, firstEvidenceMs, observeAsk, QUALIF
 import { firstStatus, OLD_STATUS_WAIT_MS, digest, verifyStagedBundle, preflightProbes } from './preflight.ts';
 import { sourceCard, sourceConnected } from './source-cards.ts';
 import { archiveStateSiblingPath, olympusDataRoot } from '../../src/core/olympus-layout.ts';
-import { resolvedStorePath } from '../../src/core/source-placement.ts';
+import { placedRosterStores, resolvedStorePath } from '../../src/core/source-placement.ts';
 import { isPendingPrivacyPolicy, readComputerUseState } from '../../src/core/first-run-privacy.ts';
 import { FIXTURE_JUDGE_MODEL, FIXTURE_JUDGE_PORT, startFixtureJudge } from './fixture-judge.ts';
 import { answerModelTiming } from './model-timing.ts';
@@ -32,6 +32,9 @@ import { saveFixtureJudge } from './fixture-judge-settings.ts';
 import { privateAnswerOptions } from '../../src/core/privacy-language.ts';
 import { environmentWithWorkerSetupEnv } from '../../src/core/worker-auth.ts';
 import { loadSovereigntyEngine, validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
+import { builtInAnalystEnabled, resolveBuiltInReasoningModel } from '../../src/core/analyst-built-in.ts';
+import { builtInModelEnvValue, readModelChoices } from '../../src/core/model-choices.ts';
+import { REMOTE_SECRET_NOTE } from '../../src/core/remote-result.ts';
 import { ENGINE_ROLE_ENV } from '../../src/core/engine-split.ts';
 // Embedded: the bundled agent runs outside the product tree, so the preset file is not on disk beside it.
 import noSensitivePreset from '../../config/sovereignty/presets/no-sensitive.json' with { type: 'json' };
@@ -47,8 +50,9 @@ import { ArchiveImportStateStore, defaultArchiveImportStatePath } from '../../sr
 import { engineStatusSnapshotPath } from '../../src/workers/engine-split/runtime.ts';
 import { tierLedgerPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
 import { desktopSandboxOrigin, PRODUCTION_RELAY, runSmoke, type SmokeObservation, privateNoteKind, panelMeta, resultText } from '../chatgpt-live-smoke.ts';
-import { SUITE_QUESTIONS } from './fixture.ts';
-import { describeCanaryPrivateModel, waitForCanaryModels, type CanarySmokeSettings } from './canary-smoke.ts';
+import { canaryCitationMatches, canaryPrivateRoute, canarySmokeExpectations, describeCanaryPrivateModel, waitForCanaryModels, type CanarySmokeRow, type CanarySmokeSettings } from './canary-smoke.ts';
+import type { ClientQuestion } from './client-questions.ts';
+import { redactRefreshError } from './live-accounts.ts';
 import { canaryQuietWatch, type CanaryTimingReceipt } from './canary-timing.ts';
 import { LINUX_MACHINE_SAMPLE, MAC_MACHINE_SAMPLE } from './split-watch.ts';
 import { privateNoteKindIn } from './private-note.ts';
@@ -905,7 +909,8 @@ async function smokeQuestions(questions: readonly SmokeQuestionIn[], config: {
   stateFile: string;
   panelCapMs?: number;
   requireOwnerCookie?: boolean;
-  privateFacts: Readonly<Record<string, readonly string[]>>;
+  privateFacts?: Readonly<Record<string, readonly string[]>>;
+  canaryQuestions?: readonly ClientQuestion[];
 }) {
   const stopBridge = startBridge(config.enginePort);
   const observed: Array<{ id: string; obs: SmokeObservation }> = [];
@@ -922,30 +927,33 @@ async function smokeQuestions(questions: readonly SmokeQuestionIn[], config: {
   // The owner approves the smoke client as the owner does: with the dashboard session open, which on a Mac is the
   // approval's owner proof (#1186). Minted once, for the approval page's own origin.
   let ownerCookie: string | undefined;
-  const ask = async (batch: SmokeQuestionIn[]): Promise<number> => await runSmoke({
-    questions: batch.map((q) => ({ question: q.text, detail: 'summary' as const })),
-    quiet: true,
-    expectPrivate: false,
-    dashboard: false,
-    relay: config.relay,
-    engine,
-    origin: desktopSandboxOrigin(),
-    stateFile: config.stateFile,
-    ...(ownerCookie ? { ownerCookie } : {}),
-    ...(config.panelCapMs ? { panelCapMs: config.panelCapMs } : {}),
-  }, {
-    onTools: (names) => { tools = [...names]; },
-    onQuestion: (obs) => {
-      const match = batch.find((q) => q.text === obs.question.question);
-      if (!match) return;
-      const at = observed.findIndex((row) => row.id === match.id);
-      if (at !== -1) observed.splice(at, 1);
-      observed.push({ id: match.id, obs });
-      if (match.kind === 'private') {
-        (attempts[match.id] ??= []).push({ panelState: panelMeta(obs.result)?.state ?? null, noteKind: privateNoteKind(resultText(obs.result)) ?? null, atS: Math.round((Date.now() - startedAt) / 1000) });
-      }
-    },
-  });
+  const ask = async (batch: SmokeQuestionIn[]): Promise<number> => {
+    let next = 0;
+    return await runSmoke({
+      questions: batch.map((q) => ({ question: q.text, detail: 'summary' as const })),
+      quiet: true,
+      expectPrivate: false,
+      dashboard: false,
+      relay: config.relay,
+      engine,
+      origin: desktopSandboxOrigin(),
+      stateFile: config.stateFile,
+      ...(ownerCookie ? { ownerCookie } : {}),
+      ...(config.panelCapMs ? { panelCapMs: config.panelCapMs } : {}),
+    }, {
+      onTools: (names) => { tools = [...names]; },
+      onQuestion: (obs) => {
+        const match = batch[next++];
+        if (!match) return;
+        const at = observed.findIndex((row) => row.id === match.id);
+        if (at !== -1) observed.splice(at, 1);
+        observed.push({ id: match.id, obs });
+        if (match.kind === 'private') {
+          (attempts[match.id] ??= []).push({ panelState: panelMeta(obs.result)?.state ?? null, noteKind: privateNoteKind(resultText(obs.result)) ?? null, atS: Math.round((Date.now() - startedAt) / 1000) });
+        }
+      },
+    });
+  };
   try {
     ownerCookie = await smokeOwnerCookie(engine).catch(error => {
       if (config.requireOwnerCookie) throw error;
@@ -979,14 +987,34 @@ async function smokeQuestions(questions: readonly SmokeQuestionIn[], config: {
   const results = observed.map(({ id, obs }) => {
     const text = resultText(obs.result);
     const answer = obs.privateAnswer?.answer ?? '';
-    const facts = config.privateFacts[id] ?? [];
+    const evidence = (obs.result.structuredContent as { evidence?: Array<{ title?: string; source?: string; url?: string }> } | undefined)?.evidence ?? [];
+    const canary = config.canaryQuestions?.find(q => q.id === id);
+    if (canary) {
+      const expected = canarySmokeExpectations(canary, config.canaryQuestions!);
+      // No answer text, private citation or opening token needs to leave the machine.
+      const noteKind = privateNoteKind(text);
+      return {
+        id, isError: obs.result.isError === true, searchMs: obs.searchMs,
+        factsStated: factsIn(text, expected.publicFacts),
+        forbiddenStated: factsIn(`${text}\n${JSON.stringify(obs.result.structuredContent ?? {})}`, expected.forbidden),
+        cited: canaryCitationMatches(evidence, expected.citations),
+        ...(noteKind ? { noteKind } : {}),
+        secretPointer: text.includes(REMOTE_SECRET_NOTE),
+        ...(obs.panel ? { panel: { totalMs: obs.panel.totalMs, ...(obs.panel.status ? { status: obs.panel.status } : {}) } } : {}),
+        ...(obs.privateAnswer ? { privateAnswer: {
+          factsStated: factsIn(answer, expected.privateFacts),
+          cited: canaryCitationMatches(obs.privateAnswer.citations, expected.citations),
+        } } : {}),
+      } satisfies CanarySmokeRow;
+    }
+    const facts = config.privateFacts?.[id] ?? [];
     return {
       id,
       text,
       isError: obs.result.isError === true,
       noteKind: privateNoteKind(text) ?? null,
       panelState: panelMeta(obs.result)?.state ?? null,
-      evidence: ((obs.result.structuredContent as { evidence?: Array<{ title?: string; url?: string }> } | undefined)?.evidence ?? []).map((e) => ({ title: e.title ?? '', url: e.url ?? '' })),
+      evidence: evidence.map((e) => ({ title: e.title ?? '', url: e.url ?? '' })),
       searchMs: obs.searchMs,
       panel: obs.panel ?? null,
       attempts: attempts[id] ?? [],
@@ -1005,12 +1033,16 @@ function readCanarySmokeSettings(timeoutMs: number): CanarySmokeSettings | undef
   catch { return undefined; }
 }
 
-function canaryPrivateRoutes() {
-  try {
-    const env = environmentWithWorkerSetupEnv({ env: process.env, workerEnvPath: platform().workerEnvPath });
-    const pool = loadSovereigntyEngine({ env }).resolveAnalystPool({ trustDomain: 'secure_local' });
-    return pool.explicitOrder ?? pool.members;
-  } catch { return []; }
+function installedCanaryPrivateRoute(settings: CanarySmokeSettings | undefined) {
+  const p = platform();
+  const env = environmentWithWorkerSetupEnv({ env: process.env, workerEnvPath: p.workerEnvPath });
+  const { routes, model } = canaryPrivateRoute(settings, env);
+  const selected = settings?.models?.local?.current;
+  const builtInChoice = selected?.startsWith('builtin:') ? selected.slice('builtin:'.length)
+    : builtInModelEnvValue(env, readModelChoices(p.sovereigntyPath));
+  const installedBuiltIn = builtInAnalystEnabled(env)
+    ? resolveBuiltInReasoningModel({ ...env, OLYMPUS_BUILT_IN_ANALYST_MODEL: builtInChoice })?.modelId : undefined;
+  return { routes, description: describeCanaryPrivateModel(settings, model, installedBuiltIn) };
 }
 
 function waitForInstalledCanaryModels(
@@ -1037,26 +1069,65 @@ function canaryMachineSample(): string {
   return result.stdout?.trim() || 'unavailable';
 }
 
-async function canarySmoke(): Promise<never> {
+async function canarySmoke(questions: readonly ClientQuestion[]): Promise<never> {
+  if (!questions.length) emit({ ok: false, detail: 'no questions configured in the canary accounts file' });
   const wait = await waitForInstalledCanaryModels();
-  const model = describeCanaryPrivateModel(readCanarySmokeSettings(15_000), canaryPrivateRoutes()[0]);
+  const model = installedCanaryPrivateRoute(readCanarySmokeSettings(15_000)).description;
   if (wait.problem) emit({ ok: false, detail: wait.problem, modelWaitMs: wait.ms, privateModel: model });
 
   const before = canaryMachineSample();
   let receipt: Record<string, unknown>;
   try {
-    receipt = await smokeQuestions(SUITE_QUESTIONS, {
+    receipt = await smokeQuestions(questions.map(q => ({ id: q.id, text: q.prompt, kind: q.kind })), {
       enginePort: Number(new URL(WORKER_ORIGIN).port),
       relay: PRODUCTION_RELAY,
       stateFile: join(WORKDIR, 'canary-smoke-client.json'),
       panelCapMs: 300_000,
       requireOwnerCookie: true,
-      privateFacts: Object.fromEntries(SUITE_QUESTIONS.map(question => [question.id, question.privateFacts])),
+      canaryQuestions: questions,
     });
   } catch (error) {
     receipt = { ok: false, detail: error instanceof Error ? error.message : String(error) };
   }
   emit({ ...receipt, modelWaitMs: wait.ms, privateModel: model, sampleBefore: before, sampleAfter: canaryMachineSample() });
+}
+
+async function canaryRefreshErrors(failed: readonly { corpus_id: string; completed_at: string }[]): Promise<never> {
+  const p = platform();
+  const response = await p.workerFetch('/v1/source/index/status', {
+    headers: { authorization: `Bearer ${workerBearer(5_000)}` },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) emit({ ok: false, detail: `owner source_index_status returned HTTP ${response.status}` });
+  const { corpora } = await response.json().catch(() => ({})) as {
+    corpora: Array<{ corpus_id: string; last_refresh?: { status: string; completed_at?: string; sync_run_id?: string; error?: string } }>;
+  };
+  if (!Array.isArray(corpora)) emit({ ok: false, detail: 'owner source_index_status returned no corpus status' });
+  const env = environmentWithWorkerSetupEnv({ env: process.env, workerEnvPath: p.workerEnvPath });
+  const stores = new Map(placedRosterStores(env).map(store => [store.corpusId, store.dbPath]));
+  const errors: Record<string, string> = {};
+  for (const { corpus_id, completed_at } of failed) {
+    const refresh = corpora.find(corpus => corpus.corpus_id === corpus_id)?.last_refresh;
+    if (refresh?.status !== 'failed' || refresh.completed_at !== completed_at) continue;
+    const path = stores.get(corpus_id);
+    let message = refresh.error;
+    // The owner status identifies the exact run. This installed build keeps
+    // its error in the sync receipt and omits it from both status projections.
+    if (!message && refresh.sync_run_id && path && existsSync(path)) {
+      try {
+        const db = new Database(path, { readonly: true });
+        try {
+          db.exec('PRAGMA busy_timeout = 10000;');
+          message = db.query<{ error: string }, [string, string, string]>(
+            "SELECT error FROM sync_runs WHERE sync_run_id = ? AND corpus_id = ? AND completed_at = ? AND status = 'failed'",
+          ).get(refresh.sync_run_id, corpus_id, completed_at)?.error;
+        } finally { db.close(); }
+      } catch { continue; } // A moved or busy store cannot safely supply a matching error.
+    }
+    const error = redactRefreshError(message);
+    if (error) errors[corpus_id] = error;
+  }
+  emit({ ok: true, errors });
 }
 
 // ---------------------------------------------------------------------------
@@ -2072,8 +2143,7 @@ async function canaryTiming(fallback?: KnownCanaryAsk): Promise<never> {
   const quiet = canaryQuietWatch(p.olympusBin);
   const receipt: CanaryTimingReceipt = { interference: [] };
   const settings = readCanarySmokeSettings(15_000);
-  const routes = canaryPrivateRoutes();
-  const describeModel = (value: CanarySmokeSettings | undefined) => describeCanaryPrivateModel(value, canaryPrivateRoutes()[0]);
+  const { routes, description: beforeModel } = installedCanaryPrivateRoute(settings);
   const snapshot = (privateModel: string) => {
     const sample = canaryMachineSample();
     if (sample === 'unavailable') quiet.interference.add('machine sample unavailable');
@@ -2081,7 +2151,6 @@ async function canaryTiming(fallback?: KnownCanaryAsk): Promise<never> {
   };
   let timer: ReturnType<typeof setInterval> | undefined;
   try {
-    const beforeModel = describeModel(settings);
     const blockedRoute = routes.some(({ profile }) => {
       if (!profile.baseUrl) return false;
       const host = new URL(profile.baseUrl).hostname.toLowerCase();
@@ -2093,7 +2162,7 @@ async function canaryTiming(fallback?: KnownCanaryAsk): Promise<never> {
     let session = bearer ? await mint().catch(() => undefined) : undefined;
     receipt.before = snapshot(beforeModel);
     if (blockedRoute) {
-      quiet.interference.add('private model route is outside the dedicated test machine');
+      receipt.problem = 'The timing window did not start because a private model route is outside the dedicated test machine';
     } else if (settings && !quiet.interference.size) {
       timer = setInterval(quiet.sample, 2_000);
       const engineLogs = p.engineLogPaths.slice(0, 2);
@@ -2171,7 +2240,9 @@ async function canaryTiming(fallback?: KnownCanaryAsk): Promise<never> {
         receipt.click = await timeCanaryClick(local, item);
       }
     } else if (!settings) {
-      quiet.interference.add('private model settings unavailable');
+      receipt.problem = 'The timing window did not start because private model settings were unavailable';
+    } else {
+      receipt.problem = 'The timing window did not start because the machine was not quiet';
     }
   } catch {
     receipt.problem = 'The timing command could not complete its engine or dashboard requests';
@@ -2179,7 +2250,7 @@ async function canaryTiming(fallback?: KnownCanaryAsk): Promise<never> {
     clearInterval(timer);
     receipt.after = snapshot('unavailable');
     const afterSettings = readCanarySmokeSettings(15_000);
-    if (afterSettings) receipt.after.privateModel = describeModel(afterSettings);
+    if (afterSettings) receipt.after.privateModel = installedCanaryPrivateRoute(afterSettings).description;
     if (!afterSettings) quiet.interference.add('private model settings unavailable after the window');
     else if (receipt.before && receipt.before.privateModel !== receipt.after.privateModel) quiet.interference.add('private model route changed during the window');
     receipt.interference = [...quiet.interference];
@@ -3211,8 +3282,9 @@ async function main(): Promise<void> {
     case 'mcp-tools': return await mcpTools();
     case 'mcp-call': return await mcpCall(rest[0] ?? '', rest[1] ?? '{}');
     case 'mcp-rpc': return await mcpRpcRelay(flag('--input'));
-    case 'canary-smoke': return await canarySmoke();
+    case 'canary-smoke': return await canarySmoke(JSON.parse(flag('--questions', '[]')) as ClientQuestion[]);
     case 'canary-timing': return await canaryTiming(JSON.parse(flag('--known-ask', 'null')) ?? undefined);
+    case 'canary-refresh-errors': return await canaryRefreshErrors(JSON.parse(flag('--failed')));
     case 'smoke': return await smoke(flag('--questions'));
     case 'helper-files': return emit({ ok: true, whatsappBridges: installedWhatsAppBridges() });
     case 'dashboard-json': {

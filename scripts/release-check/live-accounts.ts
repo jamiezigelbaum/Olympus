@@ -15,6 +15,8 @@ import { liveChecks, publishFailedCheck } from './live-checks.ts';
  */
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { redactLogLine } from '../../src/core/log-redaction.ts';
+import { secretLabelsInText } from '../../src/core/opsec.ts';
 import type { Machine } from './machine.ts';
 import type { CheckResult } from './report.ts';
 
@@ -124,7 +126,7 @@ export interface CorpusRow {
   label: string;
   configured: boolean;
   retrieval?: { mode: string; state: string; reason?: string };
-  last_refresh?: { status: string; completed_at?: string };
+  last_refresh?: { status: string; completed_at?: string; error?: string };
   counts?: { indexed_items: number };
 }
 
@@ -150,6 +152,18 @@ export function evidenceOf(structured: unknown): SearchEvidence[] {
   return rows.map((row) => ({ source: String(row?.source ?? ''), title: String(row?.title ?? ''), excerpt: String(row?.excerpt ?? '') }));
 }
 
+export function redactRefreshError(error: unknown): string | undefined {
+  if (typeof error !== 'string') return undefined;
+  const line = error.trim()
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, '[URL redacted]')
+    .replace(/\b(?:Basic|Bearer)\s+[^\s,;"']+/gi, '[authorization redacted]')
+    .replace(/\b((?:[a-z0-9]+[_-])*(?:token|secret|key|password|authorization|cookie|code|credential|signature))["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi, '$1=[redacted]')
+    .replace(/\s+/g, ' ');
+  const cleaned = redactLogLine(line);
+  if (secretLabelsInText(cleaned).length) return 'Refresh error contained credential material';
+  return cleaned.slice(0, 300) || undefined;
+}
+
 /**
  * Connected and syncing: a configured corpus of the source holds items, and a refresh succeeded recently. A running refresh
  * is not a success: with no recent success the source fails, and with none at all yet the check is inconclusive.
@@ -165,7 +179,8 @@ export function statusCheck(spec: LiveSourceSpec, rows: readonly CorpusRow[], no
   const finished = refreshed.filter((r) => r.completed_at).sort((a, b) => Date.parse(b.completed_at!) - Date.parse(a.completed_at!));
   const newest = finished[0];
   const success = finished.find((r) => r.status === 'completed');
-  const said = `${own.length} corpus(es), ${items} item(s) indexed${newest ? `, last refresh ${newest.status} at ${newest.completed_at}` : ''}`;
+  const lastError = newest?.status === 'failed' ? redactRefreshError(newest.error) : undefined;
+  const said = `${own.length} corpus(es), ${items} item(s) indexed${newest ? `, last refresh ${newest.status} at ${newest.completed_at}` : ''}${lastError ? ` (${lastError})` : ''}`;
   if (items === 0) return { id, title, status: 'fail', detail: `${said}: nothing indexed yet` };
   const running = refreshed.some((r) => r.status === 'running');
   if (finished.length > 0 && !success) return { id, title, status: 'fail', detail: `${said}: every refresh failed` };
@@ -208,6 +223,8 @@ export interface LiveAccountsOptions {
    * (load, the busiest processes) as one `live.timeline` line, so a slow first find shows which stage held the time.
    */
   sampleMachine?: () => Promise<string>;
+  /** Owner-side lookup when the remote status omits the error. Match the same corpus and refresh timestamp. */
+  refreshErrors?: (failed: Array<{ corpus_id: string; completed_at: string }>) => Promise<Record<string, string>>;
 }
 
 /** One timeline line: seconds since the plant, then per corpus items, chunks and embedded chunks, then the privacy wait. */
@@ -234,7 +251,18 @@ export async function runLiveAccounts(engine: EngineMcp, options: LiveAccountsOp
   const runPlant = options.runPlant ?? defaultPlant;
   let started = Date.now();
   const status = await engine.call('source_index_status', {});
-  const rows = status.ok ? corpusRows(status.structured) : [];
+  let rows = status.ok ? corpusRows(status.structured) : [];
+  const failed = rows.flatMap(({ corpus_id, configured, label, last_refresh }) =>
+    configured && last_refresh?.status === 'failed' && last_refresh.completed_at && !last_refresh.error &&
+    options.sources.some(spec => fold(spec.label) === fold(label)) ? [{ corpus_id, completed_at: last_refresh.completed_at }] : []);
+  if (failed.length && options.refreshErrors) {
+    const errors = await options.refreshErrors(failed).catch(() => ({} as Record<string, string>));
+    rows = rows.map(row => {
+      const error = Object.hasOwn(errors, row.corpus_id) ? errors[row.corpus_id] : undefined;
+      return error && row.last_refresh && failed.some(match => match.corpus_id === row.corpus_id && match.completed_at === row.last_refresh?.completed_at)
+        ? { ...row, last_refresh: { ...row.last_refresh, error } } : row;
+    });
+  }
   for (const spec of options.sources) {
     checks.push(status.ok ? { ...statusCheck(spec, rows, Date.now(), privacyCheckOf(status.structured)), ms: Date.now() - started } : { id: `live.${spec.id}.status`, title: `${spec.label}: connected and syncing`, status: 'fail', detail: `source_index_status failed: ${status.error ?? 'no answer'}` });
   }

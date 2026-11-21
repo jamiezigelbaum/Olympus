@@ -7,8 +7,8 @@ import {
   canaryVerdict, isDashboard, macCloseCommand, isSystemPrompt, openedWindows, parseCanaryAccounts, parseWindows, pinnedVersion, renderCanaryHtml, renewals, runCanary,
   SITE_INSTALLER, type CanaryAccounts, type CanaryOptions, type CanaryReport,
 } from '../scripts/release-check/canary.ts';
-import { describeCanaryPrivateModel, waitForCanaryModels } from '../scripts/release-check/canary-smoke.ts';
-import { PRIVATE_MARKER, SUITE_QUESTIONS } from '../scripts/release-check/fixture.ts';
+import { canaryCitationMatches, canaryPrivateRoute, canarySmokeExpectations, describeCanaryPrivateModel, waitForCanaryModels } from '../scripts/release-check/canary-smoke.ts';
+import { canaryQuietWatch, canaryTimingChecks } from '../scripts/release-check/canary-timing.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
 
@@ -289,6 +289,11 @@ describe('release-check canary', () => {
     const uploads: string[] = [];
     const steps: string[] = [];
     machine.put = async (_from, to) => { uploads.push(to); };
+    const forbidden = 'DEMO-ROOM-CODE-581';
+    const accounts = parseCanaryAccounts({ questions: 'demo-questions.json' }, () => ({ questions: [
+      { id: 'demo-slot', prompt: 'When is the demo?', kind: 'personal', expect: ['7:05'], cite: ['Demo night slot', 'Gmail'] },
+      { id: 'green-room', prompt: 'Which is the private green room?', kind: 'private', forbid: [forbidden], panel_expect: ['Room 4'], cite: ['Backstage schedule'] },
+    ] }));
     const exec = machine.exec;
     machine.exec = async (script, opts) => {
       if (script.includes('~/rc/agent.js canary-timing')) {
@@ -297,39 +302,54 @@ describe('release-check canary', () => {
       }
       if (!script.includes('canary-smoke')) return exec(script, opts);
       steps.push('smoke');
-      expect(script).toContain('~/rc/agent.js canary-smoke');
+      expect(script).toContain('~/rc/agent.js canary-smoke --questions');
+      for (const q of accounts.questions) expect(script).toContain(JSON.stringify(q));
+      expect(script).not.toMatch(/cardiology|Quillfeather|Halvorsen/);
       expect(opts?.timeoutMs).toBeGreaterThan(30 * 60_000);
       const stdout = JSON.stringify({
-        ok: true, exit, smokeChecks: exit ? [`FAIL: unexpected ${PRIVATE_MARKER}`] : [],
-        modelWaitMs: 312_000, privateModel: 'delphi/source-answer (local-openai-compatible via delphi.local; mode local-only)',
+        ok: true, exit, smokeChecks: exit ? [`FAIL: unexpected ${forbidden}`] : [],
+        modelWaitMs: 312_000, privateModel: 'demo/answer (local-openai-compatible via localhost; mode local-only)',
         sampleBefore: 'load 0.7; browser', sampleAfter: 'load 1.1; bun',
-        results: SUITE_QUESTIONS.map(q => ({
-          id: q.id, text: q.facts.join(' '),
-          evidence: q.citedTitle ? [{ title: q.citedTitle }] : [],
-          noteKind: q.kind === 'private' ? 'private-note' : null,
-          privateAnswer: q.kind === 'private' ? { factsStated: [true, exit === 0] } : null,
-          panel: q.kind === 'private' ? { totalMs: 121_000 } : null,
-        })),
+        results: [
+          { id: 'demo-slot', factsStated: [true], forbiddenStated: [false], cited: true },
+          { id: 'green-room', factsStated: [], forbiddenStated: [false], noteKind: 'panel',
+            privateAnswer: { factsStated: [exit === 0], cited: exit === 0 }, panel: { totalMs: 121_000 } },
+        ],
       });
       return { code: 0, stdout, stderr: '', timedOut: false, ms: 500_000 };
     };
-    const accounts = { sources: [], clients: [], questions: [] };
     const result = await runCanary(machine, options(os, { accounts, accountsOnly: true, bridgeAgent: '/bundle/agent.js' }));
     expect(uploads).toEqual(['~/rc/agent.js']);
     expect(steps).toEqual(['timing', 'smoke']);
     const status = exit === 0 ? 'pass' : 'fail';
     expect(statusOf(result.checks)).toMatchObject({
-      'protocol.smoke': status, 'private-medical.local-private-answer': status, 'personal-fact.cited': 'pass', 'file-fact.cited': 'pass',
+      'protocol.smoke': status,
+      'canary.smoke.demo-slot.facts': 'pass', 'canary.smoke.demo-slot.cited': 'pass',
+      'canary.smoke.green-room.local-private-answer': status, 'canary.smoke.green-room.cited': status,
     });
-    for (const id of ['protocol.smoke', 'private-medical.local-private-answer']) {
+    expect(result.checks.some(row => /^(personal-fact|private-medical|file-fact|secret-password)\./.test(row.id))).toBe(false);
+    for (const id of ['protocol.smoke', 'canary.smoke.green-room.local-private-answer']) {
       const check = result.checks.find(row => row.id === id)!;
       expect(check.detail).toContain('312.0 s');
-      expect(check.detail).toContain('delphi.local');
+      expect(check.detail).toContain('localhost');
       expect(check.detail).toContain('Machine before smoke: load 0.7; browser');
       expect(check.detail).toContain('Machine after smoke: load 1.1; bun');
-      expect(check.detail).not.toContain(PRIVATE_MARKER);
+      expect(check.detail).not.toContain(forbidden);
     }
-    expect(result.checks.find(row => row.id === 'private-medical.local-private-answer')?.ms).toBe(121_000);
+    expect(result.checks.find(row => row.id === 'canary.smoke.green-room.local-private-answer')?.ms).toBe(121_000);
+  });
+
+  test('smoke uses the demo kit panel facts and matches any expected citation by title or sender', () => {
+    const accounts = parseCanaryAccounts({ questions: 'demo.json' }, () => ([
+      { id: 'public', kind: 'personal', prompt: 'When is the demo?', expect: ['7:05'], cite: ['Demo slot', 'Tiago Ferreira'] },
+      { id: 'private', kind: 'private', prompt: 'What is the green room?', forbid: ['backstage code'], panel_expect: ['Room 4'] },
+    ]));
+    const [personal, privateQuestion] = accounts.questions;
+    const expected = canarySmokeExpectations(personal!, accounts.questions);
+    expect(expected).toMatchObject({ publicFacts: ['7:05'], forbidden: ['backstage code'] });
+    expect(canaryCitationMatches([{ title: 'Unrelated VM fixture' }], expected.citations)).toBe(false);
+    expect(canaryCitationMatches([{ source: 'TIAGO   FERREIRA' }], expected.citations)).toBe(true);
+    expect(canarySmokeExpectations(privateQuestion!, accounts.questions).privateFacts).toEqual(['Room 4']);
   });
 
   function timingReceipt(miss = false, interference: string[] = []) {
@@ -345,6 +365,75 @@ describe('release-check canary', () => {
       ask: { status: 200, answered: true, factsStated: true, cited: true, ms: miss ? 20_001 : 20_000, firstEvidenceMs: 10_000 },
     };
   }
+
+  test('the quiet check ignores the timing agent, its ancestors and its own SSH session', () => {
+    const bin = '/test/.local/bin/olympus';
+    const shell = 10900;
+    const sshSession = 10899;
+    const line = (pid: number, parent: number, name: string, args: string) => `${pid} ${parent} 0:00.00 0.0 ${name} ${args}`;
+    const own = [
+      line(10890, 1, 'sshd', 'sshd listener'),
+      line(sshSession, 10890, 'sshd-session', 'sshd-session tester@notty'),
+      line(shell, sshSession, 'sh', `sh ${bin} dashboard token`),
+      line(process.pid, shell, 'bun', 'bun /test/rc/agent.js canary-timing'),
+      line(10901, process.pid, 'sh', `sh ${bin} engine restart`),
+      line(10902, sshSession, 'sh', `sh ${bin} settings show`),
+      line(10905, 1, 'sh', `sh -c 'test -x ${bin}'`),
+      line(10906, 1, 'bun', `bun ${bin} __engine-run`),
+      line(10907, 10901, 'bun', `bun ${bin} __engine-run`),
+    ];
+    const watch = (rows: string[]) => canaryQuietWatch(bin, () => ({ status: 0, stdout: rows.join('\n') }));
+    const clean = watch(own);
+    clean.sample();
+    expect([...clean.interference]).toEqual([]);
+    const busy = watch([...own, line(10903, 10890, 'sshd-session', 'sshd-session another@notty'),
+      line(10904, 10903, 'sh', `sh ${bin} settings show`)]);
+    busy.sample();
+    expect([...busy.interference]).toEqual(['another Olympus process (sh, PID 10904)']);
+  });
+
+  test('zero timing samples fail with the reason even when the quiet check found interference', () => {
+    const { before, after } = timingReceipt();
+    const problem = 'The timing window did not start because the machine was not quiet';
+    const checks = canaryTimingChecks({ before, after, problem, interference: ['another Olympus process (sh, PID 10900)'] });
+    expect(checks).toHaveLength(4);
+    for (const check of checks) {
+      expect(check.status).toBe('fail');
+      expect(check.detail).toContain(problem);
+      expect(check.detail).toContain('Required timing samples were not recorded');
+    }
+  });
+
+  test('the installed owner agent supplies the failed source refresh diagnosis', async () => {
+    const { machine } = fakeDesktop('macos');
+    machine.handle = 'test-mac';
+    const completedAt = new Date().toISOString();
+    const failed = [{ corpus_id: 'internal.email', completed_at: completedAt }];
+    let requested = false;
+    machine.exec = async script => {
+      let stdout = '';
+      if (script.includes('~/rc/agent.js canary-timing')) {
+        stdout = JSON.stringify(timingReceipt());
+      } else if (script.includes('~/rc/agent.js canary-refresh-errors')) {
+        requested = true;
+        expect(script).toContain(`--failed '${JSON.stringify(failed)}'`);
+        stdout = JSON.stringify({ ok: true, errors: { 'internal.email': 'Credential handle requires OAuth reauthorization.' } });
+      } else if (script.includes('source_index_status')) {
+        const structuredContent = { corpora: [{
+          corpus_id: 'internal.email', label: 'Gmail', configured: true, counts: { indexed_items: 8 },
+          last_refresh: { status: 'failed', completed_at: completedAt },
+        }] };
+        stdout = JSON.stringify({ result: { structuredContent } });
+      }
+      return { code: 0, stdout, stderr: '', timedOut: false, ms: 1 };
+    };
+    const accounts = parseCanaryAccounts({ sources: [{ id: 'gmail', label: 'Gmail' }] }, () => []);
+    const result = await runCanary(machine, options('macos', { accounts, accountsOnly: true, bridgeAgent: '/bundle/agent.js' }));
+    expect(requested).toBe(true);
+    const status = result.checks.find(check => check.id === 'live.gmail.status');
+    expect(status?.status).toBe('fail');
+    expect(status?.detail).toContain('requires OAuth reauthorization');
+  });
 
   test.each([
     ['pass', false, []],
@@ -458,7 +547,31 @@ describe('release-check canary', () => {
     } };
     expect(describeCanaryPrivateModel(settings, local)).toBe('delphi/source-answer (local-openai-compatible via delphi.local:8090; mode local-only)');
     expect(describeCanaryPrivateModel({ ...settings, models: { local: { current: 'builtin:standard' } } }, local))
-      .toBe('builtin:standard (built into Olympus; mode local-only)');
+      .toBe('builtin:standard (built into Olympus on this machine; mode local-only)');
+  });
+
+  test('reports installed model identity when no-sensitive has no active private pool', () => {
+    const settings = { private_answer_mode: { id: 'no-sensitive' } };
+    const policy = join(mkdtempSync(join(tmpdir(), 'canary-model-')), 'sovereignty.json');
+    writeFileSync(policy, readFileSync(new URL('../config/sovereignty/presets/no-sensitive.json', import.meta.url)));
+    const env = { OLYMPUS_SOVEREIGNTY_CONFIG: policy };
+    const builtin = canaryPrivateRoute(settings, env);
+    expect(builtin.routes).toEqual([]);
+    expect(describeCanaryPrivateModel(settings, builtin.model, 'Qwen3.5-4B'))
+      .toBe('Qwen3.5-4B (built into Olympus on this machine; mode no-sensitive)');
+    const local = canaryPrivateRoute(settings, {
+      ...env, OLYMPUS_ARGUS_SOURCE_ANSWER_MODEL: 'local/answer',
+      OLYMPUS_ARGUS_SOURCE_ANSWER_BASE_URL: 'http://name:fake@localhost:8090/v1?api_key=fake',
+    });
+    expect(describeCanaryPrivateModel(settings, local.model))
+      .toBe('local/answer (local-openai-compatible via localhost:8090; mode no-sensitive)');
+    const veniceSettings = { ...settings, models: { venice: { current: 'strongest', strongest_now: 'demo-tee' } } };
+    const venice = canaryPrivateRoute(veniceSettings, {
+      ...env, VENICE_API_KEY: 'fake-venice-key',
+      OLYMPUS_SOURCE_INDEX_VENICE_ANALYST_BASE_URL: 'https://name:fake@api.venice.ai/api/v1?key=fake',
+    });
+    expect(describeCanaryPrivateModel(veniceSettings, venice.model))
+      .toBe('demo-tee (venice via api.venice.ai; mode no-sensitive)');
   });
 
   test('accounts only: the run\'s connection is made, the sources are asked over MCP, and the connection is revoked', async () => {

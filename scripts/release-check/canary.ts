@@ -37,9 +37,7 @@ import { FRESH_LEG, redactFreshTimeline, runFreshInstall, validateFreshSources }
 import { openFreshDashboard, parseCdpEndpoint } from './fresh-dashboard.ts';
 import { MAC_ENGINE_LOG, MAC_MACHINE_SAMPLE, memoryCheck, splitRestartCheck, startRssSampler, type RssSample } from './split-watch.ts';
 import { BUN_LOCATE, bundleAgent, LEG_BUDGET_MINUTES, parseAgentLine } from './run.ts';
-import { forbiddenMarkers } from './fixture.ts';
-import { redactMarkers } from './leak.ts';
-import { protocolChecks } from './protocol.ts';
+import { canarySmokeChecks } from './canary-smoke.ts';
 import { canaryTimingChecks, type CanaryTimingReceipt } from './canary-timing.ts';
 import type { KnownCanaryAsk } from './qualify.ts';
 import { LegBudget } from './leg-budget.ts';
@@ -50,7 +48,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { CommandDriver, type Machine } from './machine.ts';
 import { countChecks, escapeHtml, renderLimits, renderOnDemandTiming, type CheckCounts, type CheckResult, type CheckStatus } from './report.ts';
-import { openEngineMcp, runLiveAccounts, type LiveSourceSpec } from './live-accounts.ts';
+import { openEngineMcp, runLiveAccounts, type LiveAccountsOptions, type LiveSourceSpec } from './live-accounts.ts';
 import { parseTimingAccounts, parseTimingSeedConfig, realTimingSeeds, type TimingAccounts } from './on-demand-seeds.ts';
 import { runOnDemandTiming, type OnDemandTimingResult } from './on-demand-timing.ts';
 import { openTimingDashboard, openTimingDiagnostics } from './on-demand-machine.ts';
@@ -218,17 +216,16 @@ async function runInstalledCanaryAgent(machine: Machine, agent: string | undefin
     await machine.put(agent, '~/rc/agent.js');
   } catch (error) {
     const problem = error instanceof Error ? error.message : String(error);
-    return [...canaryTimingChecks(undefined, problem), ...protocolChecks({ code: 1, stderr: '' }, { ok: false, detail: problem }, forbiddenMarkers())];
+    return [...canaryTimingChecks(undefined, problem), ...canarySmokeChecks(accounts.questions, { ok: false, detail: problem }, 1)];
   }
-  return [...await runCanaryTiming(machine, accounts), ...await runCanarySmoke(machine)];
+  return [...await runCanaryTiming(machine, accounts), ...await runCanarySmoke(machine, accounts.questions)];
 }
 
-async function runCanarySmoke(machine: Machine): Promise<CheckResult[]> {
-  const markers = forbiddenMarkers();
+async function runCanarySmoke(machine: Machine, questions: readonly ClientQuestion[]): Promise<CheckResult[]> {
   let code = 1;
   let result: ReturnType<typeof parseAgentLine>;
   try {
-    const out = await machine.exec(`${BUN_LOCATE}\nexec "$BUN" --no-env-file ~/rc/agent.js canary-smoke\n`, { timeoutMs: CANARY_SMOKE_TIMEOUT_MS });
+    const out = await machine.exec(`${BUN_LOCATE}\nexec "$BUN" --no-env-file ~/rc/agent.js canary-smoke --questions ${shellQuote(JSON.stringify(questions))}\n`, { timeoutMs: CANARY_SMOKE_TIMEOUT_MS });
     code = out.code;
     result = parseAgentLine(out.stdout);
     if (!result && (out.timedOut || out.code === 124)) result = { ok: false, detail: 'the machine-agent smoke timed out' };
@@ -242,9 +239,17 @@ async function runCanarySmoke(machine: Machine): Promise<CheckResult[]> {
     `Machine before smoke: ${result?.sampleBefore ?? 'unavailable'}`,
     `Machine after smoke: ${result?.sampleAfter ?? 'unavailable'}`,
   ].join('; ');
-  return protocolChecks({ code, stderr: '' }, result, markers).map(check => ({
-    ...check, detail: redactMarkers([check.detail, diagnostic].filter(Boolean).join('; '), markers),
+  return canarySmokeChecks(questions, result, code).map(check => ({
+    ...check, detail: [check.detail, diagnostic].filter(Boolean).join('; '),
   }));
+}
+
+function readCanaryRefreshErrors(machine: Machine): NonNullable<LiveAccountsOptions['refreshErrors']> {
+  return async failed => {
+    const out = await machine.exec(`${BUN_LOCATE}\nexec "$BUN" --no-env-file ~/rc/agent.js canary-refresh-errors --failed ${shellQuote(JSON.stringify(failed))}\n`, { timeoutMs: 30_000 });
+    const receipt = parseAgentLine(out.stdout);
+    return out.code === 0 && receipt?.ok ? receipt.errors ?? {} : {};
+  };
 }
 
 async function runCanaryTiming(machine: Machine, accounts: CanaryAccounts): Promise<CheckResult[]> {
@@ -258,7 +263,8 @@ async function runCanaryTiming(machine: Machine, accounts: CanaryAccounts): Prom
     const out = await machine.exec(`${BUN_LOCATE}\nexec "$BUN" --no-env-file ~/rc/agent.js canary-timing${flag}\n`, { timeoutMs: CANARY_TIMING_TIMEOUT_MS });
     const result = parseAgentLine(out.stdout);
     if (out.code !== 0 || result?.ok !== true || !Array.isArray(result.interference)) {
-      const problem = out.timedOut ? 'The timing agent timed out' : `The timing agent returned no measurements (exit ${out.code})`;
+      const problem = out.timedOut ? 'The timing agent timed out'
+        : typeof result?.detail === 'string' ? result.detail : `The timing agent returned no measurements (exit ${out.code})`;
       return canaryTimingChecks(undefined, problem);
     }
     return canaryTimingChecks(result as unknown as CanaryTimingReceipt);
@@ -293,7 +299,8 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
         // On the Mac each poll of the fresh-item wait records the counts, privacy wait and load (live.timeline), and the engine's
         // judging and embedding log follows, so a slow find names the stage that held it.
         const sampleMachine = sampler ? async () => (await machine.exec(MAC_MACHINE_SAMPLE, { timeoutMs: 30_000 })).stdout.trim() : undefined;
-        checks.push(...await runLiveAccounts(engine, { sources: accounts.sources, ...(sampleMachine ? { sampleMachine } : {}), ...(options.sleep ? { sleep: options.sleep, pollMs: options.pollMs ?? 1 } : {}) }));
+        const refreshErrors = dedicatedCanary(machine.handle) && options.bridgeAgent ? readCanaryRefreshErrors(machine) : undefined;
+        checks.push(...await runLiveAccounts(engine, { sources: accounts.sources, ...(refreshErrors ? { refreshErrors } : {}), ...(sampleMachine ? { sampleMachine } : {}), ...(options.sleep ? { sleep: options.sleep, pollMs: options.pollMs ?? 1 } : {}) }));
         if (sampler) {
           const log = await machine.exec(MAC_ENGINE_LOG, { timeoutMs: 60_000 }).catch(() => undefined);
           checks.push({ id: 'live.engine-log', title: 'The engine log about judging and embedding', status: 'pass', detail: redactFreshTimeline(log?.stdout.trim() ?? '') || 'no matching log lines' });
