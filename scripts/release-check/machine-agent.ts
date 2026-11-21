@@ -912,6 +912,9 @@ async function smoke(questionsFile: string): Promise<never> {
     origin: desktopSandboxOrigin(),
     stateFile: join(WORKDIR, 'smoke-client.json'),
     ...(ownerCookie ? { ownerCookie } : {}),
+    // The Mac VM's local model answers the cardiology question in about 119 s, against the panel's 120 s cap (44742818442
+    // passed at 119,162 ms, 44903893874 missed at 119,223 ms with the judge standing back): 300 s there only (plan, 21 Nov).
+    ...(process.platform === 'darwin' ? { panelCapMs: 300_000 } : {}),
   }, {
     onTools: (names) => { tools = [...names]; },
     onQuestion: (obs) => {

@@ -84,6 +84,8 @@ export interface SmokeOptions {
    * also needs this owner proof (#1186).
    */
   ownerCookie?: string;
+  /** A longer wait than the panel's own cap, for a test machine slower than any owner's (the Mac VM, plan 21 Nov 2026). */
+  panelCapMs?: number;
 }
 
 export function parseSmokeArgs(argv: readonly string[], home = homedir()): SmokeOptions {
@@ -305,6 +307,8 @@ export interface PanelOptions {
   now?: () => number;
   /** Ms per Retry-After second (tests shrink it). */
   secondMs?: number;
+  /** Overrides the panel's poll cap (SmokeOptions.panelCapMs). */
+  capMs?: number;
 }
 
 /** What the panel decrypts, read the way the panel reads it; undefined when malformed. */
@@ -336,7 +340,7 @@ export async function collectPrivateAnswer(options: PanelOptions): Promise<Panel
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = options.now ?? Date.now;
   const secondMs = options.secondMs ?? 1000;
-  const cap = options.full ? PANEL_FULL_POLL_CAP_MS : PANEL_POLL_CAP_MS;
+  const cap = Math.max(options.capMs ?? 0, options.full ? PANEL_FULL_POLL_CAP_MS : PANEL_POLL_CAP_MS);
   const url = `${options.relay}/private/${options.jobId}`;
   const started = now();
   let polls = 0;
@@ -655,7 +659,7 @@ export async function runSmoke(options: SmokeOptions, sink?: SmokeSink): Promise
       if (result.isError) failures.push(`olympus_search errored for "${question.question}"`);
       if (meta?.state === 'ready' && meta.jobId) {
         const full = meta.detail === 'full';
-        const outcome = await collectPrivateAnswer({ relay: options.relay, jobId: meta.jobId, origin: options.origin, full });
+        const outcome = await collectPrivateAnswer({ relay: options.relay, jobId: meta.jobId, origin: options.origin, full, ...(options.panelCapMs ? { capMs: options.panelCapMs } : {}) });
         const totalMs = Date.now() - started;
         const budget = full ? FULL_BUDGET_MS : SUMMARY_BUDGET_MS;
         observation.panel = outcome.ok

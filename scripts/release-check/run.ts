@@ -1014,7 +1014,8 @@ async function runProtocolAgent(run: Run, workDir: string): Promise<void> {
   await run.machine!.put(questionsPath, '~/rc/questions.json');
   const agent: AgentReport = { id: 'chatgpt-protocol', label: 'ChatGPT protocol (production relay)', kind: 'protocol', ran: true, checks: run.checkList() };
   await run.phase('agent-chatgpt-protocol', async () => {
-    const out = await run.agent('smoke', '--questions ~/rc/questions.json', 900_000);
+    // Up to 30 min waiting for the private models after an update, then each Private question up to the machine's panel cap.
+    const out = await run.agent('smoke', '--questions ~/rc/questions.json', 3_600_000);
     const results = (out.result?.results ?? []) as Array<Record<string, any>>;
     if (out.result?.ok !== true || results.length === 0) {
       agent.checks.push({ id: 'protocol.ran', title: 'The ChatGPT-protocol pass ran', status: 'fail', detail: `no results (exit ${out.code}; smoke exit ${out.result?.exit ?? 'n/a'}): ${(out.result?.detail ?? (((out.result?.smokeChecks ?? []) as string[]).join('; ') || out.stderr.slice(-200)))}` });
