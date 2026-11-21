@@ -3,8 +3,12 @@
 
 import { describe, expect, test } from 'bun:test';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
-import { readFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { liveSpoolLine } from './support/telegram-spool-fixtures.ts';
+import { tmpdir } from 'node:os';
+import { defaultTelegramCaptureSpoolDir } from '../src/workers/telegram-messages/index.ts';
+import { defaultWhatsAppSpoolDir } from '../src/workers/whatsapp/store-sync.ts';
 import { ARCHIVE_FORMATS, legFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
   agentImportJourney, besideLiveChecks, besideLiveJourney, besideLiveLine, panelArchivesOf, seedLiveChecks, unpairJourney,
@@ -76,6 +80,36 @@ describe('an import beside a live input is judged', () => {
     expect(failing(good({ deleted: { ok: true, unpaired: true, stores: [], rowGone: true, engineBack: false, detail: 'the engine was not ready after the Delete\'s restart: timeout' } }))).toEqual(['archive.beside.fixture_chat.deleted']);
     expect(failing(good({ start: { ok: true, code: 'started', hasOpenTarget: false, carriesContent: false } }))).toEqual(['archive.beside.fixture_chat.requested']);
   });
+
+  for (const [provider, format, spoolDir, file] of [
+    ['telegram', 'telegram_json', defaultTelegramCaptureSpoolDir, '2024-04-02.jsonl'],
+    ['whatsapp', 'whatsapp_chat', defaultWhatsAppSpoolDir, '2024-04-14.jsonl'],
+  ] as const) {
+    test(`${provider} counts both stored messages when seeded twice on one data root`, async () => {
+      const home = mkdtempSync(join(tmpdir(), 'release-live-seed-'));
+      const env = { HOME: home, XDG_DATA_HOME: join(home, 'data'), XDG_STATE_HOME: join(home, 'state') };
+      const hook = liveSeedHook(provider);
+      try {
+        const first = await hook.seed({ home, env });
+        expect(first).toMatchObject({ ok: true, liveItems: 2 });
+        const spool = join(spoolDir(env), file);
+        // A repeat must preserve the spool byte for byte, including other input.
+        const otherChat = provider === 'telegram'
+          ? liveSpoolLine({ chat: '-42', id: '1000', text: 'Another chat.', sentAt: '2024-04-01T12:00:00Z' })
+          : JSON.stringify({ id: 'RCSEED0', chat_jid: '15550100042@s.whatsapp.net', timestamp: '2024-04-14T12:00:00Z', text: 'Another chat.' }) + '\n';
+        appendFileSync(spool, otherChat);
+        const before = readFileSync(spool, 'utf8');
+        const second = await hook.seed({ home, env });
+        expect(second).toMatchObject({ ok: true, liveItems: 2 });
+        expect(first.detail).toContain('0 already stored');
+        expect(second.detail).toContain('2 already stored');
+        expect(readFileSync(spool, 'utf8')).toBe(before);
+        expect(seedLiveChecks({ ...second, format }, format)[0]!.status).toBe('pass');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  }
 
   test('a seed that stored nothing fails', () => {
     expect(seedLiveChecks({ ok: true, format: 'x', liveItems: 0 }, 'x')[0]!.status).toBe('fail');

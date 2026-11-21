@@ -16,7 +16,7 @@ const PAGE_BOUND_MS = 10_000;
 const PAGES = { Home: '/dashboard', Sources: '/dashboard?connect' } as const;
 type Page = keyof typeof PAGES;
 const watchNow = () => Math.round(performance.timeOrigin + performance.now());
-type PageSample = { page: Page; at: number; ms: number; answered: boolean; timeout: boolean; authRefused?: boolean };
+type PageSample = { page: Page; at: number; ms: number; answered: boolean; timeout: boolean; authRefused?: boolean; status?: number; error?: string };
 type PageWindow = { started: number; ended: number; pages: Record<Page, { longestMs: number; answers: number; timeouts: number; over1s: number; firstGapAt?: number }> };
 type BuildRole = 'front' | 'background';
 export interface HiddenCopyBuilds {
@@ -97,9 +97,12 @@ export function dashboardAvailabilityCheck(window: PageWindow | undefined, start
 export async function samplePage(fetch: WorkerFetch, page: Page, at: number): Promise<PageSample> {
   const signal = AbortSignal.timeout(PAGE_BOUND_MS);
   let authRefused = false;
+  let status: number | undefined;
+  let error: string | undefined;
   const answered = await (async () => {
     const init = { headers: { accept: 'text/html' }, redirect: 'manual' as const, signal };
     const response = await fetch(PAGES[page], init);
+    status = response.status;
     const body = await response.text();
     authRefused = response.status === 401 || response.status === 403;
     if (response.status === 503 && body.includes('Olympus is starting:')) return true;
@@ -114,8 +117,13 @@ export async function samplePage(fetch: WorkerFetch, page: Page, at: number): Pr
     authRefused = panel.status === 401 || panel.status === 403;
     const result = await panel.json() as { structuredContent?: unknown; isError?: boolean };
     return panel.ok && Boolean(result.structuredContent) && result.isError !== true;
-  })().catch(() => false);
-  return { page, at, ms: watchNow() - at, answered, timeout: signal.aborted, ...(authRefused ? { authRefused } : {}) };
+  })().catch((caught: unknown) => {
+    // Why a probe got no answer (mac-upgrade 44862080534: 1,276 probes unanswered in about 1 ms, reason not kept).
+    error = caught instanceof Error ? `${caught.name}: ${caught.message}`.slice(0, 200) : String(caught).slice(0, 200);
+    return false;
+  });
+  return { page, at, ms: watchNow() - at, answered, timeout: signal.aborted, ...(authRefused ? { authRefused } : {}),
+    ...(!answered && status !== undefined ? { status } : {}), ...(!answered && error ? { error } : {}) };
 }
 
 const LEDGER_WAL_SUFFIX = '.tier-ledger.sqlite-wal';
