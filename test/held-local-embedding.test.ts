@@ -11,7 +11,7 @@ import { TierSnifferService } from '../src/workers/classification/sniffer-servic
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { BUILT_IN_EMBEDDING_PROVIDER } from '../src/workers/source-index/built-in-embedding/provider.ts';
-import { RecordingProvider, CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, localProvider, tempDir } from './helpers/tier-fixtures.ts';
+import { storedSecretLocation, RecordingProvider, CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, localProvider, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
@@ -147,7 +147,7 @@ test('a Secret verdict removes held vectors, text and copies and keeps a locatio
   expect(f.vectors()).toBe(0);
   expect(f.ledger.copies(identityOf('held'))).toEqual([]);
   expect(f.store.localContent(localId('held'))).toBeUndefined();
-  expect(f.secrets.get(identityOf('held'))).toMatchObject({ title: 'picnic.txt' });
+  expect(storedSecretLocation(f.secrets, identityOf('held'))).toMatchObject({ title: 'picnic.txt' });
   expect(f.store.missingEmbeddingItemIds(f.privateProvider, 10)).toEqual([]);
   expect((await f.store.embedChunks({ provider: f.privateProvider })).chunksEmbedded).toBe(0);
 });

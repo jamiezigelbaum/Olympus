@@ -16,6 +16,7 @@ import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import {
+  storedSecretLocation,
   FIXTURE_PLACEMENT,
   fixtureConnector,
   identityOf,
@@ -127,7 +128,7 @@ describe('an item that becomes Secret keeps the location only', () => {
     assertLocationOnly();
     // The location index holds no more than the store rows: no title and no
     // locator, since both carry the key.
-    expect(fx.secrets.get(identityOf('keys'))).toMatchObject({ title: null, locator: null });
+    expect(storedSecretLocation(fx.secrets, identityOf('keys'))).toMatchObject({ title: null, locator: null });
     const tombstones = existingStorePaths(fx).map((path) => storedRows(path, localId('keys')));
     const tombstoneRows = tombstones.flatMap((rows) => rows.items);
     expect(tombstoneRows.length).toBeGreaterThan(0);
@@ -157,7 +158,7 @@ describe('an item that becomes Secret keeps the location only', () => {
 
     // An owner-marked Secret's names are Secrets too: the index keeps no
     // title, and the store row keeps no more than the index.
-    const location = fx.secrets.get(identityOf('garden'));
+    const location = storedSecretLocation(fx.secrets, identityOf('garden'));
     expect(location).toMatchObject({ title: null, locator: '/Files/garden-plan.txt' });
     const rows = storedRows(fx.paths.internal, localId('garden'));
     expect(rows.items).toHaveLength(1);
@@ -276,7 +277,7 @@ for (const locator of [
   finally { db.close(); }
   fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'secrets' });
   expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
-  expect(fx.secrets.get(identityOf('garden'))?.locator).toBeNull();
+  expect(storedSecretLocation(fx.secrets, identityOf('garden'))?.locator).toBeNull();
   const rows = storedRows(fx.paths.internal, localId('garden'));
   expect(rows.items).toHaveLength(1);
   expect(rows.items[0]!['locator_uri']).toBeNull();

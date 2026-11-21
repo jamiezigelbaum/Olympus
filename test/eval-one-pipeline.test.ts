@@ -95,10 +95,10 @@ function answerLanes(h: OnePipelineHarness) {
     answerScope: () => ({ kind: 'search' }),
     accountScope: () => undefined,
     visibilityGate: createTierVisibilityGate(() => [{ ledger: h.set.ledger, corpusIds: corpora() }]),
-    parentLabels: createParentLabelResolver({
+    parentLabels: planFor => createParentLabelResolver({
       stores,
       scopes: () => [{ ledger: h.set.ledger, corpusIds: corpora() }],
-    }),
+    }, planFor),
   });
 }
 

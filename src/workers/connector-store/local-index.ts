@@ -18867,7 +18867,7 @@ export interface SearchAncestorPlan {
   store: LocalConnectorStore;
   ancestorScope: Pick<ConnectorStoreCorpusAdapterOptions, 'accountScope' | 'filters'>;
 }
-type SearchAncestorPlanFor = (corpusId: string) => SearchAncestorPlan | undefined;
+export type SearchAncestorPlanFor = (corpusId: string) => SearchAncestorPlan | undefined;
 
 /** Query match predicates apply to the hit. Keep its account, path and trusted admission filters for the ancestors. */
 export function searchAncestorScope(

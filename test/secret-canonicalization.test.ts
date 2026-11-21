@@ -1,3 +1,4 @@
+import { storedSecretLocation, tempDir } from './helpers/tier-fixtures.ts';
 import { expect, test } from 'bun:test';
 import { secretLabelsInText } from '../src/core/opsec.ts';
 import { detectSecretFindingKinds } from '../src/workers/classification/engine.ts';
@@ -128,13 +129,14 @@ test('URL parsing does not erase other secret assignments in paths or custom par
 });
 
 test('location storage screens both title and locator after decoding', () => {
-  const index = new SecretLocationsIndex({ dbPath: ':memory:' });
+  const tmp = tempDir();
+  const index = new SecretLocationsIndex({ dbPath: `${tmp.dir}/locations.sqlite` });
   const identity = { provider: 'fixture', accountScope: 'personal', providerItemId: 'encoded' };
   try {
     const material = `https://example.test/?&#97;ccess&lowbar;token=${credential}`;
     index.record({ identity, title: material, locator: material, namesReleasable: true, findingKinds: ['credential_assignment'] });
-    expect(index.get(identity)).toMatchObject({ title: null, locator: null });
-  } finally { index.close(); }
+    expect(storedSecretLocation(index, identity)).toMatchObject({ title: null, locator: null });
+  } finally { index.close(); tmp.cleanup(); }
 });
 
 test('encoding the entire URL, Unicode width and malformed percent runs cannot hide credentials', () => {

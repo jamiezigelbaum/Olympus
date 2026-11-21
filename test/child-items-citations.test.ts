@@ -7,6 +7,7 @@
 // the child; and a file that could not be read names its parent and where it
 // lives. Synthetic data only.
 
+import { fixtureAncestorPlans } from './helpers/tier-fixtures.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { archiveCorpusId, getArchiveFormat } from '../src/core/archive-formats.ts';
 import type { EvidenceCandidate } from '../src/core/contracts.ts';
@@ -72,7 +73,7 @@ async function archive(specs: FixtureParentSpec[] = parents()) {
   const resolve = createParentLabelResolver({
     stores: () => archiveLaneStores(lane),
     scopes: () => [{ ledger: lane.ledger, corpusIds: new Set(corpora) }],
-  });
+  }, fixtureAncestorPlans(() => archiveLaneStores(lane)));
   const identityOf = (providerItemId: string): SourceItemIdentity => ({
     family: format.family,
     provider: format.provider,
@@ -218,7 +219,7 @@ describe('a parent that cannot be offered', () => {
     const resolve = createParentLabelResolver({
       stores: () => { throw new Error('store closed'); },
       scopes: () => [],
-    });
+    }, () => undefined);
     expect(() => resolve([request(CHILD)])).toThrow();
     const outcome = applyParentLabels([candidateFor(identityOf(CHILD), 'internal')], [archiveCorpusId('internal', format.family)], resolve, scopeFor([]));
     expect(outcome.dependencies).toEqual([]);
@@ -281,7 +282,7 @@ describe('a child that failed before its text landed is still listed', () => {
     const resolve = createParentLabelResolver({
       stores: () => archiveLaneStores(lane),
       scopes: () => [{ ledger: lane.ledger, corpusIds: new Set(corpora) }],
-    });
+    }, fixtureAncestorPlans(() => archiveLaneStores(lane)));
     const ref: ExtractionItemRef = {
       corpusId: home, provider: format.provider, approvedScopeKey: 'archive', accountScope: archiveId,
       providerItemId: CHILD, localItemId: fixtureLocalItemId(archiveId, CHILD),
@@ -293,7 +294,7 @@ describe('a child that failed before its text landed is still listed', () => {
     expect(holders.map((store) => store.corpusId)).not.toContain(home);
     expect(holders.length).toBeGreaterThan(0);
 
-    const locators = createUnreadableLocators({ stores: () => archiveLaneStores(lane), lanes: () => [{ corpusIds: new Set(corpora) }], parentLabels: resolve });
+    const locators = createUnreadableLocators({ stores: () => archiveLaneStores(lane), lanes: () => [{ corpusIds: new Set(corpora), ledger: lane.ledger }], planFor: fixtureAncestorPlans(() => archiveLaneStores(lane)), parentLabels: resolve });
     const verdict = createUnreadableVerdict({ locate: locators.locate, lanes: () => [{ corpusIds: new Set(corpora), ledger: lane.ledger }] });
     const items: ExtractionUnreadableItem[] = [{ ref, failedAt: '2026-10-05T00:00:00.000Z' }];
     expect(verdict(items[0]!)).toBe('unreadable');

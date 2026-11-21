@@ -11019,7 +11019,6 @@ var init_fts = __esm(() => {
   });
   INITIALISM_CONNECTORS = new Set(["of", "and", "for", "the", "to", "on", "in", "de", "del", "la", "le", "du", "des", "y"]);
 });
-
 // src/workers/dropbox-files/content-policy.ts
 var init_content_policy = __esm(() => {
   init_secret_patterns();
@@ -11231,63 +11230,6 @@ var init_tier_classifier = __esm(() => {
   });
 });
 
-// src/workers/classification/secret-locations.ts
-var STOP_WORDS;
-var init_secret_locations = __esm(() => {
-  init_fts();
-  init_sqlite_migrations();
-  init_sqlite_store();
-  init_store_write_guard();
-  init_engine();
-  init_tier_classifier();
-  init_tier_ledger_path();
-  STOP_WORDS = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "did",
-    "do",
-    "does",
-    "find",
-    "for",
-    "have",
-    "i",
-    "in",
-    "is",
-    "it",
-    "kept",
-    "keep",
-    "me",
-    "my",
-    "of",
-    "olympus",
-    "on",
-    "or",
-    "put",
-    "record",
-    "records",
-    "saved",
-    "show",
-    "stored",
-    "the",
-    "there",
-    "to",
-    "what",
-    "where",
-    "which",
-    "who",
-    "with"
-  ]);
-});
-// src/workers/classification/sniffer-store.ts
-var init_sniffer_store = __esm(() => {
-  init_sqlite_migrations();
-  init_sqlite_store();
-  init_store_write_guard();
-  init_tier_classifier();
-  init_tier_ledger_path();
-});
 // src/workers/classification/tier-ledger.ts
 function labelSweepMetaKey(provider, accountScope) {
   return `owner_rules_label_sweep:${provider}:${accountScope}`;
@@ -11445,6 +11387,92 @@ var init_tier_ledger = __esm(() => {
           AND w.conversation_key = tier_copies.conversation_key AND w.provider_item_id = tier_copies.provider_item_id
           AND w.kind IN ('secret', 'deletion')
       )`;
+});
+
+// src/workers/connector-store/off-thread-reads.ts
+var startedStores, storeOpens, queues, openSnapshots, releases;
+var init_off_thread_reads = __esm(() => {
+  init_read_progress();
+  init_answer_latency_trace();
+  startedStores = new Set;
+  storeOpens = new Map;
+  queues = new Map;
+  openSnapshots = new Map;
+  releases = new Map;
+});
+
+// src/core/child-item-id.ts
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
+// src/workers/connector-store/child-visibility.ts
+var askReads, releasing;
+var init_child_visibility = __esm(() => {
+  init_tier_ledger();
+  init_memory_counters();
+  init_control_path_headroom();
+  init_answer_latency_trace();
+  init_off_thread_reads();
+  askReads = new WeakMap;
+  releasing = new WeakSet;
+});
+
+// src/workers/classification/secret-locations.ts
+var STOP_WORDS;
+var init_secret_locations = __esm(() => {
+  init_fts();
+  init_sqlite_migrations();
+  init_sqlite_store();
+  init_store_write_guard();
+  init_child_visibility();
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger_path();
+  STOP_WORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "olympus",
+    "on",
+    "or",
+    "put",
+    "record",
+    "records",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+// src/workers/classification/sniffer-store.ts
+var init_sniffer_store = __esm(() => {
+  init_sqlite_migrations();
+  init_sqlite_store();
+  init_store_write_guard();
+  init_tier_classifier();
+  init_tier_ledger_path();
 });
 
 // src/workers/classification/tier-set-binding.ts
@@ -11790,9 +11818,6 @@ var init_job_names = __esm(() => {
   init_sqlite_store();
   openLedgerPaths = new Map;
 });
-
-// src/core/child-item-id.ts
-var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/core/source-index/keyword-languages.ts
 var profiles, PROFILE_REUSE_MS, sampling;
@@ -12485,18 +12510,6 @@ var init_keyword_expansion = __esm(() => {
   runningTranslations = new WeakMap;
 });
 
-// src/workers/connector-store/off-thread-reads.ts
-var startedStores, storeOpens, queues, openSnapshots, releases;
-var init_off_thread_reads = __esm(() => {
-  init_read_progress();
-  init_answer_latency_trace();
-  startedStores = new Set;
-  storeOpens = new Map;
-  queues = new Map;
-  openSnapshots = new Map;
-  releases = new Map;
-});
-
 // src/core/provider-account-identity.ts
 function parseProviderAccountId(id) {
   const labels = new Map;
@@ -12645,18 +12658,6 @@ var init_parent_context = __esm(() => {
   init_sniffer();
   init_tier_classifier();
   init_stored_names();
-});
-
-// src/workers/connector-store/child-visibility.ts
-var askReads, releasing;
-var init_child_visibility = __esm(() => {
-  init_tier_ledger();
-  init_memory_counters();
-  init_control_path_headroom();
-  init_answer_latency_trace();
-  init_off_thread_reads();
-  askReads = new WeakMap;
-  releasing = new WeakSet;
 });
 
 // src/workers/connector-store/loop-pass.ts

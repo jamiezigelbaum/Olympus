@@ -2,6 +2,7 @@
 // covers every tier of that source, judged by one ledger snapshot, with Secret
 // locations beside the hits. `all_tiers: false` pins the one corpus.
 
+import { createTierSecretLocations } from '../src/workers/engine/runtime/tier-secret-locations.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
@@ -40,9 +41,7 @@ async function workerFixture(): Promise<{ tiered: TierFixture; worker: ReturnTyp
     connectorStores: tiered.set.openStores(),
     connectorStoreTierSiblings: (corpusId) => [...corpusIds].filter((sibling) => sibling !== corpusId),
     sourceIndexVisibilityGate: createTierVisibilityGate(() => [{ ledger: tiered.ledger, corpusIds }]),
-    secretLocationSearch: (query, searched) => (
-      searched.some((scope) => scope.corpusId === CORPORA.secure_local) ? tiered.secrets.search(query, {}) : []
-    ),
+    secretLocationSearch: createTierSecretLocations([{ ledger: tiered.ledger, secrets: tiered.secrets, secureCorpusId: CORPORA.secure_local, corpusIds }]).search,
   });
   return { tiered, worker };
 }

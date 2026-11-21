@@ -13,20 +13,20 @@
  * composition root's.
  */
 
+import type { TierLedger } from '../classification/tier-ledger.ts';
 import type { ParentLabelResolver } from '../../core/parent-label.ts';
 import type { UnreadableFileLocation, UnreadableParent } from '../file-extraction/unreadable-files.ts';
 import { unreadableParentOf } from './parent-label.ts';
-import type { LocalConnectorStore } from './local-index.ts';
-
-type LocatorStore = Pick<LocalConnectorStore, 'corpusId' | 'localContent' | 'activeLocalItemRow'>;
+import type { LocalConnectorStore, SearchAncestorPlanFor } from './local-index.ts';
 
 export interface UnreadableLocatorsInput {
-  stores(): Iterable<LocatorStore>;
+  stores(): Iterable<LocalConnectorStore>;
   /**
    * The tier lanes: the corpora one ledger governs together.
    */
-  lanes(): Iterable<{ corpusIds: ReadonlySet<string> }>;
+  lanes(): Iterable<{ corpusIds: ReadonlySet<string>; ledger: TierLedger }>;
   parentLabels: ParentLabelResolver;
+  planFor: SearchAncestorPlanFor;
 }
 
 export function createUnreadableLocators(input: UnreadableLocatorsInput): {
@@ -36,21 +36,28 @@ export function createUnreadableLocators(input: UnreadableLocatorsInput): {
   /**
    * The stores that can hold this job's item: its corpus's own, then its lane's others.
    */
-  const storesFor = (corpusId: string): LocatorStore[] => {
+  const storesFor = (corpusId: string): LocalConnectorStore[] => {
     const governed = [...input.lanes()].find((lane) => lane.corpusIds.has(corpusId))?.corpusIds;
     const all = [...input.stores()];
     return [
       ...all.filter((store) => store.corpusId === corpusId),
       ...all.filter((store) => store.corpusId !== corpusId && governed?.has(store.corpusId) === true),
-    ];
+    ].filter(store => input.planFor(store.corpusId)?.store === store);
   };
   return {
     locate(ref) {
-      for (const store of storesFor(ref.corpusId)) {
+      const stores = storesFor(ref.corpusId);
+      for (const store of stores) {
+        const scope = input.planFor(store.corpusId)?.ancestorScope;
+        if (!scope || !store.itemMatchesSearchFilters(ref.localItemId, scope.accountScope, scope.filters)) continue;
         const found = store.localContent(ref.localItemId, 0, undefined, { withoutContent: true });
         if (found) {
+          const child = store.activeLocalItemRow(ref.localItemId)?.identity;
+          const withheld = !child || store.childrenWithWithheldSearchIdentifiers([child], true, input.planFor, {
+            stores: () => stores, ledger: () => [...input.lanes()].find(lane => lane.corpusIds.has(store.corpusId))?.ledger,
+          }).has(child);
           return {
-            ...(found.locatorUri ? { locatorUri: found.locatorUri } : {}),
+            ...(found.locatorUri && !withheld ? { locatorUri: found.locatorUri } : {}),
             ...(found.providerConversationId ? { providerConversationId: found.providerConversationId } : {}),
           };
         }

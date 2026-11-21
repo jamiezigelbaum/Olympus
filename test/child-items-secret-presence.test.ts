@@ -9,6 +9,7 @@
 // came inside another item is still hidden with that item. Through the real
 // archive import, tier set, ledger, Secret location index and sweep.
 
+import { fixtureSecretParents } from './helpers/tier-fixtures.ts';
 import { Database } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -488,11 +489,8 @@ describe('a Secret child\'s location is its name', () => {
     expect(liveRows(h, archiveId, [M1_CHILDREN[0]!])).toEqual([]);
     const index = lane.secretLocations!;
     const lane_ = { ledger: () => lane.ledger, stores: () => lane.set.openStores() };
-    const shown = (): boolean => index.search('lease', {}, {
-      hide: (identities) => hiddenProbesByParentIdentity(lane_, identities),
-    }).length > 0;
+    const shown = (): boolean => index.search('lease', {}, fixtureSecretParents(lane.set.openStores(), lane.ledger)).length > 0;
     // Its filename is findable while the parent is there.
-    expect(index.search('lease', {}).length).toBeGreaterThan(0);
     expect(shown()).toBe(true);
 
     // The parent is deleted in every store that holds it, as an absence reconcile does it.

@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import {
+  storedSecretLocation,
   ACCOUNT,
   CORPORA,
   FIXTURE_PLACEMENT,
@@ -305,7 +306,7 @@ describe('P1b: new items are routed by their recorded tiers', () => {
       expect(chunksOf(secure, 'new-secret')).toBe(0);
       expect(vectorsOf(secure, 'new-secret')).toBe(0);
       expect([...fixture.local.inputs, ...fixture.cloud.inputs].some((input) => input.includes('AKIA'))).toBe(false);
-      expect(fixture.secrets.get(identityOf('new-secret'))).toMatchObject({
+      expect(storedSecretLocation(fixture.secrets, identityOf('new-secret'))).toMatchObject({
         source: 'fixture',
         locator: '/Files/env.txt',
         title: 'env.txt',

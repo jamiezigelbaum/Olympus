@@ -6,8 +6,10 @@ import { connectorStoreAnswerScope } from '../../src/workers/engine/runtime/answ
 import { createSourceAnswerLanes, type SourceAnswerLaneDependencies } from '../../src/workers/engine/runtime/source-answer-lanes.ts';
 
 export function fixtureLanes(stores: LocalConnectorStore[], readScope: SourceAnswerLaneDependencies['readScope'],
-  principal: (store: LocalConnectorStore) => { provider: string; accountScope: string }) {
+  principal: (store: LocalConnectorStore) => { provider: string; accountScope: string },
+  secrets?: Pick<SourceAnswerLaneDependencies, 'secretLocations' | 'checkSecretLocations'>) {
   return createSourceAnswerLanes({
+    ...secrets,
     stores: () => stores, registry: () => buildSourceIndexCorpusRegistry(stores.map(store => defineConnectorCorpus(store))),
     embeddingProvider: () => undefined, localEmbedding: () => undefined, readScope,
     accountScope: store => principal(store).accountScope,

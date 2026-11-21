@@ -13,7 +13,8 @@
 // keyword retry only for Private stores. Neither mode changes a model or epoch.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { ClassificationCoverageNote, SecretLocationNote, SavedSecretLocation } from '../../../core/evidence-pack.ts';
+import type { ClassificationCoverageNote } from '../../../core/evidence-pack.ts';
+import type { createTierSecretLocations, SearchedSecretCorpus } from './tier-secret-locations.ts';
 import type { ParentLabelResolver } from '../../../core/parent-label.ts';
 import type { SourceIndexAnswerRequest } from '../../source-index/answer-types.ts';
 import type { SourceIndexCorpusRegistry } from '../../../core/source-index/corpus.ts';
@@ -28,7 +29,7 @@ import {
 import {
   createConnectorStoreContentProvider,
   createConnectorStoreCorpusAdapter,
-  searchAncestorScope, type SearchAncestorPlan,
+  searchAncestorScope, type SearchAncestorPlanFor,
   type ConnectorStoreSearchFilters,
   type LocalConnectorStore,
 } from '../../connector-store/index.ts';
@@ -127,18 +128,12 @@ export interface SourceAnswerLaneDependencies {
   semanticRelevanceBar?: (store: LocalConnectorStore) => number | undefined;
   visibilityGate?: SourceIndexVisibilityGate;
   /** The Secrets located within the scopes this request searched. */
-  secretLocations?: (
-    query: string,
-    searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
-  ) => readonly SecretLocationNote[];
-  checkSecretLocations?: (
-    locations: readonly SavedSecretLocation[],
-    searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
-  ) => boolean;
+  secretLocations?: ReturnType<typeof createTierSecretLocations>['search'];
+  checkSecretLocations?: ReturnType<typeof createTierSecretLocations>['recheck'];
   /** Items still waiting for their tier in a corpus (0 when none or unknown). */
   heldItems?: (corpusId: string) => number;
   /** A child item's parent, for the label its citation carries (names only, authorized per candidate). */
-  parentLabels?: ParentLabelResolver;
+  parentLabels?: (planFor: SearchAncestorPlanFor) => ParentLabelResolver;
 }
 
 /** Trusted modes: local answers narrow embeddings; private search enables the keyword retry. */
@@ -149,12 +144,13 @@ export function createSourceAnswerLanes(
     deps.ownerQuestions?.retrieving();
     // The scope each corpus is searched under in THIS request, so the
     // Secret locations released beside the answer are confined to it.
-    const ancestorPlans = new Map<string, SearchAncestorPlan & { readScopeSignature: string }>();
+    const selected = sourceAnswerCorpusIds(request);
+    const ancestorPlans = new Map<string, SearchedSecretCorpus & { readScopeSignature: string }>();
     const ancestorPlanFor = (id: string) => {
+      if (selected && !selected.includes(id)) return undefined;
       const plan = ancestorPlans.get(id);
       return plan && JSON.stringify(deps.readScope(plan.store)) === plan.readScopeSignature ? plan : undefined;
     };
-    const searchScopes = new Map<string, { accountScope?: string; filters?: ConnectorStoreSearchFilters }>();
     // Each store's embedding provider for THIS request, memoized so the
     // vector lane and passage ranking embed the query once between them.
     // The memo is shared by every store on the same provider: a per-store
@@ -212,11 +208,9 @@ export function createSourceAnswerLanes(
       const filters = scope.filters || mandatoryScope.filters
         ? { ...scope.filters, ...mandatoryScope.filters }
         : undefined;
-      searchScopes.set(store.corpusId, {
+      ancestorPlans.set(store.corpusId, {
         ...(connectorStoreAccount ? { accountScope: connectorStoreAccount } : {}),
         ...(filters ? { filters } : {}),
-      });
-      ancestorPlans.set(store.corpusId, {
         store, ancestorScope: searchAncestorScope(mandatoryScope.accountScope ?? connectorStoreAccount, scope.filters, mandatoryScope.filters),
         readScopeSignature: JSON.stringify(mandatoryScope),
       });
@@ -232,6 +226,10 @@ export function createSourceAnswerLanes(
         ...(connectorStoreEmbedding ? { embeddingProvider: connectorStoreEmbedding } : {}),
       });
     };
+    const secretScopes = (ids: readonly string[]) => ids.flatMap(id => {
+      const plan = ancestorPlanFor(id);
+      return plan ? [plan] : [];
+    });
     const stores = deps.stores();
     const registry = deps.registry();
     const mounted = new Set(stores.map((store) => store.corpusId));
@@ -240,25 +238,13 @@ export function createSourceAnswerLanes(
       registry,
       unmountedCorpusIds: new Set(registry.list().map((corpus) => corpus.corpusId).filter((corpusId) => !mounted.has(corpusId))),
       ...(deps.visibilityGate ? { visibilityGate: deps.visibilityGate } : {}),
-      ...(deps.parentLabels ? { parentLabels: deps.parentLabels } : {}),
-      ...(deps.secretLocations
-        ? {
-          secretLocations: (query: string, searchedCorpora: readonly string[]) => deps.secretLocations!(
-            query,
-            searchedCorpora.flatMap((corpusId) => {
-              const scope = searchScopes.get(corpusId);
-              return scope ? [{ corpusId, ...scope }] : [];
-            }),
-          ),
-        }
-        : {}),
+      ...(deps.parentLabels ? { parentLabels: deps.parentLabels(ancestorPlanFor) } : {}),
+      // Only the answer on this computer may release a locator carrying Private parent names.
+      ...(deps.secretLocations ? {
+        secretLocations: (query, searchedCorpora) => deps.secretLocations!(query, secretScopes(searchedCorpora), mode === 'built_in_only'),
+      } : {}),
       ...(deps.checkSecretLocations ? {
-        checkSecretLocations: (locations: readonly SavedSecretLocation[]) => {
-          const selected = sourceAnswerCorpusIds(request);
-          const secure = new Set(deps.registry().list().filter(c => c.trustDomain === 'secure_local' && (!selected || selected.includes(c.corpusId))).map(c => c.corpusId));
-          const scopes = [...searchScopes].flatMap(([corpusId, scope]) => secure.has(corpusId) ? [{ corpusId, ...scope }] : []);
-          return deps.checkSecretLocations!(locations, scopes);
-        },
+        checkSecretLocations: locations => deps.checkSecretLocations!(locations, secretScopes(deps.registry().list().map(c => c.corpusId)), mode === 'built_in_only'),
       } : {}),
       ...(deps.heldItems
         ? {

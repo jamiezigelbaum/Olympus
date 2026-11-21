@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../../src/core/contracts.ts';
 import type { SourceExclusionMatcher } from '../../src/core/source-ingestion-exclusions.ts';
 import { buildSourceSensitivity, type SourceTrustDomain } from '../../src/core/source-index/types.ts';
-import { SecretLocationsIndex } from '../../src/workers/classification/secret-locations.ts';
+import { SecretLocationsIndex, type SecretLocationIdentity, type SecretLocationParentScope } from '../../src/workers/classification/secret-locations.ts';
 import { contentDigestReason, type TierSniffer } from '../../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../../src/workers/connector-store/index.ts';
@@ -19,6 +19,39 @@ import { moveTieredItem } from '../../src/workers/connector-store/tier-move.ts';
 import type { ConnectorStorePlacement } from '../../src/workers/connector-store/tier-placement.ts';
 import { TieredStoreSet, tieredStoreSetLedgerPath } from '../../src/workers/connector-store/tiered-store-set.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../../src/workers/source-index/embeddings.ts';
+
+// Storage assertions inspect the row as written, including locators kept solely for scope filtering.
+export function storedSecretLocation(index: SecretLocationsIndex, identity: SecretLocationIdentity) {
+  const db = new Database(index.dbPath, { readonly: true });
+  try {
+    const row = db.query(`
+      SELECT provider AS source, title, locator, scope_generation AS scopeGeneration, scope_revision AS scopeRevision,
+        folder_keys_json AS folders, finding_kinds_json AS kinds FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(identity.provider, identity.accountScope, identity.providerConversationId ?? '', identity.providerItemId) as {
+      source: string; title: string | null; locator: string | null; scopeGeneration: string | null; scopeRevision: string | null;
+      folders: string; kinds: string;
+    } | null;
+    return row && { ...row, folderKeys: JSON.parse(row.folders) as string[], findingKinds: JSON.parse(row.kinds) as string[] };
+  } finally { db.close(); }
+}
+
+export function fixtureAncestorPlans(stores: () => readonly LocalConnectorStore[]) {
+  return (id: string) => {
+    const store = stores().find(store => store.corpusId === id);
+    return store ? { store, ancestorScope: {} } : undefined;
+  };
+}
+
+export function fixtureSecretParents(stores: readonly LocalConnectorStore[], ledger?: TierLedger): SecretLocationParentScope {
+  return { plans: stores.map(store => ({ store, ancestorScope: {} })), ledger, includePrivateNames: false };
+}
+
+/** A standalone index of top-level items, with a real (empty) store to check for parent links. */
+export function standaloneSecretParents() {
+  const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'secure_local.fixture.files', family: 'file', trustDomain: 'secure_local' });
+  return { ...fixtureSecretParents([store]), close: () => store.close() };
+}
 
 export const ACCOUNT = 'personal';
 

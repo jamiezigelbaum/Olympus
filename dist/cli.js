@@ -40285,6 +40285,51 @@ var init_store_write_guard = __esm(() => {
   };
 });
 
+// src/workers/connector-store/sqlite-mmap.ts
+function sqliteMmapPolicy(env = process.env) {
+  const setting = env.OLYMPUS_SQLITE_MMAP;
+  if (setting === "off")
+    return { enabled: false, reason: "OLYMPUS_SQLITE_MMAP=off" };
+  if (process.platform !== "linux")
+    return { enabled: false, reason: "Linux only" };
+  if (setting === "on")
+    return { enabled: true, reason: "OLYMPUS_SQLITE_MMAP=on" };
+  return { enabled: false, reason: "default" };
+}
+function sqliteMmapEnabled(env = process.env) {
+  return sqliteMmapPolicy(env).enabled;
+}
+function sqliteMmapWorkerSource(source) {
+  const pragma = sqliteMmapEnabled() ? `
+    try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); }
+    catch { console.warn('[olympus] SQLite worker could not enable the file map.'); }
+  ` : "";
+  return source.replace("/*olympus-mmap-pragma*/", pragma);
+}
+function applySqliteMmap(db, env = process.env) {
+  if (!sqliteMmapEnabled(env))
+    return;
+  try {
+    db.exec(`PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}`);
+  } catch {}
+}
+var SQLITE_MMAP_BYTES = 2147418112;
+
+// src/workers/classification/installed-tier-classification-registry.ts
+function registerInstalledTierClassification(provider) {
+  registered = provider;
+}
+function registeredInstalledTierClassification() {
+  return registered;
+}
+function registerTierSetPlanner(ledgerPath, planner) {
+  (tierSetPlanners ??= new Map).set(ledgerPath, planner);
+}
+function tierSetPlannerForLedger(ledgerPath) {
+  return tierSetPlanners?.get(ledgerPath);
+}
+var registered, tierSetPlanners;
+
 // src/workers/dropbox-files/content-policy.ts
 import { createHash as createHash13 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
@@ -41920,955 +41965,11 @@ var init_tier_classifier = __esm(() => {
   SLUG = /^[a-z0-9][a-z0-9_.:-]{0,95}$/i;
 });
 
-// src/workers/classification/secret-locations.ts
-import { Database } from "bun:sqlite";
-import { createHash as createHash16 } from "node:crypto";
-import { chmodSync as chmodSync5, closeSync as closeSync12, existsSync as existsSync23, mkdirSync as mkdirSync14, openSync as openSync12 } from "node:fs";
-import { dirname as dirname28 } from "node:path";
-function screenedSecretLocator(locator) {
-  return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
-}
-
-class SecretLocationsIndex {
-  dbPath;
-  db;
-  now;
-  constructor(options) {
-    this.dbPath = options.dbPath;
-    this.now = options.now ?? (() => new Date);
-    if (options.readOnly === true) {
-      this.db = new Database(this.dbPath, { readonly: true, create: false });
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-      return;
-    }
-    assertWritableStoreOpenAllowed("secret-locations index", this.dbPath);
-    const onDisk = this.dbPath !== ":memory:";
-    if (onDisk) {
-      mkdirSync14(dirname28(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync23(this.dbPath))
-        closeSync12(openSync12(this.dbPath, "a", 384));
-      chmodSync5(this.dbPath, 384);
-    }
-    this.db = new Database(this.dbPath, { create: true });
-    try {
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
-      runSqliteMigrations(this.db, SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsMigrations());
-    } catch (error) {
-      closeSqliteStore(this.db);
-      throw error;
-    }
-  }
-  close() {
-    closeSqliteStore(this.db);
-  }
-  record(input) {
-    const kinds = [...new Set(input.findingKinds.map((kind) => kind.trim()).filter(Boolean))].sort();
-    if (kinds.length === 0)
-      throw new Error("A secret location needs at least one finding kind.");
-    const namesReleasable = input.namesReleasable === true;
-    const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
-    const locator = screenedSecretLocator(input.locator);
-    const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
-    const contentHash = input.text !== undefined ? createHash16("sha256").update(input.text, "utf8").digest("hex") : null;
-    const existing = this.get(input.identity);
-    if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
-      return false;
-    }
-    this.db.query(`
-      INSERT INTO secret_locations (
-        provider, account_scope, conversation_key, provider_item_id, locator, title, names_releasable,
-        folder_keys_json, scope_generation, scope_revision, finding_kinds_json, content_hash, detected_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
-        locator = excluded.locator, title = excluded.title, names_releasable = excluded.names_releasable,
-        folder_keys_json = excluded.folder_keys_json, scope_generation = excluded.scope_generation,
-        scope_revision = excluded.scope_revision, finding_kinds_json = excluded.finding_kinds_json,
-        content_hash = excluded.content_hash, detected_at = excluded.detected_at
-    `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
-    return true;
-  }
-  rebindScopeGenerations(input) {
-    return this.db.transaction(() => {
-      let changed = 0;
-      for (const generation of input.fromGenerations) {
-        if (generation === input.accountGeneration)
-          continue;
-        changed += this.db.query("UPDATE secret_locations SET scope_generation = ?, scope_revision = ? WHERE provider = ? AND scope_generation = ?").run(input.accountGeneration, input.revision, input.provider, generation).changes;
-      }
-      return changed;
-    }).immediate();
-  }
-  remove(identity) {
-    return this.db.query(`
-      DELETE FROM secret_locations
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId).changes > 0;
-  }
-  removeAccountScope(provider, accountScope) {
-    return this.db.query("DELETE FROM secret_locations WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
-  }
-  get(identity) {
-    const row = this.db.query(`
-      SELECT * FROM secret_locations
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
-    return row ? locationFromRow(row) : undefined;
-  }
-  count() {
-    return this.db.query("SELECT COUNT(*) AS n FROM secret_locations").get().n;
-  }
-  recheck(expected, scope, options = {}) {
-    const rows = this.db.query(`SELECT * FROM secret_locations ${scope.accountScope ? "WHERE account_scope = ?" : ""}`).all(...scope.accountScope ? [scope.accountScope] : []);
-    for (const row of rows) {
-      const location = locationFromRow(row);
-      if (location.source !== expected.source || secretLocationRef(location) !== expected.ref || !secretLocationWithinScope(location, scope))
-        continue;
-      const identity = {
-        provider: location.source,
-        accountScope: location.accountScope,
-        providerItemId: location.providerItemId,
-        ...location.conversationKey ? { providerConversationId: location.conversationKey } : {}
-      };
-      try {
-        if (options.hide?.([identity]).has(identity))
-          return false;
-      } catch {
-        return false;
-      }
-      return secretLocationFingerprint({ locator: location.namesReleasable ? location.locator : null, title: location.namesReleasable ? location.title : null }) === expected.fingerprint;
-    }
-    return false;
-  }
-  search(query, scope, options = {}) {
-    const readings = secretLocationQueryReadings(query);
-    if (readings.length === 0)
-      return [];
-    const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
-    const rows = this.db.query(`
-      SELECT * FROM secret_locations
-      ${scope.accountScope ? "WHERE account_scope = ?" : ""}
-      ORDER BY detected_at DESC
-    `).all(...scope.accountScope ? [scope.accountScope] : []);
-    const scoreLocation = (location) => {
-      const words = secretLocationWords(location);
-      let best = 0;
-      for (const terms of readings) {
-        const score = terms.filter((term) => words.has(term)).length;
-        if (score >= Math.min(3, terms.length))
-          best = Math.max(best, score);
-      }
-      return best;
-    };
-    const scored = [];
-    for (const row of rows) {
-      const location = locationFromRow(row);
-      if (!secretLocationWithinScope(location, scope))
-        continue;
-      const score = scoreLocation(location);
-      if (score > 0)
-        scored.push({ location, score });
-    }
-    const identities = scored.map(({ location }) => ({
-      provider: location.source,
-      accountScope: location.accountScope,
-      providerItemId: location.providerItemId,
-      ...location.conversationKey ? { providerConversationId: location.conversationKey } : {}
-    }));
-    let hidden = new Set;
-    if (scored.length > 0) {
-      try {
-        if (options.hide)
-          hidden = options.hide(identities);
-        if (options.withholdLocators) {
-          const withheld = options.withholdLocators(identities);
-          scored.forEach((match, index) => {
-            if (match.location.locator && withheld.has(identities[index])) {
-              match.location.locator = null;
-              match.score = scoreLocation(match.location);
-            }
-          });
-        }
-      } catch {
-        return [];
-      }
-    }
-    return scored.filter((match, index) => match.score > 0 && !hidden.has(identities[index])).sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
-      source: location.source,
-      ref: secretLocationRef(location),
-      locator: location.namesReleasable ? location.locator : null,
-      title: location.namesReleasable ? location.title : null,
-      findingKinds: location.findingKinds,
-      detectedAt: location.detectedAt
-    }));
-  }
-}
-function secretLocationFingerprint(location) {
-  return createHash16("sha256").update(JSON.stringify([location.locator, location.title])).digest("hex");
-}
-function secretLocationRef(location) {
-  return `secret:${createHash16("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
-}
-function secretLocationWithinScope(location, scope) {
-  if (scope.accountScope && location.accountScope !== scope.accountScope)
-    return false;
-  const filters = scope.filters;
-  if (!filters)
-    return true;
-  if (filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore || (filters.searchTextExactLines?.length ?? 0) > 0) {
-    return false;
-  }
-  if (filters.provider && location.source !== filters.provider)
-    return false;
-  if (filters.conversationId !== undefined && location.conversationKey !== filters.conversationId)
-    return false;
-  if (filters.sourceScopeGeneration !== undefined && location.scopeGeneration !== filters.sourceScopeGeneration)
-    return false;
-  if (filters.sourceScopeRevision !== undefined && location.scopeRevision !== filters.sourceScopeRevision)
-    return false;
-  if (filters.sourceScopeFolderAnyKeys !== undefined && !filters.sourceScopeFolderAnyKeys.some((key) => location.folderKeys.includes(key))) {
-    return false;
-  }
-  if (filters.sourceScopeFolderNoneKeys?.some((key) => location.folderKeys.includes(key)))
-    return false;
-  const pathScopes = [
-    ...filters.locatorPathScope ? [filters.locatorPathScope] : [],
-    ...filters.locatorPathScopes ?? []
-  ];
-  if (pathScopes.length > 0 && !pathScopes.some((scopePath) => locatorWithin(location.locator, scopePath)))
-    return false;
-  if (filters.locatorPathExcludedScopes?.some((scopePath) => locatorWithin(location.locator, scopePath)))
-    return false;
-  return true;
-}
-function locatorWithin(locator, scopePath) {
-  if (!locator)
-    return false;
-  const path = locator.toLowerCase();
-  const root = scopePath.toLowerCase().replace(/\/+$/, "");
-  return path === root || path.startsWith(`${root}/`);
-}
-function secretLocationQueryReadings(query) {
-  const text = query.replaceAll("_", " ");
-  const joined = secretLocationQueryTerms(joinHyphenatedWords(text));
-  const split = secretLocationQueryTerms(text);
-  if (joined.length === 0 && split.length === 0)
-    return [];
-  return joined.join(" ") === split.join(" ") ? [joined] : [joined, split].filter((terms) => terms.length > 0);
-}
-function secretLocationQueryTerms(text) {
-  return [...new Set(sourceIndexTopicTokens(text).filter((term) => term.length >= 2 && !STOP_WORDS2.has(term)))];
-}
-function joinHyphenatedWords(text) {
-  return text.replace(/(?<=[\p{L}\p{N}])[-\u2010\u2011](?=[\p{L}\p{N}])/gu, "");
-}
-function secretLocationWords(location) {
-  const names = [location.namesReleasable ? location.locator ?? "" : "", location.title ?? ""].join(`
-`).toLowerCase();
-  const kinds = location.findingKinds.flatMap((kind) => [kind.replaceAll("_", " "), ...FINDING_KIND_WORDS[kind] ?? []]).join(" ");
-  return new Set([names, joinHyphenatedWords(names), kinds].join(`
-`).split(/[^\p{L}\p{N}]+/u).filter(Boolean));
-}
-function locationFromRow(row) {
-  return {
-    source: row.provider,
-    accountScope: row.account_scope,
-    conversationKey: row.conversation_key,
-    providerItemId: row.provider_item_id,
-    locator: row.locator,
-    title: row.title,
-    namesReleasable: row.names_releasable === 1,
-    folderKeys: JSON.parse(row.folder_keys_json),
-    scopeGeneration: row.scope_generation,
-    scopeRevision: row.scope_revision,
-    findingKinds: JSON.parse(row.finding_kinds_json),
-    contentHash: row.content_hash,
-    detectedAt: row.detected_at
-  };
-}
-function secretLocationsMigrations() {
-  return [
-    {
-      version: SECRET_LOCATIONS_SCHEMA_VERSION,
-      name: "create_secret_locations",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS secret_locations (
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            locator TEXT,
-            title TEXT,
-            names_releasable INTEGER NOT NULL DEFAULT 0 CHECK (names_releasable IN (0, 1)),
-            folder_keys_json TEXT NOT NULL DEFAULT '[]',
-            scope_generation TEXT,
-            scope_revision TEXT,
-            finding_kinds_json TEXT NOT NULL,
-            content_hash TEXT,
-            detected_at TEXT NOT NULL,
-            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
-          );
-        `);
-      }
-    }
-  ];
-}
-var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS2, FINDING_KIND_WORDS;
-var init_secret_locations = __esm(() => {
-  init_fts();
-  init_sqlite_migrations();
-  init_sqlite_store();
-  init_store_write_guard();
-  init_engine();
-  init_tier_classifier();
-  init_tier_ledger_path();
-  STOP_WORDS2 = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "did",
-    "do",
-    "does",
-    "find",
-    "for",
-    "have",
-    "i",
-    "in",
-    "is",
-    "it",
-    "kept",
-    "keep",
-    "me",
-    "my",
-    "of",
-    "olympus",
-    "on",
-    "or",
-    "put",
-    "record",
-    "records",
-    "saved",
-    "show",
-    "stored",
-    "the",
-    "there",
-    "to",
-    "what",
-    "where",
-    "which",
-    "who",
-    "with"
-  ]);
-  FINDING_KIND_WORDS = {
-    credential_assignment: ["password", "passwords", "passcode", "passphrase", "pin", "login", "credentials"],
-    private_key_material: ["ssh", "keys"],
-    aws_access_key_id: ["keys"],
-    api_secret_token: ["key", "keys", "tokens"],
-    slack_token: ["tokens"]
-  };
-});
-
-// src/core/sqlite-rows.ts
-function* iterateRows(db, sql, ...params) {
-  const statement = db.prepare(sql);
-  try {
-    yield* statement.iterate(...params);
-  } finally {
-    statement.finalize();
-  }
-}
-
-// src/workers/classification/sniffer-store.ts
-import { Database as Database2 } from "bun:sqlite";
-import { createHash as createHash17 } from "node:crypto";
-import { chmodSync as chmodSync6, existsSync as existsSync24, mkdirSync as mkdirSync15 } from "node:fs";
-import { dirname as dirname29 } from "node:path";
-function snifferMaterialHash(pass, material) {
-  return createHash17("sha256").update(`${pass}
-${material}`).digest("hex");
-}
-function snifferSubjectKey(subject) {
-  return createHash17("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
-}
-function contentVerdictReusable(verdict, contentHash, subject) {
-  return !verdict.failSafe && (verdict.contentHash === contentHash || subject !== undefined && verdict.modelSubject === snifferSubjectKey(subject));
-}
-
-class TierSnifferStore {
-  dbPath;
-  db;
-  now;
-  readOnly;
-  workCountMarker;
-  workCounts = new Map;
-  scanProgressChanges = 0;
-  trainingReads;
-  constructor(options) {
-    this.trainingReads = new Map;
-    this.dbPath = options.dbPath;
-    this.now = options.now ?? (() => new Date);
-    if (options.readOnly === true) {
-      this.db = new Database2(this.dbPath, { readonly: true, create: false });
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-      this.readOnly = true;
-      return;
-    }
-    this.readOnly = false;
-    assertWritableStoreOpenAllowed("sniffer store", this.dbPath);
-    const onDisk = this.dbPath !== ":memory:";
-    if (onDisk)
-      mkdirSync15(dirname29(this.dbPath), { recursive: true, mode: 448 });
-    const previousUmask = onDisk ? process.umask(63) : undefined;
-    let db;
-    try {
-      db = new Database2(this.dbPath, options.restoreQueue ? { readwrite: true, create: false } : { create: true });
-      const synchronous = options.restoreQueue ? "FULL" : "NORMAL";
-      db.exec(`PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = ${synchronous}; PRAGMA journal_size_limit = 67108864;` + loopWalAutocheckpointPragma(this.dbPath));
-      if (!options.restoreQueue)
-        runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
-      if (onDisk)
-        restrictFiles(this.dbPath);
-    } catch (error) {
-      if (db)
-        closeSqliteStore(db);
-      throw error;
-    } finally {
-      if (previousUmask !== undefined)
-        process.umask(previousUmask);
-    }
-    this.db = db;
-  }
-  close(options) {
-    try {
-      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : options);
-    } finally {
-      if (this.dbPath !== ":memory:" && !this.readOnly)
-        restrictFiles(this.dbPath);
-    }
-  }
-  chunkWindowVerdict(key) {
-    return this.db.query(`SELECT tier FROM chunk_window_verdicts WHERE subject_key = ? AND content_hash = ?
-      AND model_id = ? AND prompt_version = ? AND material_hash = ? AND window_index = ?`).get(snifferSubjectKey(key.subject), key.contentHash, key.modelId, key.promptVersion, key.materialHash, key.windowIndex)?.tier;
-  }
-  recordChunkWindow(key, tier) {
-    this.db.query(`INSERT OR REPLACE INTO chunk_window_verdicts
-      (subject_key, content_hash, model_id, prompt_version, material_hash, window_index, tier)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(snifferSubjectKey(key.subject), key.contentHash, key.modelId, key.promptVersion, key.materialHash, key.windowIndex, tier);
-  }
-  getVerdict(key) {
-    const row = this.db.query(`
-      SELECT tier, category, confidence, fail_safe, decided_at, content_hash, model_subject FROM sniffer_verdicts
-      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
-    `).get(key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
-    if (!row)
-      return;
-    return {
-      tier: row.tier,
-      category: row.category,
-      confidence: row.confidence,
-      failSafe: row.fail_safe === 1,
-      decidedAt: row.decided_at,
-      ...row.content_hash ? { contentHash: row.content_hash } : {},
-      ...row.model_subject ? { modelSubject: row.model_subject } : {}
-    };
-  }
-  putVerdict(key, verdict, subject) {
-    this.db.query(`
-      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at, model_subject)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
-        tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
-        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at, content_hash = NULL, model_subject = excluded.model_subject
-    `).run(key.materialHash, key.modelId, key.promptVersion, key.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString(), subject ? snifferSubjectKey(subject) : null);
-  }
-  deleteVerdict(key) {
-    this.db.query("DELETE FROM sniffer_verdicts WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?").run(key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
-  }
-  markFinalModelContent(key, contentHash) {
-    this.db.query(`UPDATE sniffer_verdicts SET content_hash = ?
-      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0`).run(contentHash, key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
-  }
-  getFinalModelContentVerdict(key) {
-    const row = this.db.query(`SELECT material_hash FROM sniffer_verdicts
-      WHERE content_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0
-        AND (tier = 'private' OR material_hash = ?)
-      ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`).get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision, key.materialHash ?? null);
-    return row ? this.getVerdict({ ...key, materialHash: row.material_hash }) : undefined;
-  }
-  judgedContentLabel(subject, modelId, contentHash) {
-    const row = this.db.query(`SELECT tier FROM sniffer_verdicts
-      WHERE model_subject = ? AND model_id = ? AND content_hash = ? AND fail_safe = 0
-      ORDER BY decided_at DESC LIMIT 1`).get(snifferSubjectKey(subject), modelId, contentHash);
-    return row?.tier;
-  }
-  trainingVerdict(subject, modelId) {
-    const key = snifferSubjectKey(subject);
-    if (this.readOnly) {
-      let labels = this.trainingReads.get(modelId);
-      if (!labels) {
-        labels = new Map;
-        const rows = iterateRows(this.db, `SELECT model_subject, tier, decided_at, content_hash FROM sniffer_verdicts
-          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`, modelId);
-        for (const row of rows) {
-          const prior = labels.get(row.model_subject);
-          if (!prior || row.decided_at > prior.decidedAt)
-            labels.set(row.model_subject, {
-              tier: row.tier,
-              decidedAt: row.decided_at,
-              ambiguous: false,
-              ...row.content_hash ? { contentHash: row.content_hash } : {}
-            });
-          else if (row.decided_at === prior.decidedAt) {
-            if (row.tier !== prior.tier)
-              prior.ambiguous = true;
-            if (row.content_hash !== prior.contentHash)
-              delete prior.contentHash;
-          }
-        }
-        this.trainingReads.set(modelId, labels);
-      }
-      return labels.get(key);
-    }
-    const row = this.db.query(`SELECT MIN(tier) AS tier, decided_at, COUNT(DISTINCT tier) AS tiers,
-        CASE WHEN COUNT(content_hash) = COUNT(*) AND COUNT(DISTINCT content_hash) = 1
-          THEN MIN(content_hash) END AS content_hash
-      FROM sniffer_verdicts WHERE model_subject = ? AND model_id = ? AND fail_safe = 0
-      GROUP BY decided_at ORDER BY decided_at DESC LIMIT 1`).get(key, modelId);
-    return row ? {
-      tier: row.tier,
-      decidedAt: row.decided_at,
-      ambiguous: row.tiers !== 1,
-      ...row.content_hash ? { contentHash: row.content_hash } : {}
-    } : undefined;
-  }
-  changeMarker(options = {}) {
-    const own = this.db.query("SELECT total_changes() AS changes").get();
-    const external = this.db.query("PRAGMA data_version").get();
-    return `${external.data_version}:${own.changes - (options.ignoreScanProgress ? this.scanProgressChanges : 0)}`;
-  }
-  enqueue(question) {
-    const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
-    const requestedPriority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
-    const order = question.legacyHoldOrder;
-    const priority = requestedPriority === HELD_UNTIL_JUDGED_PRIORITY && order !== undefined && Number.isSafeInteger(order) && order > 0 ? HELD_UNTIL_JUDGED_PRIORITY - order : requestedPriority;
-    const hinted = question.conversationOrder !== undefined;
-    const hint = question.conversationOrder === 1 ? 1 : question.conversationOrder === -1 ? -1 : 0;
-    return this.db.transaction(() => {
-      if (question.stillAsk && !question.stillAsk())
-        return false;
-      const before = this.db.query(`
-        SELECT priority, conversation_order FROM sniffer_questions
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-      `).get(...subjectParams(question.subject), question.pass);
-      const conversationOrder = hinted ? hint : before?.conversation_order ?? 0;
-      this.db.query(`
-      INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority, content_hash, conversation_order
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
-        held_sniffer_id = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
-          AND sniffer_questions.map_revision = excluded.map_revision AND sniffer_questions.flags_json = excluded.flags_json
-          THEN sniffer_questions.held_sniffer_id ELSE NULL END,
-        attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
-          AND sniffer_questions.map_revision = excluded.map_revision
-          THEN sniffer_questions.attempts ELSE 0 END,
-        content_hash = excluded.content_hash,
-        material_hash = excluded.material_hash,
-        map_revision = excluded.map_revision,
-        material = excluded.material,
-        -- A new arrival stays one when a sweep or re-judge asks about it again.
-        priority = CASE WHEN sniffer_questions.priority >= ${NEW_ARRIVAL_PRIORITY}
-          THEN MAX(sniffer_questions.priority, excluded.priority) ELSE excluded.priority END,
-        conversation_order = excluded.conversation_order,
-        flags_json = excluded.flags_json
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority, question.contentHash ?? null, conversationOrder);
-      if (!before && (priority > 0 || conversationOrder > 0) || before && (priority > before.priority || conversationOrder !== before.conversation_order)) {
-        this.db.query("DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)").run("all:recent", `${question.pass}:recent`);
-      }
-      return true;
-    }).immediate();
-  }
-  hasArrivalWaiting() {
-    return this.db.query(`SELECT 1 FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} LIMIT 1`).get() != null;
-  }
-  arrivalContentQuestions(limit = 20) {
-    return this.db.query(`SELECT * FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} AND pass = 'content'
-      ORDER BY priority DESC LIMIT ?`).all(Math.max(1, Math.trunc(limit))).map(questionFromRow);
-  }
-  async retainedQuestionNames(items, read) {
-    const names = new Map;
-    if (!items.length)
-      return names;
-    const sql = `SELECT k.key AS idx, q.pass, substr(q.material, 1, ?) AS material FROM json_each(?) k CROSS JOIN sniffer_questions q
-      WHERE (q.provider, q.account_scope, q.conversation_key, q.provider_item_id) = (k.value ->> '$.provider',
-        k.value ->> '$.accountScope', COALESCE(k.value ->> '$.providerConversationId', ''), k.value ->> '$.providerItemId')
-      ORDER BY q.pass`;
-    const params = [SNIFFER_NAMES_MAX_CHARS + "Names: ".length, JSON.stringify(items)];
-    const rows = read ? await read({ sql, params, mode: "all" }) : this.db.query(sql).all(...params);
-    for (const row of rows) {
-      const value = row.pass === "metadata" ? row.material : row.material.match(/^Names: ([^\n]+)/)?.[1];
-      if (value) {
-        const key = snifferSubjectKey(items[row.idx]);
-        const candidates = names.get(key) ?? [];
-        candidates.push(value);
-        names.set(key, candidates);
-      }
-    }
-    return names;
-  }
-  questionFor(subject, pass) {
-    const row = this.db.query(`
-      SELECT * FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).get(...subjectParams(subject), pass);
-    return row ? questionFromRow(row) : undefined;
-  }
-  listQuestions(options = {}) {
-    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
-    const scanLimit = Math.max(64, limit);
-    const accepted = new Map;
-    const eligible = (question) => {
-      if (!accepted.has(question.sequence))
-        accepted.set(question.sequence, options.eligible?.(question) ?? true);
-      return accepted.get(question.sequence);
-    };
-    const read = (oldest, count) => {
-      const key = `${options.pass ?? "all"}:${oldest ? "oldest" : "recent"}`;
-      let cursor = options.eligible && !this.readOnly ? this.db.query("SELECT conversation_order, priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?").get(key) : null;
-      if (oldest && cursor?.candidate_pk != null) {
-        const pinned = this.db.query("SELECT * FROM sniffer_questions WHERE question_pk = ?").get(cursor.candidate_pk);
-        if (pinned) {
-          const question = questionFromRow(pinned);
-          if (eligible(question))
-            return [question];
-        }
-        cursor = null;
-        this.scanProgressChanges += this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key).changes;
-      }
-      const filters = [];
-      const params = [];
-      if (options.pass) {
-        filters.push("pass = ?");
-        params.push(options.pass);
-      }
-      if (cursor) {
-        filters.push(oldest ? "(queued_at, question_pk) > (?, ?)" : "(priority, conversation_order, queued_at, question_pk) < (?, ?, ?, ?)");
-        if (!oldest)
-          params.push(cursor.priority, cursor.conversation_order);
-        params.push(cursor.queued_at, cursor.question_pk);
-      }
-      const rows = this.db.query(`SELECT * FROM sniffer_questions
-        ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
-        ORDER BY ${oldest ? "queued_at, question_pk" : "priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC"} LIMIT ?`).all(...params, scanLimit);
-      const found = [];
-      for (const row of rows) {
-        const question = questionFromRow(row);
-        if (eligible(question))
-          found.push(question);
-        if (found.length === count)
-          break;
-      }
-      if (options.eligible && !this.readOnly) {
-        const last = rows.at(-1);
-        if (oldest && found[0]) {
-          const candidate = found[0];
-          this.scanProgressChanges += this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`).run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence).changes;
-        } else if (found.length === 0 && rows.length === scanLimit && last) {
-          this.scanProgressChanges += this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`).run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk).changes;
-        } else
-          this.scanProgressChanges += this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key).changes;
-      }
-      return found;
-    };
-    const questions = read(false, limit);
-    const oldest = read(true, 1)[0];
-    if (oldest && !questions.some((question) => question.sequence === oldest.sequence))
-      questions.push(oldest);
-    return questions;
-  }
-  dispatchCount() {
-    const used = this.db.query("SELECT dispatches FROM sniffer_schedule WHERE id = 1").get().dispatches;
-    return used;
-  }
-  recordDispatch() {
-    this.db.exec("UPDATE sniffer_schedule SET dispatches = dispatches + 1 WHERE id = 1");
-  }
-  clockMs() {
-    return this.now().getTime();
-  }
-  deleteQuestion(subject, pass, materialHash) {
-    return this.db.query(`
-      DELETE FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-        AND (? IS NULL OR material_hash = ?)
-    `).run(...subjectParams(subject), pass, materialHash ?? null, materialHash ?? null).changes > 0;
-  }
-  deleteItemQuestions(subject) {
-    return this.db.query(`
-      DELETE FROM sniffer_questions
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(...subjectParams(subject)).changes;
-  }
-  deleteAccountScopeQuestions(provider, accountScope) {
-    return this.db.query("DELETE FROM sniffer_questions WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
-  }
-  rekey(subject, pass, mapRevision) {
-    this.db.query(`
-      UPDATE sniffer_questions SET map_revision = ?, attempts = 0, held_sniffer_id = NULL
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(mapRevision, ...subjectParams(subject), pass);
-  }
-  recordAttemptFailure(subject, pass) {
-    this.db.query(`
-      UPDATE sniffer_questions SET attempts = attempts + 1
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-    `).run(...subjectParams(subject), pass);
-    return this.questionFor(subject, pass)?.attempts ?? 0;
-  }
-  markHeldLowering(question, snifferId) {
-    this.db.query(`UPDATE sniffer_questions SET held_sniffer_id = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-        AND material_hash = ? AND map_revision = ?`).run(snifferId, ...subjectParams(question), question.pass, question.materialHash, question.mapRevision);
-  }
-  questionWorkCounts(snifferId) {
-    const marker = this.changeMarker({ ignoreScanProgress: true });
-    if (marker !== this.workCountMarker || this.db.inTransaction) {
-      this.workCounts.clear();
-      this.workCountMarker = this.db.inTransaction ? undefined : marker;
-    }
-    const cached = this.workCounts.get(snifferId);
-    if (cached)
-      return { ...cached };
-    const counts = this.db.query(`SELECT
-      COUNT(CASE WHEN held_sniffer_id IS NULL OR held_sniffer_id != ? THEN 1 END) AS unanswered,
-      COUNT(CASE WHEN held_sniffer_id = ? THEN 1 END) AS heldLowering
-      FROM sniffer_questions`).get(snifferId, snifferId);
-    if (this.workCountMarker !== undefined)
-      this.workCounts.set(snifferId, counts);
-    return { ...counts };
-  }
-  verdictCount() {
-    return this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
-  }
-  counts() {
-    const byPass = { metadata: 0, content: 0 };
-    let questions = 0;
-    for (const row of this.db.query("SELECT pass, COUNT(*) AS n FROM sniffer_questions GROUP BY pass").all()) {
-      byPass[row.pass] = row.n;
-      questions += row.n;
-    }
-    const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
-    const items = this.db.query(`
-      SELECT COUNT(*) AS n FROM (
-        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
-      )
-    `).get().n;
-    return { questions, items, byPass, verdicts };
-  }
-}
-function questionFromRow(row) {
-  return {
-    provider: row.provider,
-    accountScope: row.account_scope,
-    providerItemId: row.provider_item_id,
-    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
-    pass: row.pass,
-    materialHash: row.material_hash,
-    ...row.content_hash ? { contentHash: row.content_hash } : {},
-    mapRevision: row.map_revision,
-    material: row.material,
-    flags: JSON.parse(row.flags_json),
-    attempts: row.attempts,
-    queuedAt: row.queued_at,
-    priority: row.priority ?? 0,
-    conversationOrder: row.conversation_order ?? 0,
-    sequence: row.question_pk
-  };
-}
-function subjectParams(subject) {
-  return [subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId];
-}
-function restrictFiles(dbPath) {
-  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync24(path))
-      chmodSync6(path, 384);
-  }
-}
-function snifferMigrations() {
-  return [
-    {
-      version: 1,
-      name: "create_tier_sniffer",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS sniffer_verdicts (
-            material_hash TEXT NOT NULL,
-            model_id TEXT NOT NULL,
-            prompt_version TEXT NOT NULL,
-            map_revision TEXT NOT NULL,
-            tier TEXT NOT NULL CHECK (tier IN ('personal', 'private')),
-            category TEXT NOT NULL,
-            confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
-            fail_safe INTEGER NOT NULL DEFAULT 0 CHECK (fail_safe IN (0, 1)),
-            decided_at TEXT NOT NULL,
-            PRIMARY KEY (material_hash, model_id, prompt_version, map_revision)
-          );
-          CREATE TABLE IF NOT EXISTS sniffer_questions (
-            question_pk INTEGER PRIMARY KEY AUTOINCREMENT,
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            pass TEXT NOT NULL CHECK (pass IN ('metadata', 'content')),
-            material_hash TEXT NOT NULL,
-            map_revision TEXT NOT NULL,
-            material TEXT NOT NULL,
-            flags_json TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            queued_at TEXT NOT NULL,
-            UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
-          );
-        `);
-      }
-    },
-    {
-      version: 2,
-      name: "priority_and_aging",
-      up(db) {
-        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
-          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
-          CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
-          INSERT INTO sniffer_schedule (id, dispatches) VALUES (1, 0);`);
-      }
-    },
-    {
-      version: 3,
-      name: "bounded_queue_scans",
-      up(db) {
-        db.exec(`CREATE INDEX sniffer_oldest ON sniffer_questions(queued_at, question_pk);
-          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, queued_at DESC, question_pk DESC);
-          CREATE INDEX sniffer_pass_oldest ON sniffer_questions(pass, queued_at, question_pk);
-          CREATE TABLE sniffer_scan (
-            scan_key TEXT PRIMARY KEY, priority INTEGER NOT NULL,
-            queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
-          );`);
-      }
-    },
-    {
-      version: 4,
-      name: "held_lowering_answers",
-      up(db) {
-        db.exec("ALTER TABLE sniffer_questions ADD COLUMN held_sniffer_id TEXT;");
-      }
-    },
-    {
-      version: 5,
-      name: "final_model_content_reuse",
-      up(db) {
-        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN content_hash TEXT;
-          ALTER TABLE sniffer_verdicts ADD COLUMN content_hash TEXT;
-          ALTER TABLE sniffer_verdicts ADD COLUMN model_subject TEXT;
-          CREATE INDEX sniffer_final_content ON sniffer_verdicts(content_hash, model_id, prompt_version, map_revision)
-            WHERE fail_safe = 0 AND content_hash IS NOT NULL;`);
-      }
-    },
-    {
-      version: 6,
-      name: "conversation_queue_order",
-      up(db) {
-        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN conversation_order INTEGER NOT NULL DEFAULT 0;
-          ALTER TABLE sniffer_scan ADD COLUMN conversation_order INTEGER NOT NULL DEFAULT 0;
-          DROP INDEX sniffer_recent;
-          DROP INDEX sniffer_pass_recent;
-          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
-          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
-          DELETE FROM sniffer_scan WHERE scan_key LIKE '%:recent';`);
-      }
-    },
-    {
-      version: 7,
-      name: "subject_training_verdict_lookup",
-      up(db) {
-        db.exec(`CREATE INDEX sniffer_training_subject ON sniffer_verdicts(model_subject, model_id, decided_at DESC)
-          WHERE fail_safe = 0 AND model_subject IS NOT NULL;`);
-      }
-    },
-    {
-      version: 8,
-      name: "chunk_window_verdicts",
-      up(db) {
-        db.exec(`CREATE TABLE chunk_window_verdicts (
-          subject_key TEXT NOT NULL, content_hash TEXT NOT NULL,
-          model_id TEXT NOT NULL, prompt_version TEXT NOT NULL,
-          material_hash TEXT NOT NULL, window_index INTEGER NOT NULL,
-          tier TEXT NOT NULL CHECK (tier IN ('private', 'secure', 'secrets')),
-          PRIMARY KEY (subject_key, content_hash, model_id, prompt_version, material_hash, window_index)
-        );`);
-      }
-    }
-  ];
-}
-var init_sniffer_store = __esm(() => {
-  init_sqlite_migrations();
-  init_sqlite_store();
-  init_store_write_guard();
-  init_tier_classifier();
-  init_tier_ledger_path();
-});
-
-// src/workers/connector-store/sqlite-mmap.ts
-function sqliteMmapPolicy(env = process.env) {
-  const setting = env.OLYMPUS_SQLITE_MMAP;
-  if (setting === "off")
-    return { enabled: false, reason: "OLYMPUS_SQLITE_MMAP=off" };
-  if (process.platform !== "linux")
-    return { enabled: false, reason: "Linux only" };
-  if (setting === "on")
-    return { enabled: true, reason: "OLYMPUS_SQLITE_MMAP=on" };
-  return { enabled: false, reason: "default" };
-}
-function sqliteMmapEnabled(env = process.env) {
-  return sqliteMmapPolicy(env).enabled;
-}
-function sqliteMmapWorkerSource(source) {
-  const pragma = sqliteMmapEnabled() ? `
-    try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); }
-    catch { console.warn('[olympus] SQLite worker could not enable the file map.'); }
-  ` : "";
-  return source.replace("/*olympus-mmap-pragma*/", pragma);
-}
-function applySqliteMmap(db, env = process.env) {
-  if (!sqliteMmapEnabled(env))
-    return;
-  try {
-    db.exec(`PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}`);
-  } catch {}
-}
-var SQLITE_MMAP_BYTES = 2147418112;
-
-// src/workers/classification/installed-tier-classification-registry.ts
-function registerInstalledTierClassification(provider) {
-  registered = provider;
-}
-function registeredInstalledTierClassification() {
-  return registered;
-}
-function registerTierSetPlanner(ledgerPath, planner) {
-  (tierSetPlanners ??= new Map).set(ledgerPath, planner);
-}
-function tierSetPlannerForLedger(ledgerPath) {
-  return tierSetPlanners?.get(ledgerPath);
-}
-var registered, tierSetPlanners;
-
 // src/workers/classification/tier-ledger.ts
-import { Database as Database3 } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { randomUUID as randomUUID7 } from "node:crypto";
-import { chmodSync as chmodSync7, closeSync as closeSync13, existsSync as existsSync25, mkdirSync as mkdirSync16, openSync as openSync13, statSync as statSync12 } from "node:fs";
-import { dirname as dirname30 } from "node:path";
+import { chmodSync as chmodSync5, closeSync as closeSync12, existsSync as existsSync23, mkdirSync as mkdirSync14, openSync as openSync12, statSync as statSync12 } from "node:fs";
+import { dirname as dirname28 } from "node:path";
 function isFailSafeMissingContentQuestion(reason) {
   return reason.startsWith("content:sniffer:") && (reason.endsWith(":fail_safe:missing_question") || reason.endsWith(":fail_safe:unread"));
 }
@@ -43225,14 +42326,14 @@ class TierLedger {
     if (onDisk)
       TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly, options.allowWalLessRead);
     if (onDisk && !this.readOnly && options.expectedLedgerId === undefined) {
-      mkdirSync16(dirname30(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync25(this.dbPath))
-        closeSync13(openSync13(this.dbPath, "a", 384));
+      mkdirSync14(dirname28(this.dbPath), { recursive: true, mode: 448 });
+      if (!existsSync23(this.dbPath))
+        closeSync12(openSync12(this.dbPath, "a", 384));
       restrictLedgerFiles(this.dbPath);
     }
     let db;
     try {
-      db = new Database3(this.dbPath, this.readOnly ? { readonly: true, create: false } : options.expectedLedgerId === undefined ? { create: true } : { readwrite: true, create: false });
+      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : options.expectedLedgerId === undefined ? { create: true } : { readwrite: true, create: false });
       if (this.readOnly) {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         applySqliteMmap(db);
@@ -43275,7 +42376,7 @@ class TierLedger {
     this.db = db;
   }
   static assertSchemaCanOpen(dbPath, readOnly = false, allowWalLessRead = false) {
-    if (dbPath === ":memory:" || !existsSync25(dbPath))
+    if (dbPath === ":memory:" || !existsSync23(dbPath))
       return;
     const read = readSqliteWithoutWriting(dbPath, 1e4, (db) => ({
       version: readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID),
@@ -44461,7 +43562,7 @@ class TierLedger {
     return row.value;
   }
   static readLedgerId(dbPath, options = {}) {
-    if (dbPath === ":memory:" || !existsSync25(dbPath))
+    if (dbPath === ":memory:" || !existsSync23(dbPath))
       return;
     const busyTimeoutMs = Math.max(0, Math.trunc(options.busyTimeoutMs ?? 1e4));
     return readSqliteWithoutWriting(dbPath, busyTimeoutMs, (db) => {
@@ -46218,7 +45319,7 @@ function legacyPersonalBodyKey(identity) {
   return `legacy-personal-body:${tierLedgerIdentityKey(identity)}`;
 }
 function readStoreBindingCursor(storeDbPath, runId, connectorId) {
-  if (storeDbPath === ":memory:" || !existsSync25(storeDbPath))
+  if (storeDbPath === ":memory:" || !existsSync23(storeDbPath))
     return;
   return readSqliteWithoutWriting(storeDbPath, 1e4, (db) => {
     if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get())
@@ -46233,7 +45334,7 @@ function readSqliteWithoutWriting(dbPath, busyTimeoutMs, read, strictReadOnly = 
       return;
     let db;
     try {
-      db = new Database3(dbPath, mode);
+      db = new Database(dbPath, mode);
       db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA query_only = ON;`);
       return read(db);
     } catch (error) {
@@ -46255,7 +45356,7 @@ function hasUnmergedWrites(dbPath) {
     if (statSync12(`${dbPath}-wal`).size > 0)
       return true;
   } catch {}
-  return existsSync25(`${dbPath}-journal`);
+  return existsSync23(`${dbPath}-journal`);
 }
 function proposalFromRow(row) {
   return {
@@ -46805,8 +45906,8 @@ function decisionFlags(decision) {
 }
 function restrictLedgerFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync25(path))
-      chmodSync7(path, 384);
+    if (existsSync23(path))
+      chmodSync5(path, 384);
   }
 }
 function assertTier(tier) {
@@ -47556,9 +46657,2793 @@ var init_tier_ledger = __esm(() => {
       )`;
 });
 
+// src/core/store-reclaim-admission.ts
+import { join as join36 } from "node:path";
+import { closeSync as closeSync13, openSync as openSync13, futimesSync, statSync as statSync13 } from "node:fs";
+async function withStoreReadPriority(read) {
+  return withFileLease(target("readers"), async () => {
+    const fd = openSync13(target("last-ask"), "a", 384);
+    try {
+      const now = new Date;
+      futimesSync(fd, now, now);
+    } finally {
+      closeSync13(fd);
+    }
+    return withFileLease(target("work"), async () => read(), { mode: "shared", pollIntervalMs: 1 });
+  }, { mode: "shared" });
+}
+function storeReadHasPriority() {
+  try {
+    return withFileLeaseSync(target("readers"), () => false, probe);
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError)
+      return true;
+    throw error;
+  }
+}
+async function withIdleStoreReclaim(work) {
+  if (storeReadHasPriority())
+    return;
+  try {
+    return await withFileLease(target("work"), async () => {
+      if (storeReadHasPriority())
+        return;
+      return work();
+    }, probe);
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError)
+      return;
+    throw error;
+  }
+}
+function storeOwnerIdleMs(now = Date.now()) {
+  try {
+    return Math.max(0, now - statSync13(target("last-ask")).mtimeMs);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return Number.POSITIVE_INFINITY;
+    throw error;
+  }
+}
+var probe, target = (name) => join36(sharedDataPath("engine-run"), `store-reclaim-${name}`);
+var init_store_reclaim_admission = __esm(() => {
+  init_file_lease();
+  init_olympus_layout();
+  probe = { acquireTimeoutMs: 1, pollIntervalMs: 1 };
+});
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { createHash as createHash16, randomUUID as randomUUID8 } from "node:crypto";
+function poolSqlSite(sql) {
+  const shape = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (token) => token.startsWith("--") || token.startsWith("/*") ? " " : "?").replace(/\b(?:0x[\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, "N").replace(/\s+/g, " ").trim();
+  const hash = createHash16("sha256").update(shape).digest("hex").slice(0, 16);
+  const prefix = shape.replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)");
+  return `${prefix.slice(0, POOL_SQL_SITE_CHARS)} #${hash}`;
+}
+function withSlowestSql(reads) {
+  const sites = poolSqlSites.get(reads);
+  const slowest = sites?.size ? [...sites.values()].sort((left, right) => right.sql_ms - left.sql_ms).slice(0, POOL_SQL_SITES_KEPT).map((site) => ({
+    ...site,
+    sql_ms: preciseMs(site.sql_ms),
+    sql_max_ms: preciseMs(site.sql_max_ms),
+    ...site.sql_cpu_ms !== undefined ? { sql_cpu_ms: preciseMs(site.sql_cpu_ms), sql_cpu_max_ms: preciseMs(site.sql_cpu_max_ms) } : {}
+  })) : undefined;
+  return copyPoolDetail({ ...reads, ...slowest ? { slowest_sql: slowest } : {} });
+}
+function copyPoolDetail(pool) {
+  return {
+    ...pool,
+    ...pool.slowest_sql ? { slowest_sql: pool.slowest_sql.map((site) => ({ ...site })) } : {},
+    ...pool.vector_work ? { vector_work: { ...pool.vector_work, digest_unpack_score_ms: preciseMs(pool.vector_work.digest_unpack_score_ms) } } : {},
+    ...pool.keyword_concept_counts ? { keyword_concept_counts: pool.keyword_concept_counts.map((pass) => pass.map((count) => ({ ...count }))) } : {}
+  };
+}
+function preciseMs(ms) {
+  return Math.round(unroundedMs(ms) * 1000) / 1000;
+}
+function seatItemHash(corpusId, itemKey) {
+  return createHash16("sha256").update(`${corpusId}\x00${itemKey}`).digest("hex").slice(0, SEAT_ITEM_HASH_HEX);
+}
+function runInSourceAnswerLane(corpusId, run) {
+  return laneStorage.run(corpusId, run);
+}
+function poolReads(query, corpusId) {
+  let reads = query.poolByCorpus.get(corpusId);
+  if (!reads) {
+    reads = {
+      reads: 0,
+      queue_wait_ms: 0,
+      queue_wait_max_ms: 0,
+      run_ms: 0,
+      run_max_ms: 0,
+      sql_ms: 0,
+      sql_max_ms: 0,
+      snapshot_reads: 0,
+      snapshot_sql_ms: 0,
+      refused: 0,
+      dropped_queued: 0,
+      past_deadline_running: 0,
+      errors: 0
+    };
+    query.poolByCorpus.set(corpusId, reads);
+  }
+  return reads;
+}
+function sourceAnswerVectorWork() {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  return poolReads(query, corpusId).vector_work ??= {
+    digest_pages_read: 0,
+    digest_rows_scanned: 0,
+    full_vectors_rescored: 0,
+    digest_unpack_score_ms: 0
+  };
+}
+function beginSourceAnswerConceptCounts() {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  const passes = poolReads(query, corpusId).keyword_concept_counts ??= [];
+  const pass = [];
+  passes.push(pass);
+  return pass;
+}
+function beginSourceAnswerStoreTiming() {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  const startedAt = performance.now();
+  const stages = {
+    adapter_elapsed_ms: 0,
+    keyword_lane_ms: 0,
+    keyword_relaxation_ms: 0,
+    keyword_revalidation_ms: 0,
+    recency_read_ms: 0,
+    fusion_ms: 0,
+    finalize_ms: 0,
+    unattributed_ms: 0
+  };
+  return { stages, finish: () => {
+    stages.adapter_elapsed_ms = performance.now() - startedAt;
+    const attributed = (stages.join_wait_ms ?? stages.keyword_lane_ms) + (stages.post_join_setup_ms ?? 0) + stages.keyword_relaxation_ms + stages.keyword_revalidation_ms + (stages.vector_revalidation_ms ?? 0) + (stages.vector_summary_ms ?? 0) + stages.recency_read_ms + stages.fusion_ms + stages.finalize_ms;
+    stages.unattributed_ms = Math.max(0, stages.adapter_elapsed_ms - attributed);
+    query.adapterStages.set(corpusId, stages);
+  } };
+}
+function beginSourceAnswerPoolRead(statement, label) {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  let site = query.sqlShapes.get(statement);
+  if (site === undefined) {
+    site = poolSqlSite(statement);
+    query.sqlShapes.set(statement, site);
+  }
+  const key = label ? `${label}\x00${site}` : site;
+  return ({ queueWaitMs, runMs, sqlMs, cpuMs, outcome, snapshot }) => {
+    const reads = poolReads(query, corpusId);
+    if (sqlMs !== undefined) {
+      reads.thread_cpu_available = reads.thread_cpu_available === true || cpuMs !== undefined;
+    }
+    const wait = unroundedMs(queueWaitMs);
+    const ran = unroundedMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    const sql = unroundedMs(sqlMs ?? 0);
+    reads.sql_ms += sql;
+    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
+    if (snapshot) {
+      reads.snapshot_reads += 1;
+      reads.snapshot_sql_ms += sql;
+    }
+    let sites = poolSqlSites.get(reads);
+    if (!sites)
+      poolSqlSites.set(reads, sites = new Map);
+    const entry = sites.get(key) ?? { site, ...label ? { label } : {}, reads: 0, sql_ms: 0, sql_max_ms: 0 };
+    entry.reads += 1;
+    entry.sql_ms += sql;
+    entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
+    if (cpuMs !== undefined) {
+      const cpu = unroundedMs(cpuMs);
+      entry.sql_cpu_ms = (entry.sql_cpu_ms ?? 0) + cpu;
+      entry.sql_cpu_max_ms = Math.max(entry.sql_cpu_max_ms ?? 0, cpu);
+    }
+    sites.set(key, entry);
+    if (outcome === "refused")
+      reads.refused += 1;
+    else if (outcome === "dropped_queued")
+      reads.dropped_queued += 1;
+    else if (outcome === "past_deadline_running")
+      reads.past_deadline_running += 1;
+    else if (outcome === "error")
+      reads.errors += 1;
+  };
+}
+function createSourceAnswerTrace(now = () => new Date) {
+  const received = now();
+  return {
+    correlationId: randomUUID8(),
+    receivedAt: received.toISOString(),
+    receivedAtMs: received.getTime(),
+    sqliteRetryCount: 0,
+    sqliteBackoffMs: 0,
+    queryPlannerMs: 0,
+    queryFormulationCount: 0,
+    queryPlannerAwaitedCount: 0,
+    queryPlannerIgnoredAfterStrongLiteralCount: 0,
+    queryPlannerFailedCount: 0,
+    retrievalAttempts: [],
+    routeResolutionMs: 0,
+    orderedRoute: [],
+    analystLegs: [],
+    residualAnalystOrphanCount: 0,
+    selfHealRebuildMs: 0,
+    recordBuildMs: 0,
+    appendMs: 0,
+    mainThreadSql: { statements: 0, total_ms: 0, max_ms: 0, slow: [], by_site: [] }
+  };
+}
+function runWithSourceAnswerTrace(trace, run) {
+  return withStoreReadPriority(() => storage2.run(trace, run));
+}
+function currentSourceAnswerTrace() {
+  return storage2.getStore();
+}
+function sourceAnswerTraceActive() {
+  return storage2.getStore() !== undefined;
+}
+function recordSourceAnswerMainThreadSql(elapsedMs, site) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  const ms = unroundedMs(elapsedMs);
+  const sql = trace.mainThreadSql;
+  sql.statements += 1;
+  sql.total_ms += ms;
+  sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SITE_TALLY_MS)
+    return;
+  const where = site();
+  const tally = sql.by_site.find((entry) => entry.site === where);
+  if (tally) {
+    tally.statements += 1;
+    tally.ms += ms;
+  } else {
+    sql.by_site.push({ site: where, statements: 1, ms });
+  }
+  if (ms < SLOW_MAIN_THREAD_SQL_MS)
+    return;
+  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
+  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
+    sql.slow.sort((left, right) => right.ms - left.ms);
+    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
+  }
+}
+function recordSourceAnswerPhaseTimings(timings) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.phaseTimings = { ...timings };
+}
+function recordSourceAnswerSqliteRetry(backoffMs) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.sqliteRetryCount += 1;
+  trace.sqliteBackoffMs += nonNegativeMs(backoffMs);
+}
+function recordSourceAnswerQueryPlanner(elapsedMs, formulationCount) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.queryPlannerMs += nonNegativeMs(elapsedMs);
+  trace.queryFormulationCount += Math.max(0, Math.floor(formulationCount));
+}
+function recordSourceAnswerQueryPlannerDisposition(disposition) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  if (disposition === "awaited")
+    trace.queryPlannerAwaitedCount += 1;
+  else if (disposition === "ignored_after_strong_literal") {
+    trace.queryPlannerIgnoredAfterStrongLiteralCount += 1;
+  } else
+    trace.queryPlannerFailedCount += 1;
+}
+async function observeSourceAnswerRetrievalAttempt(kind, run) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return run().finally(() => noteSourceAnswerProgress("searching"));
+  const previous = trace.activeAttempt;
+  const attempt = {
+    kind,
+    startedAtMs: Date.now(),
+    hydrationMs: 0,
+    queries: []
+  };
+  trace.activeAttempt = attempt;
+  try {
+    return await run();
+  } finally {
+    const elapsedMs = nonNegativeMs(Date.now() - attempt.startedAtMs);
+    trace.retrievalAttempts.push({
+      kind,
+      elapsed_ms: elapsedMs,
+      hydration_ms: attempt.hydrationMs,
+      queries: attempt.queries
+    });
+    if (kind === "self_heal_rebuild")
+      trace.selfHealRebuildMs += elapsedMs;
+    noteSourceAnswerProgress("searching");
+    if (previous)
+      trace.activeAttempt = previous;
+    else
+      delete trace.activeAttempt;
+  }
+}
+function recordSourceAnswerHydration(elapsedMs) {
+  noteSourceAnswerProgress("reading evidence");
+  const attempt = currentSourceAnswerTrace()?.activeAttempt;
+  if (attempt)
+    attempt.hydrationMs += nonNegativeMs(elapsedMs);
+}
+async function observeSourceAnswerRoutedQuery(ordinal, run) {
+  const trace = currentSourceAnswerTrace();
+  const attempt = trace?.activeAttempt;
+  if (!trace || !attempt)
+    return run();
+  const query = {
+    ordinal: Math.max(1, Math.floor(ordinal)),
+    startedAtMs: Date.now(),
+    corpusTimings: [],
+    poolByCorpus: new Map,
+    adapterStages: new Map,
+    sqlShapes: new Map
+  };
+  try {
+    return await queryStorage.run(query, run);
+  } finally {
+    attempt.queries.push({
+      ordinal: query.ordinal,
+      elapsed_ms: nonNegativeMs(Date.now() - query.startedAtMs),
+      corpus_timings: query.corpusTimings.map((timing) => ({
+        corpus_id: timing.corpus_id,
+        elapsed_ms: nonNegativeMs(timing.elapsed_ms),
+        ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
+        outcome: timing.outcome,
+        ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {},
+        ...query.adapterStages.has(timing.corpus_id) ? { adapter_stages: query.adapterStages.get(timing.corpus_id) } : {},
+        ...query.poolByCorpus.has(timing.corpus_id) ? { pool: withSlowestSql(query.poolByCorpus.get(timing.corpus_id)) } : {}
+      })),
+      ...query.stages ? { stages: { ...query.stages } } : {}
+    });
+  }
+}
+function recordSourceAnswerQueryStages(stages) {
+  const query = queryStorage.getStore();
+  if (!query)
+    return;
+  query.stages = copyQueryStages(stages);
+}
+function copyQueryStages(stages) {
+  return {
+    prepare_ms: nonNegativeMs(stages.prepare_ms),
+    prepare_keywords_max_ms: nonNegativeMs(stages.prepare_keywords_max_ms),
+    ...stages.keyword_model && { keyword_model: stages.keyword_model },
+    prepare_semantic_max_ms: nonNegativeMs(stages.prepare_semantic_max_ms),
+    lanes_ms: nonNegativeMs(stages.lanes_ms),
+    after_lanes_ms: nonNegativeMs(stages.after_lanes_ms)
+  };
+}
+function recordSourceAnswerCorpusTiming(timing) {
+  noteSourceAnswerProgress("searching");
+  const query = queryStorage.getStore();
+  if (!query)
+    return;
+  query.corpusTimings.push({
+    corpus_id: timing.corpus_id,
+    elapsed_ms: nonNegativeMs(timing.elapsed_ms),
+    ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
+    outcome: timing.outcome,
+    ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}
+  });
+}
+function recordSourceAnswerRoute(elapsedMs, route) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.routeResolutionMs += nonNegativeMs(elapsedMs);
+  trace.orderedRoute = route.map((step) => ({
+    profile_id: step.profile_id,
+    backend: step.backend,
+    model_id: step.model_id
+  }));
+}
+async function observeSourceAnswerAnalystLeg(input, run) {
+  const startedAt = Date.now();
+  noteSourceAnswerProgress("writing the answer");
+  try {
+    const result = await run();
+    noteSourceAnswerProgress("writing the answer");
+    recordAnalystLeg(input, startedAt, "success");
+    return result;
+  } catch (error) {
+    recordAnalystLeg(input, startedAt, errorClass(error) === "TrustedAnalystTimeoutError" ? "timeout" : "error", error);
+    throw error;
+  }
+}
+function recordSourceAnswerSkippedAnalystLeg(input) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.analystLegs.push({
+    profile_id: input.profile_id,
+    backend: input.backend,
+    model_id: input.model_id,
+    budget_ms: nonNegativeMs(input.budgetMs),
+    elapsed_ms: 0,
+    outcome: input.outcome ?? "policy_skipped",
+    error_class: sanitizeErrorClass(input.errorClass)
+  });
+}
+function recordSourceAnswerPackSeats(corpusIds, recencySeats = 0, itemKeys) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.evidenceSeats = {
+    packCorpora: [...corpusIds],
+    ...itemKeys ? { itemHashes: corpusIds.map((corpusId, index) => seatItemHash(corpusId, itemKeys[index] ?? "")) } : {},
+    recencySeats: nonNegativeCount(recencySeats),
+    fits: []
+  };
+}
+function recordSourceAnswerAnalystFit(lane, keptSeats, measurement, budget) {
+  const seats = currentSourceAnswerTrace()?.evidenceSeats;
+  if (!seats)
+    return;
+  seats.fits.push({
+    lane,
+    keptSeats: keptSeats.map(nonNegativeCount),
+    ...budget ? { promptBudgetBytes: budget.bytes, promptBudgetSource: budget.source } : {},
+    promptBytes: nonNegativeCount(measurement.promptBytes),
+    packCandidates: nonNegativeCount(measurement.packCandidates),
+    keptCandidates: nonNegativeCount(measurement.keptCandidates),
+    packGapEntries: nonNegativeCount(measurement.packGapEntries),
+    packGapBytes: nonNegativeCount(measurement.packGapBytes),
+    sentGapBytes: nonNegativeCount(measurement.sentGapBytes),
+    overheadBytes: nonNegativeCount(measurement.overheadBytes),
+    evidenceFormat: measurement.evidenceFormat
+  });
+}
+function recordSourceAnswerRerank(audit) {
+  noteSourceAnswerProgress("ranking evidence");
+  const trace = currentSourceAnswerTrace();
+  if (trace && audit)
+    trace.rerank = { ...audit };
+}
+function recordSourceAnswerResidualAnalystOrphan() {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.residualAnalystOrphanCount += 1;
+}
+function recordSourceAnswerReleaseDecision(decision) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.releaseDecision = decision;
+}
+function recordSourceAnswerLedgerBuild(elapsedMs) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.recordBuildMs += nonNegativeMs(elapsedMs);
+}
+function recordSourceAnswerLedgerAppend(elapsedMs) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.appendMs += nonNegativeMs(elapsedMs);
+}
+function snapshotSourceAnswerTrace(trace) {
+  return {
+    correlationId: trace.correlationId,
+    receivedAt: trace.receivedAt,
+    receivedAtMs: trace.receivedAtMs,
+    sqliteRetryCount: trace.sqliteRetryCount,
+    sqliteBackoffMs: trace.sqliteBackoffMs,
+    queryPlannerMs: trace.queryPlannerMs,
+    queryFormulationCount: trace.queryFormulationCount,
+    queryPlannerAwaitedCount: trace.queryPlannerAwaitedCount,
+    queryPlannerIgnoredAfterStrongLiteralCount: trace.queryPlannerIgnoredAfterStrongLiteralCount,
+    queryPlannerFailedCount: trace.queryPlannerFailedCount,
+    retrievalAttempts: trace.retrievalAttempts.map((attempt) => ({
+      ...attempt,
+      queries: attempt.queries.map((query) => ({
+        ...query,
+        corpus_timings: query.corpus_timings.map((timing) => ({
+          ...timing,
+          ...timing.adapter_stages ? { adapter_stages: { ...timing.adapter_stages } } : {},
+          ...timing.pool ? { pool: copyPoolDetail(timing.pool) } : {}
+        }))
+      }))
+    })),
+    routeResolutionMs: trace.routeResolutionMs,
+    orderedRoute: trace.orderedRoute.map((step) => ({ ...step })),
+    analystLegs: trace.analystLegs.map((leg) => ({ ...leg })),
+    residualAnalystOrphanCount: Math.max(0, Math.floor(trace.residualAnalystOrphanCount)),
+    ...trace.phaseTimings ? { phaseTimings: { ...trace.phaseTimings } } : {},
+    selfHealRebuildMs: trace.selfHealRebuildMs,
+    recordBuildMs: trace.recordBuildMs,
+    appendMs: trace.appendMs,
+    ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {},
+    mainThreadSql: {
+      statements: trace.mainThreadSql.statements,
+      total_ms: nonNegativeMs(trace.mainThreadSql.total_ms),
+      max_ms: nonNegativeMs(trace.mainThreadSql.max_ms),
+      slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry })),
+      by_site: [...trace.mainThreadSql.by_site].sort((left, right) => right.ms - left.ms).slice(0, SITE_TALLY_KEPT).map((entry) => ({ site: entry.site, statements: entry.statements, ms: nonNegativeMs(entry.ms) }))
+    },
+    ...trace.evidenceSeats ? {
+      evidenceSeats: {
+        packCorpora: [...trace.evidenceSeats.packCorpora],
+        ...trace.evidenceSeats.itemHashes ? { itemHashes: [...trace.evidenceSeats.itemHashes] } : {},
+        recencySeats: trace.evidenceSeats.recencySeats,
+        fits: trace.evidenceSeats.fits.map((fit) => ({ ...fit, keptSeats: [...fit.keptSeats] }))
+      }
+    } : {},
+    ...trace.rerank ? { rerank: { ...trace.rerank } } : {}
+  };
+}
+function sourceAnswerTraceErrorClass(error) {
+  return sanitizeErrorClass(errorClass(error));
+}
+function recordAnalystLeg(input, startedAt, outcome, error) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.analystLegs.push({
+    profile_id: input.profile_id,
+    backend: input.backend,
+    model_id: input.model_id,
+    budget_ms: nonNegativeMs(input.budgetMs),
+    elapsed_ms: nonNegativeMs(Date.now() - startedAt),
+    outcome,
+    ...error !== undefined ? { error_class: sourceAnswerTraceErrorClass(error) } : {}
+  });
+}
+function errorClass(error) {
+  const candidate = error;
+  if (typeof candidate?.name === "string" && candidate.name.trim())
+    return candidate.name;
+  if (typeof candidate?.constructor?.name === "string" && candidate.constructor.name.trim()) {
+    return candidate.constructor.name;
+  }
+  return "UnknownError";
+}
+function sanitizeErrorClass(value) {
+  const normalized = value.replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
+  return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : "Error";
+}
+function unroundedMs(value) {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+function nonNegativeCount(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+function nonNegativeMs(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+var POOL_SQL_SITE_CHARS = 120, POOL_SQL_SITES_KEPT = 5, poolSqlSites, SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, SITE_TALLY_MS = 25, SITE_TALLY_KEPT = 10, SEAT_ITEM_HASH_HEX = 12, storage2, queryStorage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var init_answer_latency_trace = __esm(() => {
+  init_source_answer_jobs();
+  init_store_reclaim_admission();
+  poolSqlSites = new WeakMap;
+  storage2 = new AsyncLocalStorage7;
+  queryStorage = new AsyncLocalStorage7;
+  laneStorage = new AsyncLocalStorage7;
+  CONTENT_FREE_ERROR_CLASSES = new Set([
+    "AbortError",
+    "AnalystUnavailable",
+    "AnalystCircuitOpen",
+    "EmailSourceWorkerError",
+    "Error",
+    "LocalTrustProviderMismatch",
+    "OperationError",
+    "RangeError",
+    "SourceModelPolicyDeniedError",
+    "SecureEvidencePolicySkip",
+    "SecureAnalystPoolE2EEGateError",
+    "SyntaxError",
+    "TrustedAnalystTimeoutError",
+    "TypeError"
+  ]);
+});
+
+// src/core/source-index/read-progress.ts
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+function withSourceIndexReadProgress(report, run) {
+  return progress2.run(report, run);
+}
+function noteSourceIndexReadProgress() {
+  const report = progress2.getStore();
+  if (!report)
+    return;
+  report();
+}
+function currentSourceIndexReadProgress() {
+  return progress2.getStore();
+}
+var progress2;
+var init_read_progress = __esm(() => {
+  progress2 = new AsyncLocalStorage8;
+});
+
+// src/core/log-redaction.ts
+function redactLogLine(line) {
+  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+function boundedLogErrorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const oneLine = message.replace(/\s+/g, " ").trim();
+  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+function logErrorOrigin(error) {
+  if (!(error instanceof Error))
+    return JSON.stringify(typeof error);
+  const frame = errorFirstFrame(error);
+  return JSON.stringify(redactLogLine(frame ? `${error.name} at ${frame}` : error.name).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+function errorFirstFrame(error) {
+  const line = error.stack?.split(`
+`).map((entry) => entry.trim()).find((entry) => entry.startsWith("at "));
+  if (!line)
+    return;
+  return line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+(?::\d+)?)/g, "$1").slice(0, 160);
+}
+function errorFromBoundary(message, name, frame, where) {
+  const error = new Error(message);
+  if (name)
+    error.name = name;
+  error.stack = `${error.name}: ${message}
+    at ${frame ?? "unknown"} (${where})`;
+  return error;
+}
+var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
+
+// src/core/source-index/lane-busy.ts
+function isSourceIndexLaneBusyError(error) {
+  return typeof error === "object" && error !== null && error.code === SOURCE_INDEX_LANE_BUSY_CODE;
+}
+var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
+
+// src/workers/connector-store/off-thread-reads.ts
+function readInBackground(dbPath, query) {
+  return withOffThreadSnapshot(dbPath, async (read) => read(query), BACKGROUND_READS);
+}
+function setAskBenchReadPoolSqlDir(dir) {
+  benchSqlDir = dir;
+}
+function instrumentBenchWorker(source, dir, store) {
+  const module = new URL("./ask-bench-sql.ts", import.meta.url).href;
+  return source.replace("/*ask-bench-init*/", () => `
+import { createAskBenchSqlRecorder } from ${JSON.stringify(module)};
+const benchStore = ${JSON.stringify(store)};
+const benchSql = createAskBenchSqlRecorder(${JSON.stringify(dir)}, benchStore);
+let benchSample;
+let benchSite;
+`).replace("/*ask-bench-before*/", "benchSite = event.data.site ?? '(unlabelled pool read)'; benchSample = benchSql.sample();").replace("/*ask-bench-after*/", "benchSql.record(benchSample, ms, benchStore, benchSite); benchSample = undefined;");
+}
+function sampleReadPoolMemory(sampleSqlite = true) {
+  const now = Date.now();
+  let workers = 0, connections = 0, cache = 0, heap = 0, external = 0, arrayBuffers = 0, age = 0;
+  for (const reader of threads) {
+    const measured = reader.memory;
+    if (measured) {
+      workers++;
+      connections += measured.measured;
+      cache += measured.cacheBytes;
+      heap += measured.heapUsed;
+      external += measured.external;
+      arrayBuffers += measured.arrayBuffers;
+      age = Math.max(age, now - measured.at);
+    }
+    if (!reader.retired && reader.pending.size === 0 && !reader.job)
+      reader.worker.postMessage({ op: "memory", sampleSqlite });
+  }
+  return {
+    read_heap_workers: workers,
+    read_heap_age_ms: age,
+    read_heap_size_mb: heap,
+    read_extra_memory_mb: external,
+    read_array_buffers_mb: arrayBuffers,
+    ...sampleSqlite && { sqlite_read_connections_sampled: connections, sqlite_read_cache_budget_mb: cache }
+  };
+}
+function readPoolMemoryCounts() {
+  return { read_workers: threads.length, read_connections: connectionTotal ? Atomics.load(connectionTotal, 0) : heldConnections };
+}
+function readPoolDiagnostics() {
+  const stores = {};
+  for (const path of new Set([...storeOpens.keys(), ...queues.keys(), ...threads.flatMap((t) => t.executingStore ? [t.executingStore] : [])])) {
+    const running = threads.filter((t) => t.executingStore === path);
+    stores[path] = {
+      inFlight: running.length,
+      abandoned: running.filter((t) => t.retired || t.job?.settled).length,
+      queued: queues.get(path)?.length ?? 0,
+      opens: storeOpens.get(path)?.opens ?? 0,
+      openMs: storeOpens.get(path)?.openMs ?? 0
+    };
+  }
+  return { ...counters, threads: threads.length, stores };
+}
+function live() {
+  return threads.filter((reader) => !reader.retired);
+}
+function busy(reader) {
+  return reader.pending.size + reader.snapshots + (reader.job ? 1 : 0);
+}
+function runtimeHasWorkers() {
+  return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
+}
+function startThread(store, lane = "shared") {
+  const limit = lane === "shared" ? READ_POOL_SIZE : lane === "rescore" ? READ_POOL_RESCORE_READERS : 1;
+  if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
+    return;
+  try {
+    const source = sqliteMmapWorkerSource(WORKER_SOURCE);
+    const url = URL.createObjectURL(new Blob([benchSqlDir ? instrumentBenchWorker(source, benchSqlDir, store) : source], { type: "application/javascript" }));
+    const worker = workerFactory(url);
+    worker.unref?.();
+    counters.starts += 1;
+    if (startedStores.has(store))
+      counters.restarts += 1;
+    startedStores.add(store);
+    const started = { store, lane, worker, pending: new Map, snapshots: 0, connections: 0 };
+    if (typeof SharedArrayBuffer === "function") {
+      const buffer = new SharedArrayBuffer(12);
+      connectionTotal ??= new Int32Array(new SharedArrayBuffer(4));
+      started.progress = new Int32Array(buffer);
+      worker.postMessage({ op: "progress", buffer, connections: connectionTotal.buffer });
+    }
+    let closed = false;
+    worker.onmessage = (event) => {
+      if (closed)
+        return;
+      const message = event.data;
+      const diagnostic = message;
+      if (diagnostic.diagnostic === "memory") {
+        started.memory = message;
+        return;
+      }
+      if (diagnostic.diagnostic === "connections") {
+        started.connections += diagnostic.delta;
+        heldConnections += diagnostic.delta;
+        return;
+      }
+      if (diagnostic.diagnostic === "open") {
+        counters.opens += 1;
+        counters.openMs += diagnostic.ms;
+        const held = storeOpens.get(diagnostic.path) ?? { opens: 0, openMs: 0 };
+        held.opens += 1;
+        held.openMs += diagnostic.ms;
+        storeOpens.set(diagnostic.path, held);
+        return;
+      }
+      started.executingStore = undefined;
+      const waiting = started.pending.get(message.id);
+      if (!waiting) {
+        counters.lateReplies += 1;
+        return;
+      }
+      started.pending.delete(message.id);
+      if (typeof message.ms === "number")
+        waiting.statementTiming?.(message.ms, message.cpuMs);
+      if (message.ok)
+        waiting.resolve(message.rows ?? null);
+      else
+        waiting.reject(errorFromBoundary(message.error ?? "off-thread read failed", message.errorName, message.errorFrame, `read pool ${message.op ?? "read"}${message.sqlHead ? `: ${message.sqlHead}` : ""}`));
+    };
+    worker.onerror = (event) => {
+      retire(started, new Error(event.message || "off-thread reader stopped"));
+    };
+    worker.addEventListener("close", () => {
+      closed = true;
+      const at = threads.indexOf(started);
+      if (at >= 0) {
+        if (connectionTotal && started.progress) {
+          Atomics.sub(connectionTotal, 0, Atomics.exchange(started.progress, 2, 0));
+        } else
+          heldConnections -= started.connections;
+        started.connections = 0;
+        threads.splice(at, 1);
+      }
+      if (!started.retired)
+        retire(started, new Error("off-thread reader stopped"));
+      dispatch();
+    });
+    threads.push(started);
+    return started;
+  } catch {
+    return;
+  }
+}
+function retire(stopped, error) {
+  if (stopped.retired)
+    return;
+  stopped.retired = true;
+  counters.terminations += 1;
+  for (const waiting of stopped.pending.values())
+    waiting.reject(error);
+  stopped.pending.clear();
+  try {
+    stopped.worker.terminate();
+  } catch {}
+}
+function offThreadReadsSupported(dbPath) {
+  return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
+}
+function send(reader, message, statementTiming, job) {
+  if (reader.retired)
+    return Promise.reject(new Error("off-thread reader stopped"));
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    reader.pending.set(id, { resolve, reject, ...statementTiming ? { statementTiming } : {} });
+    armLostReplyCheck();
+    try {
+      if (job)
+        observer?.(job.store, job.read);
+      reader.worker.postMessage({ ...message, id, ...statementTiming ? { measureCpu: true } : {} });
+      if (job)
+        reader.executingStore = job.store;
+    } catch (error) {
+      reader.pending.delete(id);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+function armLostReplyCheck() {
+  if (lostReplyCheck !== undefined)
+    return;
+  lostReplyCheck = clock2.setTimeout(checkLostReplies, lostReplyCheckMs);
+}
+function checkLostReplies() {
+  lostReplyCheck = undefined;
+  for (const reader of live()) {
+    if (!reader.progress)
+      continue;
+    const finished = Atomics.load(reader.progress, 1);
+    for (const [id, waiting] of reader.pending) {
+      if (id > finished)
+        continue;
+      if (!waiting.finishedSeen) {
+        waiting.finishedSeen = true;
+        continue;
+      }
+      counters.lostReplies += 1;
+      retire(reader, new OffThreadReadLostError);
+      break;
+    }
+  }
+  if (threads.some((reader) => !reader.retired && reader.pending.size > 0))
+    armLostReplyCheck();
+}
+async function withOffThreadSnapshot(dbPath, work, options = {}) {
+  const lane = options.lane ?? "shared";
+  const site = callerSite();
+  if (!runtimeHasWorkers())
+    throw new Error("off-thread reads are unavailable");
+  const generation = releases.get(dbPath) ?? 0;
+  const askedAtMs = clock2.now();
+  const free = options.noWait ? snapshotThreadNow(dbPath, lane) : undefined;
+  if (options.noWait && !free)
+    throw new OffThreadReadBusyError;
+  if (free)
+    free.snapshots += 1;
+  let reader = free ?? await snapshotThread(dbPath, lane);
+  try {
+    if ((releases.get(dbPath) ?? 0) !== generation)
+      throw new OffThreadReadBusyError;
+    let snapshot = nextId++;
+    let reserveWaitMs = clock2.now() - askedAtMs;
+    const perRead = lane === "background" || options.perRead === true;
+    const open = async () => {
+      await send(reader, { op: "open", snapshot, path: dbPath, perRead });
+    };
+    let retryLeft = true;
+    let moving;
+    const moveToFreshWorker = () => {
+      if (moving)
+        return moving;
+      retryLeft = false;
+      counters.retries += 1;
+      moving = (async () => {
+        reader.snapshots -= 1;
+        reader = undefined;
+        dispatch();
+        reader = await snapshotThread(dbPath, lane);
+        if ((releases.get(dbPath) ?? 0) !== generation)
+          throw new OffThreadReadBusyError;
+        snapshot = nextId++;
+        await open();
+      })();
+      return moving;
+    };
+    try {
+      await open();
+    } catch (error) {
+      if (!(error instanceof OffThreadReadLostError) || !retryLeft)
+        throw error;
+      await moveToFreshWorker();
+    }
+    if (!perRead)
+      markRead(dbPath, snapshot, { atMs: clock2.now(), lane, site });
+    try {
+      return await work(async (query) => {
+        const readId = perRead ? -nextId++ : 0;
+        if (perRead)
+          markRead(dbPath, readId, { atMs: clock2.now(), lane, site });
+        if (observeSnapshots)
+          observer?.(dbPath, query, { lane, site });
+        const report = beginSourceAnswerPoolRead(query.sql, query.site ?? (site === "unknown" ? undefined : site));
+        const sentAtMs = clock2.now();
+        const queueWaitMs = reserveWaitMs;
+        reserveWaitMs = 0;
+        let sqlMs;
+        let cpuMs;
+        const once = async () => {
+          if (moving)
+            await moving;
+          return send(reader, {
+            op: "read",
+            snapshot,
+            sql: query.sql,
+            params: query.params,
+            mode: query.mode,
+            ...benchSqlDir && { site: query.site ?? site }
+          }, report && ((ms, cpu) => {
+            sqlMs = ms;
+            cpuMs = cpu;
+          }));
+        };
+        const laneProgress = currentSourceIndexReadProgress();
+        laneProgress?.began?.();
+        try {
+          let rows;
+          try {
+            rows = await once();
+          } catch (error) {
+            if (!perRead || !(error instanceof OffThreadReadLostError) || !retryLeft && !moving)
+              throw error;
+            await moveToFreshWorker();
+            rows = await once();
+          }
+          noteSourceIndexReadProgress();
+          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, cpuMs, outcome: "rows", snapshot: true });
+          return rows;
+        } catch (error) {
+          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, cpuMs, outcome: "error", snapshot: true });
+          throw error;
+        } finally {
+          laneProgress?.ended?.();
+          if (perRead)
+            unmarkRead(dbPath, readId);
+          dispatch();
+        }
+      });
+    } finally {
+      await moving?.catch(() => {
+        return;
+      });
+      if (reader)
+        await send(reader, { op: "close", snapshot }).catch(() => {
+          return;
+        });
+      unmarkRead(dbPath, snapshot);
+    }
+  } finally {
+    if (reader)
+      reader.snapshots -= 1;
+    dispatch();
+  }
+}
+function markRead(dbPath, id, read) {
+  const open = openSnapshots.get(dbPath) ?? new Map;
+  open.set(id, read);
+  openSnapshots.set(dbPath, open);
+}
+function unmarkRead(dbPath, id) {
+  const open = openSnapshots.get(dbPath);
+  if (!open)
+    return;
+  open.delete(id);
+  if (open.size === 0)
+    openSnapshots.delete(dbPath);
+}
+function callerSite() {
+  const frames = (new Error().stack ?? "").split(`
+`).map((line) => line.trim()).filter((line) => line.startsWith("at "));
+  const names = frames.filter((line) => !/off-thread-reads|withOffThreadSnapshot|readInBackground|ledgerReadOffThread|readStepsInBackground|processTicksAndRejections/.test(line)).map((line) => {
+    const match = /^at (?:async )?([\w.$<>]+)?\s*\(?(?:.*[\\/])?([\w.-]+\.(?:ts|js)):(\d+)/.exec(line);
+    return match ? `${match[1] ?? "<anonymous>"}@${match[2]}:${match[3]}` : undefined;
+  }).filter((name) => name !== undefined).slice(0, 2);
+  return names.length > 0 ? names.join("<") : "unknown";
+}
+function oldestOffThreadSnapshot(dbPath) {
+  const open = openSnapshots.get(dbPath);
+  if (!open || open.size === 0)
+    return;
+  let oldest;
+  for (const entry of open.values())
+    if (!oldest || entry.atMs < oldest.atMs)
+      oldest = entry;
+  return oldest ? { ageMs: clock2.now() - oldest.atMs, lane: oldest.lane, site: oldest.site } : undefined;
+}
+function snapshotThreadNow(store, lane) {
+  return live().find((reader) => reader.store === store && reader.lane === lane && !reader.releaseWhenIdle && !reader.job && (lane !== "rescore" || reader.snapshots === 0)) ?? startThread(store, lane);
+}
+function openOffThreadSnapshot(dbPath, options = {}) {
+  return new Promise((resolve, reject) => {
+    let opened = false;
+    const done = withOffThreadSnapshot(dbPath, (read) => new Promise((release) => {
+      opened = true;
+      resolve({ read, close: async () => {
+        release();
+        await done.catch(() => {
+          return;
+        });
+      } });
+    }), options);
+    done.catch((error) => {
+      if (!opened)
+        reject(error);
+    });
+  });
+}
+function snapshotThread(store, lane) {
+  const reader = snapshotThreadNow(store, lane);
+  if (reader) {
+    reader.snapshots += 1;
+    return Promise.resolve(reader);
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = {
+      store,
+      lane,
+      resolve,
+      reject,
+      timer: undefined
+    };
+    snapshotWaiters.push(waiter);
+  });
+}
+function serveSnapshotWaiters() {
+  for (const waiter of [...snapshotWaiters]) {
+    const reader = snapshotThreadNow(waiter.store, waiter.lane);
+    if (!reader)
+      continue;
+    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
+    clearTimeout(waiter.timer);
+    reader.snapshots += 1;
+    waiter.resolve(reader);
+  }
+}
+function readOnPool(dbPath, read, options = {}) {
+  const deadlineAtMs = options.deadlineAtMs ?? Number.POSITIVE_INFINITY;
+  const waiting = queues.get(dbPath) ?? [];
+  const report = beginSourceAnswerPoolRead(read.sql, read.site);
+  if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
+    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
+    return Promise.reject(new OffThreadReadBusyError);
+  }
+  return new Promise((resolve, reject) => {
+    const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
+    if (benchSqlDir && !read.site)
+      job.benchSite = callerSite();
+    if (Number.isFinite(deadlineAtMs))
+      job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
+    waiting.push(job);
+    if (!queues.has(dbPath)) {
+      queues.set(dbPath, waiting);
+      turns.push(dbPath);
+    }
+    dispatch();
+  }).then((rows) => {
+    noteSourceIndexReadProgress();
+    return rows;
+  });
+}
+function releaseOffThreadReads(dbPath) {
+  releases.set(dbPath, (releases.get(dbPath) ?? 0) + 1);
+  for (const waiter of snapshotWaiters.filter((entry) => entry.store === dbPath)) {
+    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
+    clearTimeout(waiter.timer);
+    waiter.reject(new OffThreadReadBusyError);
+  }
+  const waiting = queues.get(dbPath);
+  if (waiting) {
+    queues.delete(dbPath);
+    const turn = turns.indexOf(dbPath);
+    if (turn >= 0)
+      turns.splice(turn, 1);
+    for (const job of waiting)
+      settle(job, { error: new OffThreadReadBusyError });
+  }
+  for (const reader of live().filter((reader) => reader.store === dbPath)) {
+    reader.releaseWhenIdle = true;
+    if (reader.job)
+      settle(reader.job, { error: new OffThreadReadBusyError });
+  }
+  dispatch();
+}
+function settle(job, outcome) {
+  if (job.settled)
+    return;
+  job.settled = true;
+  clock2.clearTimeout(job.timer);
+  if (job.running) {
+    job.running = false;
+    job.lane?.ended?.();
+  }
+  if (job.report) {
+    const now = clock2.now();
+    const sentAtMs = job.sentAtMs;
+    let ended;
+    if ("rows" in outcome)
+      ended = "rows";
+    else if (sentAtMs === undefined)
+      ended = "dropped_queued";
+    else if (outcome.error instanceof OffThreadReadBusyError)
+      ended = "past_deadline_running";
+    else
+      ended = "error";
+    job.report({
+      queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
+      runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
+      sqlMs: job.sqlMs,
+      cpuMs: job.cpuMs,
+      outcome: ended
+    });
+  }
+  if ("rows" in outcome)
+    job.resolve(outcome.rows);
+  else
+    job.reject(outcome.error);
+}
+function missedDeadline(job) {
+  if (job.settled)
+    return;
+  settle(job, { error: new OffThreadReadBusyError });
+  if (job.thread) {
+    return;
+  }
+  const waiting = queues.get(job.store);
+  const at = waiting?.indexOf(job) ?? -1;
+  if (waiting && at >= 0)
+    waiting.splice(at, 1);
+}
+function freeThread(store) {
+  return live().find((reader) => reader.store === store && reader.lane === "shared" && !reader.releaseWhenIdle && !reader.job && reader.pending.size === 0) ?? startThread(store);
+}
+function dispatch() {
+  for (const reader of live()) {
+    if (reader.releaseWhenIdle && busy(reader) === 0)
+      retire(reader, new OffThreadReadBusyError);
+  }
+  serveSnapshotWaiters();
+  for (let remaining = turns.length;remaining > 0; remaining -= 1) {
+    const store = turns.shift();
+    const waiting = queues.get(store);
+    while (waiting.length && clock2.now() >= waiting[0].deadlineAtMs) {
+      settle(waiting.shift(), { error: new OffThreadReadBusyError });
+    }
+    if (!waiting.length) {
+      queues.delete(store);
+      continue;
+    }
+    const reader = freeThread(store);
+    if (!reader) {
+      turns.push(store);
+      continue;
+    }
+    const job = waiting.shift();
+    if (waiting.length)
+      turns.push(store);
+    else
+      queues.delete(store);
+    job.thread = reader;
+    job.sentAtMs = clock2.now();
+    if (job.lane) {
+      job.lane();
+      job.lane.began?.();
+      job.running = true;
+    }
+    reader.job = job;
+    const { sql, params, mode, site } = job.read;
+    send(reader, { op: "query", path: job.store, sql, params, mode, ...benchSqlDir && { site: site ?? job.benchSite } }, job.report && ((ms, cpuMs) => {
+      job.sqlMs = ms;
+      job.cpuMs = cpuMs;
+    }), job).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
+      if (error instanceof OffThreadReadLostError && !job.settled && !job.retried) {
+        job.retried = true;
+        counters.retries += 1;
+        job.thread = undefined;
+        job.sentAtMs = undefined;
+        if (job.running) {
+          job.running = false;
+          job.lane?.ended?.();
+        }
+        const waiting = queues.get(job.store) ?? [];
+        waiting.unshift(job);
+        if (!queues.has(job.store)) {
+          queues.set(job.store, waiting);
+          turns.push(job.store);
+        }
+        return;
+      }
+      settle(job, { error: reader.retired ? new OffThreadReadBusyError : error });
+    }).finally(() => {
+      if (reader.job === job)
+        reader.job = undefined;
+      dispatch();
+    });
+  }
+}
+var READ_POOL_SIZE = 1, BACKGROUND_READS, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, lostReplyCheckMs = 2000, OffThreadReadLostError, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), benchSqlDir, WORKER_SOURCE = `
+import { Database } from 'bun:sqlite';
+import { statSync } from 'node:fs';
+/*ask-bench-init*/
+const snapshots = new Map();
+const connections = new Map();
+const openDatabases = new Map();
+// [request running, last request finished, native connections held], read by the request thread.
+let progress;
+let connectionTotal;
+const noteConnections = (delta) => {
+  if (connectionTotal) {
+    Atomics.add(progress, 2, delta);
+    Atomics.add(connectionTotal, 0, delta);
+  } else postMessage({ diagnostic: 'connections', delta });
+};
+const open = (path) => {
+  const started = performance.now();
+  const db = new Database(path, { readonly: true });
+  db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+  /*olympus-mmap-pragma*/
+  openDatabases.set(db, undefined);
+  noteConnections(1);
+  postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
+  return db;
+};
+// Snapshot connections are kept for the next snapshot instead of closed:
+// Bun 1.3.x corrupts its heap when pool threads open and close SQLite
+// connections concurrently (olympus-ops#151), and a store's searches would
+// otherwise open one connection per snapshot.
+const IDLE_SNAPSHOT_CONNECTIONS = 8;
+const idleSnapshots = new Map();
+const close = (db) => { db.close(); openDatabases.delete(db); noteConnections(-1); };
+const snapshotConnection = (path) => {
+  const stat = statSync(path);
+  const file = stat.dev + ':' + stat.ino;
+  const idle = idleSnapshots.get(path) ?? [];
+  while (idle.length > 0) {
+    const held = idle.pop();
+    if (held.file === file) {
+      // A snapshot may have changed its connection's settings; the next starts from the defaults.
+      held.db.exec('PRAGMA busy_timeout = 10000');
+      return held;
+    }
+    try { close(held.db); } catch {}
+  }
+  return { db: open(path), file, path };
+};
+const connection = (path) => {
+  const stat = statSync(path);
+  const file = stat.dev + ':' + stat.ino;
+  const held = connections.get(path);
+  if (held && held.file === file) return held.db;
+  if (held) close(held.db);
+  const db = open(path);
+  connections.set(path, { db, file });
+  return db;
+};
+const statementTiming = (started, cpuStarted) => {
+  if (started === undefined) return {};
+  const ms = performance.now() - started;
+  /*ask-bench-after*/
+  if (cpuStarted === undefined) return { ms };
+  const cpu = process.threadCpuUsage(cpuStarted);
+  return { ms, cpuMs: (cpu.user + cpu.system) / 1000 };
+};
+self.onmessage = (event) => {
+  const { id, op, snapshot, path, sql, params, mode, perRead, measureCpu } = event.data;
+  if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
+  if (op === 'memory') {
+    const at = Date.now();
+    const { heapUsed, external, arrayBuffers } = process.memoryUsage();
+    let cacheBytes = 0;
+    let measured = 0;
+    if (event.data.sampleSqlite) for (const [db, cached] of openDatabases) {
+      let bytes = cached;
+      if (bytes === undefined) {
+        try {
+          using cacheSize = db.prepare('PRAGMA main.cache_size');
+          const size = cacheSize.values()[0][0];
+          if (size < 0) bytes = -size * 1024;
+          else {
+            using pageSize = db.prepare('PRAGMA main.page_size');
+            bytes = size * pageSize.values()[0][0];
+          }
+          openDatabases.set(db, bytes);
+        } catch { continue; } // Coverage in the reply shows a failed probe.
+      }
+      cacheBytes += bytes;
+      measured++;
+    }
+    postMessage({ diagnostic: 'memory', at, heapUsed, external, arrayBuffers, cacheBytes, measured });
+    return;
+  }
+  if (op === 'release') {
+    const held = connections.get(path);
+    connections.delete(path);
+    try { held && close(held.db); } catch {}
+    for (const idle of idleSnapshots.get(path) ?? []) { try { close(idle.db); } catch {} }
+    idleSnapshots.delete(path);
+    // A snapshot still open on the released store closes, rather than idles, when it ends.
+    for (const open of snapshots.values()) if (open.path === path) open.discard = true;
+    return;
+  }
+  if (progress) Atomics.store(progress, 0, id);
+  let started;
+  let cpuStarted;
+  try {
+    if (op === 'open') {
+      const held = snapshotConnection(path);
+      // perRead: no transaction is held between reads, so each read is its
+      // own short one and a checkpoint can pass it between reads.
+      if (!perRead) { try { held.db.exec('BEGIN'); } catch (error) { close(held.db); throw error; } }
+      held.perRead = perRead === true;
+      snapshots.set(snapshot, held);
+      postMessage({ id, ok: true, rows: null });
+    } else if (op === 'close') {
+      const held = snapshots.get(snapshot);
+      snapshots.delete(snapshot);
+      if (held) {
+        let reusable = false;
+        try { if (!held.perRead) held.db.exec('COMMIT'); reusable = true; } finally {
+          const idle = idleSnapshots.get(held.path) ?? [];
+          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else close(held.db);
+        }
+      }
+      postMessage({ id, ok: true, rows: null });
+    } else {
+      const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
+      if (!db) throw new Error('unknown snapshot');
+      cpuStarted = measureCpu ? process.threadCpuUsage?.() : undefined;
+      /*ask-bench-before*/
+      started = performance.now();
+      const query = db.query(sql);
+      const rows = mode === 'all' ? query.all(...params) : query.get(...params);
+      postMessage({ id, ok: true, rows, ...statementTiming(started, cpuStarted) });
+    }
+  } catch (error) {
+    const timing = statementTiming(started, cpuStarted);
+    const frame = error instanceof Error && error.stack ? error.stack.split('\\n').map((line) => line.trim()).find((line) => line.startsWith('at ')) : undefined;
+    postMessage({ id, ok: false, ...timing, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
+  } finally {
+    // After the reply is posted: finished, so a reply missing past here was lost.
+    if (progress) { Atomics.store(progress, 1, id); Atomics.store(progress, 0, 0); }
+  }
+};
+`, threads, heldConnections = 0, connectionTotal, nextId = 1, counters, startedStores, storeOpens, queues, turns, lostReplyCheck, openSnapshots, snapshotWaiters, releases;
+var init_off_thread_reads = __esm(() => {
+  init_read_progress();
+  init_answer_latency_trace();
+  BACKGROUND_READS = { lane: "background" };
+  OffThreadReadLostError = class OffThreadReadLostError extends Error {
+    constructor() {
+      super("off-thread read reply was lost");
+      this.name = "OffThreadReadLostError";
+    }
+  };
+  OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
+    code = SOURCE_INDEX_LANE_BUSY_CODE;
+    constructor() {
+      super("The store is busy; try again.");
+      this.name = "OffThreadReadBusyError";
+    }
+  };
+  REAL_CLOCK = {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer)
+  };
+  clock2 = REAL_CLOCK;
+  threads = [];
+  counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0, lostReplies: 0, retries: 0, lateReplies: 0 };
+  startedStores = new Set;
+  storeOpens = new Map;
+  queues = new Map;
+  turns = [];
+  openSnapshots = new Map;
+  snapshotWaiters = [];
+  releases = new Map;
+});
+
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
+// src/workers/connector-store/child-visibility.ts
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+function* visibilityRead(here, offThread) {
+  return yield { here, offThread };
+}
+function visibilityHere(steps) {
+  let next = steps.next();
+  while (!next.done) {
+    let result;
+    try {
+      result = next.value.here();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  return next.value;
+}
+async function visibilityOffThread(steps, lane, options = {}) {
+  const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
+  let changed = false;
+  let next = steps.next();
+  while (!next.done) {
+    let result;
+    try {
+      result = await next.value.offThread();
+    } catch (error) {
+      if (error instanceof VisibilityChangedError)
+        changed = true;
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  if (changed && options.voidOnChange !== false || unchanged && !unchanged())
+    throw new VisibilityChangedError;
+  return next.value;
+}
+async function judgedAwaited(attempt, here) {
+  for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!(error instanceof VisibilityChangedError))
+        throw error;
+    }
+  }
+  return here();
+}
+function visibilityAwaited(make, lane) {
+  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
+}
+function memoVisibilityItemsHere(owner, kind, marker, items, keyOf, read) {
+  const asked = new Map(items.map((item) => [keyOf(item), item]));
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? read(missing) : new Map;
+  if (memo)
+    for (const item of missing)
+      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map;
+  for (const key of asked.keys()) {
+    const row = memo ? memo.rows.get(key) : fresh.get(key);
+    if (row !== undefined)
+      out.set(key, row);
+  }
+  return out;
+}
+function askReadMemo(owner, kind, marker) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  let owners = askReads.get(trace);
+  if (!owners)
+    askReads.set(trace, owners = new Map);
+  let kinds = owners.get(owner);
+  if (!kinds)
+    owners.set(owner, kinds = new Map);
+  let memo = kinds.get(kind);
+  if (memo?.marker !== marker)
+    kinds.set(kind, memo = { marker, rows: new Map });
+  return memo;
+}
+async function memoVisibilityItems(owner, kind, marker, items, keyOf, read, writesHeld) {
+  const asked = new Map(items.map((item) => [keyOf(item), item]));
+  if (writesHeld?.())
+    throw new VisibilityChangedError;
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? await read(missing) : new Map;
+  if (marker() !== before || writesHeld?.())
+    throw new VisibilityChangedError;
+  if (memo)
+    for (const item of missing)
+      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map;
+  for (const key of asked.keys()) {
+    const row = memo ? memo.rows.get(key) : fresh.get(key);
+    if (row !== undefined)
+      out.set(key, row);
+  }
+  return out;
+}
+function itemStatesOffThread(ledger, identities) {
+  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS), () => ledger.writesHeld());
+}
+function* itemSecretSteps(ledger, identity) {
+  const key = tierLedgerIdentityKey(identity);
+  const rows = yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, (missing) => new Map(missing.map((item) => [tierLedgerIdentityKey(item), ledger.itemIsSecret(item)]))), () => memoVisibilityItems(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, async (missing) => {
+    const rows = new Map;
+    for (const item of missing)
+      rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item), ASK_LEDGER_READS));
+    return rows;
+  }, () => ledger.writesHeld()));
+  return rows.get(key) === true;
+}
+function visibilityRows(identities, read) {
+  return new Map(identities.map((identity) => {
+    const key = tierLedgerIdentityKey(identity);
+    return [key, { copies: read.copies.get(key), hiddenWithoutCopies: read.hiddenWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
+  }));
+}
+function visibilityFromRows(rows) {
+  const result = { copies: new Map, hiddenWithoutCopies: new Set, personalFirstWaiting: new Set };
+  for (const [key, row] of rows) {
+    if (row.copies)
+      result.copies.set(key, row.copies);
+    if (row.hiddenWithoutCopies)
+      result.hiddenWithoutCopies.add(key);
+    if (row.waiting)
+      result.personalFirstWaiting.add(key);
+  }
+  return result;
+}
+function ledgerVisibilityHere(ledger, identities, options = {}) {
+  return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
+}
+async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
+  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)), () => ledger.writesHeld());
+  return visibilityFromRows(rows);
+}
+async function ledgerReadOffThread(ledger, steps, options = {}) {
+  if (!offThreadReadsSupported(ledger.dbPath))
+    return ledger.readSteps(steps);
+  if (!releasing.has(ledger)) {
+    releasing.add(ledger);
+    ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+  }
+  return withOffThreadSnapshot(ledger.dbPath, async (read) => {
+    let next = steps.next();
+    while (!next.done)
+      next = steps.next(await read(next.value));
+    return next.value;
+  }, options);
+}
+async function settleStaleEmbedHolds(ledger, pageSize = 500, turn = ingestionTurn) {
+  changeMemoryActivity("embedding_settlement", 1);
+  try {
+    let settled = 0;
+    let after;
+    do {
+      if (after)
+        await turn();
+      const page = await ledgerReadOffThread(ledger, ledger.staleEmbedHoldSteps(after, pageSize), { lane: "background" });
+      settled += ledger.settleStaleEmbedHoldRows(page.rowIds);
+      after = page.next;
+    } while (after);
+    return settled;
+  } finally {
+    changeMemoryActivity("embedding_settlement", -1);
+  }
+}
+function parentIdentityOf(child) {
+  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
+  if (cut <= 0)
+    return;
+  return {
+    provider: child.provider,
+    accountScope: child.accountScope,
+    providerItemId: child.providerItemId.slice(0, cut),
+    ...child.providerConversationId ? { providerConversationId: child.providerConversationId } : {}
+  };
+}
+function parentIdentityField(child) {
+  const identity = parentIdentityOf(child);
+  return identity ? { identity } : {};
+}
+function withSearchVisibilityStores(allowed, read) {
+  searchStores ??= new AsyncLocalStorage9;
+  return searchStores.run(allowed, read);
+}
+function searchVisibilityScoped() {
+  return searchStores?.getStore() !== undefined;
+}
+function childVisibilityStores(lane) {
+  const allowed = searchStores?.getStore();
+  const stores = lane.stores();
+  return allowed ? stores.filter(allowed) : stores;
+}
+function childVisibilityUnchanged(lane) {
+  const stores = childVisibilityStores(lane);
+  const ledger = lane.ledger();
+  const ledgerMarker = ledger?.changeMarker();
+  const markers = stores.map((store) => store.childVisibilityMarker?.());
+  return () => {
+    const current = childVisibilityStores(lane);
+    return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker && current.length === stores.length && current.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
+  };
+}
+function parentKey(parent) {
+  return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
+}
+function parentVerdicts(lane, parents) {
+  return visibilityHere(parentVerdictsSteps(lane, parents));
+}
+function* parentVerdictsSteps(lane, parents) {
+  const unique = new Map;
+  for (const parent of parents)
+    unique.set(parentKey(parent), parent);
+  try {
+    return yield* judge(lane, [...unique.values()], 0);
+  } catch {
+    return new Map([...unique.keys()].map((key) => [key, HIDDEN]));
+  }
+}
+function* judge(lane, parents, depth) {
+  const verdicts = new Map;
+  if (parents.length === 0)
+    return verdicts;
+  if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
+    for (const parent of parents)
+      verdicts.set(parentKey(parent), HIDDEN);
+    return verdicts;
+  }
+  const rows = new Map;
+  for (const store of childVisibilityStores(lane)) {
+    for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
+      const key = parentKey(row);
+      const list = rows.get(key) ?? [];
+      list.push({ ...row, corpusId: store.corpusId });
+      rows.set(key, list);
+    }
+  }
+  const ledger = lane.ledger();
+  const identities = new Map;
+  for (const list of rows.values()) {
+    for (const row of list)
+      identities.set(tierLedgerIdentityKey(row.identity), row.identity);
+  }
+  for (const parent of parents) {
+    if (!rows.has(parentKey(parent)) && parent.identity)
+      identities.set(tierLedgerIdentityKey(parent.identity), parent.identity);
+  }
+  const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
+  const climbing = new Map;
+  for (const parent of parents) {
+    const key = parentKey(parent);
+    const list = rows.get(key) ?? [];
+    const identity = list[0]?.identity;
+    const knownIdentity = identity ?? parent.identity;
+    const state = knownIdentity && states?.get(tierLedgerIdentityKey(knownIdentity));
+    if (state?.hidingIntent === "deletion") {
+      verdicts.set(key, HIDDEN);
+      continue;
+    }
+    const active = list.filter((row) => row.active);
+    const locations = list.filter((row) => row.secret);
+    if (locations.length > 0) {
+      const above = locations.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
+      verdicts.set(key, { visible: true, gone: false });
+      continue;
+    }
+    if (!identity) {
+      if (state?.hidingIntent === "secret" || ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
+        verdicts.set(key, HIDDEN);
+      } else {
+        verdicts.set(key, { visible: false, gone: true });
+      }
+      continue;
+    }
+    let visible;
+    if (!ledger) {
+      visible = active.length > 0;
+    } else {
+      const copies = state?.copies ?? [];
+      visible = copies.length === 0 ? state?.record?.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
+      if (!visible && active.length > 0 && (state?.hidingIntent === "secret" || (yield* itemSecretSteps(ledger, identity))))
+        visible = true;
+    }
+    if (visible) {
+      const above = active.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
+      verdicts.set(key, { visible: true, gone: false });
+    } else {
+      verdicts.set(key, { visible: false, gone: active.length === 0 });
+    }
+  }
+  if (climbing.size > 0) {
+    const above = yield* judge(lane, [...climbing.values()], depth + 1);
+    for (const [key, grandparent] of climbing) {
+      if (above.get(parentKey(grandparent))?.visible !== true)
+        verdicts.set(key, HIDDEN);
+    }
+  }
+  return verdicts;
+}
+function goneParents(lane, parents) {
+  const gone = new Set;
+  try {
+    const unique = new Map;
+    for (const parent of parents)
+      unique.set(parentKey(parent), parent);
+    const present = new Set;
+    for (const store of lane.stores()) {
+      for (const row of store.parentStandings([...unique.values()])) {
+        if (row.active || row.secret)
+          present.add(parentKey(row));
+      }
+    }
+    const candidates = [...unique].filter(([key]) => !present.has(key)).map(([, parent]) => parent);
+    if (candidates.length === 0)
+      return gone;
+    const verdicts = parentVerdicts(lane, candidates);
+    for (const parent of candidates) {
+      const key = parentKey(parent);
+      if (verdicts.get(key)?.gone === true)
+        gone.add(key);
+    }
+  } catch {}
+  return gone;
+}
+function itemVerdicts(lane, items) {
+  return visibilityHere(itemVerdictsSteps(lane, items));
+}
+function* itemVerdictsSteps(lane, items) {
+  const asked = new Map;
+  for (const item of items)
+    asked.set(tierLedgerIdentityKey(item), item);
+  const out = new Map;
+  if (asked.size === 0)
+    return out;
+  try {
+    const refs = new Map;
+    const refKeyOf = new Map;
+    for (const store of childVisibilityStores(lane)) {
+      for (const [key, row] of yield* visibilityRead(() => store.itemStandings([...asked.values()]), () => store.itemStandingsOffThread?.([...asked.values()]) ?? Promise.resolve(store.itemStandings([...asked.values()])))) {
+        const ref = {
+          provider: row.provider,
+          accountScope: row.accountScope,
+          parentLocalItemId: row.parentLocalItemId,
+          identity: row.identity
+        };
+        refs.set(parentKey(ref), ref);
+        refKeyOf.set(key, parentKey(ref));
+      }
+    }
+    for (const [key, item] of asked) {
+      if (refKeyOf.has(key))
+        continue;
+      const ref = {
+        provider: item.provider,
+        accountScope: item.accountScope,
+        parentLocalItemId: `identity:${key}`,
+        identity: {
+          provider: item.provider,
+          accountScope: item.accountScope,
+          providerItemId: item.providerItemId,
+          ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}
+        }
+      };
+      refs.set(parentKey(ref), ref);
+      refKeyOf.set(key, parentKey(ref));
+    }
+    const verdicts = yield* parentVerdictsSteps(lane, [...refs.values()]);
+    for (const [key, refKey] of refKeyOf)
+      out.set(key, verdicts.get(refKey) ?? HIDDEN);
+  } catch {
+    for (const key of asked.keys())
+      out.set(key, HIDDEN);
+  }
+  return out;
+}
+function hiddenByParentIdentity(lane, probes) {
+  const hidden = new Set;
+  const named = [];
+  for (const probe of probes) {
+    const parent = parentIdentityOf(probe);
+    if (parent)
+      named.push({ key: tierLedgerIdentityKey(probe), parent });
+  }
+  if (named.length === 0)
+    return hidden;
+  const verdicts = itemVerdicts(lane, named.map((child) => child.parent));
+  for (const child of named) {
+    if (verdicts.get(tierLedgerIdentityKey(child.parent))?.visible !== true)
+      hidden.add(child.key);
+  }
+  return hidden;
+}
+function hiddenProbesByParentIdentity(lane, probes) {
+  const hidden = hiddenByParentIdentity(lane, probes);
+  return new Set(probes.filter((probe) => hidden.has(tierLedgerIdentityKey(probe))));
+}
+function* childrenWithHiddenParentsSteps(lane, children) {
+  const hidden = new Set;
+  if (children.length === 0)
+    return hidden;
+  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
+  for (const child of children) {
+    if (verdicts.get(parentKey(child.parent))?.visible !== true)
+      hidden.add(child.key);
+  }
+  return hidden;
+}
+function* childLinksSteps(lane, probes) {
+  const found = new Map;
+  let remaining = probes;
+  for (const store of childVisibilityStores(lane)) {
+    if (remaining.length === 0)
+      break;
+    const asked = remaining;
+    for (const [key, parent] of yield* visibilityRead(() => store.parentLinksOf(asked), () => store.parentLinksOfOffThread?.(asked) ?? Promise.resolve(store.parentLinksOf(asked))))
+      found.set(key, parent);
+    remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
+  }
+  return [...found].map(([key, parent]) => ({ key, parent }));
+}
+function hiddenChildKeys(lane, probes) {
+  return visibilityHere(hiddenChildKeysSteps(lane, probes));
+}
+function* hiddenChildKeysSteps(lane, probes) {
+  if (probes.length === 0)
+    return new Set;
+  let links;
+  try {
+    links = yield* childLinksSteps(lane, probes);
+  } catch {
+    return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
+  }
+  return yield* childrenWithHiddenParentsSteps(lane, links);
+}
+var VisibilityChangedError, VISIBILITY_CHANGE_RETRIES = 3, askReads, ASK_LEDGER_READS, releasing, searchStores, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var init_child_visibility = __esm(() => {
+  init_tier_ledger();
+  init_memory_counters();
+  init_control_path_headroom();
+  init_answer_latency_trace();
+  init_off_thread_reads();
+  VisibilityChangedError = class VisibilityChangedError extends Error {
+    constructor() {
+      super("Visibility changed during read");
+      this.name = "VisibilityChangedError";
+    }
+  };
+  askReads = new WeakMap;
+  ASK_LEDGER_READS = { perRead: true };
+  releasing = new WeakSet;
+  HIDDEN = { visible: false, gone: false };
+});
+
+// src/workers/classification/secret-locations.ts
+import { Database as Database2 } from "bun:sqlite";
+import { createHash as createHash17 } from "node:crypto";
+import { chmodSync as chmodSync6, closeSync as closeSync14, existsSync as existsSync24, mkdirSync as mkdirSync15, openSync as openSync14 } from "node:fs";
+import { dirname as dirname29 } from "node:path";
+function screenedSecretLocator(locator) {
+  return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
+}
+function screenParents(locations, parents) {
+  const [first] = parents.plans;
+  if (!first || !locations.length)
+    return [];
+  const identities = locations.map((location) => ({
+    provider: location.source,
+    accountScope: location.accountScope,
+    providerItemId: location.providerItemId,
+    ...location.conversationKey ? { providerConversationId: location.conversationKey } : {}
+  }));
+  const lane = { ledger: () => parents.ledger, stores: () => parents.plans.map((plan) => plan.store) };
+  try {
+    const hidden = hiddenProbesByParentIdentity(lane, identities);
+    const withheld = first.store.childrenWithWithheldSearchIdentifiers(identities, parents.includePrivateNames, (id) => parents.plans.find((plan) => plan.store.corpusId === id), lane);
+    return locations.flatMap((location, index) => {
+      const identity = identities[index];
+      if (hidden.has(identity))
+        return [];
+      return [withheld.has(identity) ? { ...location, locator: null } : location];
+    });
+  } catch {
+    return [];
+  }
+}
+
+class SecretLocationsIndex {
+  dbPath;
+  db;
+  now;
+  constructor(options) {
+    this.dbPath = options.dbPath;
+    this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database2(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      return;
+    }
+    assertWritableStoreOpenAllowed("secret-locations index", this.dbPath);
+    const onDisk = this.dbPath !== ":memory:";
+    if (onDisk) {
+      mkdirSync15(dirname29(this.dbPath), { recursive: true, mode: 448 });
+      if (!existsSync24(this.dbPath))
+        closeSync14(openSync14(this.dbPath, "a", 384));
+      chmodSync6(this.dbPath, 384);
+    }
+    this.db = new Database2(this.dbPath, { create: true });
+    try {
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      runSqliteMigrations(this.db, SECRET_LOCATIONS_SQLITE_STORE_ID, secretLocationsMigrations());
+    } catch (error) {
+      closeSqliteStore(this.db);
+      throw error;
+    }
+  }
+  close() {
+    closeSqliteStore(this.db);
+  }
+  record(input) {
+    const kinds = [...new Set(input.findingKinds.map((kind) => kind.trim()).filter(Boolean))].sort();
+    if (kinds.length === 0)
+      throw new Error("A secret location needs at least one finding kind.");
+    const namesReleasable = input.namesReleasable === true;
+    const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
+    const locator = screenedSecretLocator(input.locator);
+    const folderKeys = [...new Set((input.folderKeys ?? []).map((key) => key.trim()).filter(Boolean))].sort();
+    const contentHash = input.text !== undefined ? createHash17("sha256").update(input.text, "utf8").digest("hex") : null;
+    const existing = this.#storedLocation(input.identity);
+    if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
+      return false;
+    }
+    this.db.query(`
+      INSERT INTO secret_locations (
+        provider, account_scope, conversation_key, provider_item_id, locator, title, names_releasable,
+        folder_keys_json, scope_generation, scope_revision, finding_kinds_json, content_hash, detected_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id) DO UPDATE SET
+        locator = excluded.locator, title = excluded.title, names_releasable = excluded.names_releasable,
+        folder_keys_json = excluded.folder_keys_json, scope_generation = excluded.scope_generation,
+        scope_revision = excluded.scope_revision, finding_kinds_json = excluded.finding_kinds_json,
+        content_hash = excluded.content_hash, detected_at = excluded.detected_at
+    `).run(input.identity.provider, input.identity.accountScope, input.identity.providerConversationId ?? "", input.identity.providerItemId, locator, title, namesReleasable ? 1 : 0, JSON.stringify(folderKeys), input.scopeGeneration ?? null, input.scopeRevision ?? null, JSON.stringify(kinds), contentHash, this.now().toISOString());
+    return true;
+  }
+  rebindScopeGenerations(input) {
+    return this.db.transaction(() => {
+      let changed = 0;
+      for (const generation of input.fromGenerations) {
+        if (generation === input.accountGeneration)
+          continue;
+        changed += this.db.query("UPDATE secret_locations SET scope_generation = ?, scope_revision = ? WHERE provider = ? AND scope_generation = ?").run(input.accountGeneration, input.revision, input.provider, generation).changes;
+      }
+      return changed;
+    }).immediate();
+  }
+  remove(identity) {
+    return this.db.query(`
+      DELETE FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId).changes > 0;
+  }
+  removeAccountScope(provider, accountScope) {
+    return this.db.query("DELETE FROM secret_locations WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+  }
+  get(identity) {
+    const row = this.db.query(`
+      SELECT content_hash, finding_kinds_json FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
+    return row ? { contentHash: row.content_hash, findingKinds: JSON.parse(row.finding_kinds_json) } : undefined;
+  }
+  #storedLocation(identity) {
+    const row = this.db.query(`
+      SELECT * FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
+    return row ? locationFromRow(row) : undefined;
+  }
+  count() {
+    return this.db.query("SELECT COUNT(*) AS n FROM secret_locations").get().n;
+  }
+  recheck(expected, scope, parents) {
+    const rows = this.db.query(`SELECT * FROM secret_locations ${scope.accountScope ? "WHERE account_scope = ?" : ""}`).all(...scope.accountScope ? [scope.accountScope] : []);
+    for (const row of rows) {
+      const location = locationFromRow(row);
+      if (location.source !== expected.source || secretLocationRef(location) !== expected.ref || !secretLocationWithinScope(location, scope))
+        continue;
+      const [screened] = screenParents([location], parents);
+      return !!screened && secretLocationFingerprint({
+        locator: screened.namesReleasable ? screened.locator : null,
+        title: screened.title
+      }) === expected.fingerprint;
+    }
+    return false;
+  }
+  search(query, scope, parents, maxResults = 10) {
+    const readings = secretLocationQueryReadings(query);
+    if (readings.length === 0)
+      return [];
+    const limit = Math.max(1, Math.min(maxResults, 100));
+    const rows = this.db.query(`
+      SELECT * FROM secret_locations
+      ${scope.accountScope ? "WHERE account_scope = ?" : ""}
+      ORDER BY detected_at DESC
+    `).all(...scope.accountScope ? [scope.accountScope] : []);
+    const scoreLocation = (location) => {
+      const words = secretLocationWords(location);
+      let best = 0;
+      for (const terms of readings) {
+        const score = terms.filter((term) => words.has(term)).length;
+        if (score >= Math.min(3, terms.length))
+          best = Math.max(best, score);
+      }
+      return best;
+    };
+    const matches = rows.map(locationFromRow).filter((location) => secretLocationWithinScope(location, scope) && scoreLocation(location) > 0);
+    return screenParents(matches, parents).map((location) => ({ location, score: scoreLocation(location) })).filter((match) => match.score > 0).sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
+      source: location.source,
+      ref: secretLocationRef(location),
+      locator: location.namesReleasable ? location.locator : null,
+      title: location.namesReleasable ? location.title : null,
+      findingKinds: location.findingKinds,
+      detectedAt: location.detectedAt
+    }));
+  }
+}
+function secretLocationFingerprint(location) {
+  return createHash17("sha256").update(JSON.stringify([location.locator, location.title])).digest("hex");
+}
+function secretLocationRef(location) {
+  return `secret:${createHash17("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+}
+function secretLocationWithinScope(location, scope) {
+  if (scope.accountScope && location.accountScope !== scope.accountScope)
+    return false;
+  const filters = scope.filters;
+  if (!filters)
+    return true;
+  if (filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore || (filters.searchTextExactLines?.length ?? 0) > 0) {
+    return false;
+  }
+  if (filters.provider && location.source !== filters.provider)
+    return false;
+  if (filters.conversationId !== undefined && location.conversationKey !== filters.conversationId)
+    return false;
+  if (filters.sourceScopeGeneration !== undefined && location.scopeGeneration !== filters.sourceScopeGeneration)
+    return false;
+  if (filters.sourceScopeRevision !== undefined && location.scopeRevision !== filters.sourceScopeRevision)
+    return false;
+  if (filters.sourceScopeFolderAnyKeys !== undefined && !filters.sourceScopeFolderAnyKeys.some((key) => location.folderKeys.includes(key))) {
+    return false;
+  }
+  if (filters.sourceScopeFolderNoneKeys?.some((key) => location.folderKeys.includes(key)))
+    return false;
+  const pathScopes = [
+    ...filters.locatorPathScope ? [filters.locatorPathScope] : [],
+    ...filters.locatorPathScopes ?? []
+  ];
+  if (pathScopes.length > 0 && !pathScopes.some((scopePath) => locatorWithin(location.locator, scopePath)))
+    return false;
+  if (filters.locatorPathExcludedScopes?.some((scopePath) => locatorWithin(location.locator, scopePath)))
+    return false;
+  return true;
+}
+function locatorWithin(locator, scopePath) {
+  if (!locator)
+    return false;
+  const path = locator.toLowerCase();
+  const root = scopePath.toLowerCase().replace(/\/+$/, "");
+  return path === root || path.startsWith(`${root}/`);
+}
+function secretLocationQueryReadings(query) {
+  const text = query.replaceAll("_", " ");
+  const joined = secretLocationQueryTerms(joinHyphenatedWords(text));
+  const split = secretLocationQueryTerms(text);
+  if (joined.length === 0 && split.length === 0)
+    return [];
+  return joined.join(" ") === split.join(" ") ? [joined] : [joined, split].filter((terms) => terms.length > 0);
+}
+function secretLocationQueryTerms(text) {
+  return [...new Set(sourceIndexTopicTokens(text).filter((term) => term.length >= 2 && !STOP_WORDS2.has(term)))];
+}
+function joinHyphenatedWords(text) {
+  return text.replace(/(?<=[\p{L}\p{N}])[-\u2010\u2011](?=[\p{L}\p{N}])/gu, "");
+}
+function secretLocationWords(location) {
+  const names = [location.namesReleasable ? location.locator ?? "" : "", location.title ?? ""].join(`
+`).toLowerCase();
+  const kinds = location.findingKinds.flatMap((kind) => [kind.replaceAll("_", " "), ...FINDING_KIND_WORDS[kind] ?? []]).join(" ");
+  return new Set([names, joinHyphenatedWords(names), kinds].join(`
+`).split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+}
+function locationFromRow(row) {
+  return {
+    source: row.provider,
+    accountScope: row.account_scope,
+    conversationKey: row.conversation_key,
+    providerItemId: row.provider_item_id,
+    locator: row.locator,
+    title: row.title,
+    namesReleasable: row.names_releasable === 1,
+    folderKeys: JSON.parse(row.folder_keys_json),
+    scopeGeneration: row.scope_generation,
+    scopeRevision: row.scope_revision,
+    findingKinds: JSON.parse(row.finding_kinds_json),
+    contentHash: row.content_hash,
+    detectedAt: row.detected_at
+  };
+}
+function secretLocationsMigrations() {
+  return [
+    {
+      version: SECRET_LOCATIONS_SCHEMA_VERSION,
+      name: "create_secret_locations",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS secret_locations (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            locator TEXT,
+            title TEXT,
+            names_releasable INTEGER NOT NULL DEFAULT 0 CHECK (names_releasable IN (0, 1)),
+            folder_keys_json TEXT NOT NULL DEFAULT '[]',
+            scope_generation TEXT,
+            scope_revision TEXT,
+            finding_kinds_json TEXT NOT NULL,
+            content_hash TEXT,
+            detected_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      }
+    }
+  ];
+}
+var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS2, FINDING_KIND_WORDS;
+var init_secret_locations = __esm(() => {
+  init_fts();
+  init_sqlite_migrations();
+  init_sqlite_store();
+  init_store_write_guard();
+  init_child_visibility();
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger_path();
+  STOP_WORDS2 = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "olympus",
+    "on",
+    "or",
+    "put",
+    "record",
+    "records",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+  FINDING_KIND_WORDS = {
+    credential_assignment: ["password", "passwords", "passcode", "passphrase", "pin", "login", "credentials"],
+    private_key_material: ["ssh", "keys"],
+    aws_access_key_id: ["keys"],
+    api_secret_token: ["key", "keys", "tokens"],
+    slack_token: ["tokens"]
+  };
+});
+
+// src/core/sqlite-rows.ts
+function* iterateRows(db, sql, ...params) {
+  const statement = db.prepare(sql);
+  try {
+    yield* statement.iterate(...params);
+  } finally {
+    statement.finalize();
+  }
+}
+
+// src/workers/classification/sniffer-store.ts
+import { Database as Database3 } from "bun:sqlite";
+import { createHash as createHash18 } from "node:crypto";
+import { chmodSync as chmodSync7, existsSync as existsSync25, mkdirSync as mkdirSync16 } from "node:fs";
+import { dirname as dirname30 } from "node:path";
+function snifferMaterialHash(pass, material) {
+  return createHash18("sha256").update(`${pass}
+${material}`).digest("hex");
+}
+function snifferSubjectKey(subject) {
+  return createHash18("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
+}
+function contentVerdictReusable(verdict, contentHash, subject) {
+  return !verdict.failSafe && (verdict.contentHash === contentHash || subject !== undefined && verdict.modelSubject === snifferSubjectKey(subject));
+}
+
+class TierSnifferStore {
+  dbPath;
+  db;
+  now;
+  readOnly;
+  workCountMarker;
+  workCounts = new Map;
+  scanProgressChanges = 0;
+  trainingReads;
+  constructor(options) {
+    this.trainingReads = new Map;
+    this.dbPath = options.dbPath;
+    this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database3(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      this.readOnly = true;
+      return;
+    }
+    this.readOnly = false;
+    assertWritableStoreOpenAllowed("sniffer store", this.dbPath);
+    const onDisk = this.dbPath !== ":memory:";
+    if (onDisk)
+      mkdirSync16(dirname30(this.dbPath), { recursive: true, mode: 448 });
+    const previousUmask = onDisk ? process.umask(63) : undefined;
+    let db;
+    try {
+      db = new Database3(this.dbPath, options.restoreQueue ? { readwrite: true, create: false } : { create: true });
+      const synchronous = options.restoreQueue ? "FULL" : "NORMAL";
+      db.exec(`PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = ${synchronous}; PRAGMA journal_size_limit = 67108864;` + loopWalAutocheckpointPragma(this.dbPath));
+      if (!options.restoreQueue)
+        runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
+      if (onDisk)
+        restrictFiles(this.dbPath);
+    } catch (error) {
+      if (db)
+        closeSqliteStore(db);
+      throw error;
+    } finally {
+      if (previousUmask !== undefined)
+        process.umask(previousUmask);
+    }
+    this.db = db;
+  }
+  close(options) {
+    try {
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : options);
+    } finally {
+      if (this.dbPath !== ":memory:" && !this.readOnly)
+        restrictFiles(this.dbPath);
+    }
+  }
+  chunkWindowVerdict(key) {
+    return this.db.query(`SELECT tier FROM chunk_window_verdicts WHERE subject_key = ? AND content_hash = ?
+      AND model_id = ? AND prompt_version = ? AND material_hash = ? AND window_index = ?`).get(snifferSubjectKey(key.subject), key.contentHash, key.modelId, key.promptVersion, key.materialHash, key.windowIndex)?.tier;
+  }
+  recordChunkWindow(key, tier) {
+    this.db.query(`INSERT OR REPLACE INTO chunk_window_verdicts
+      (subject_key, content_hash, model_id, prompt_version, material_hash, window_index, tier)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(snifferSubjectKey(key.subject), key.contentHash, key.modelId, key.promptVersion, key.materialHash, key.windowIndex, tier);
+  }
+  getVerdict(key) {
+    const row = this.db.query(`
+      SELECT tier, category, confidence, fail_safe, decided_at, content_hash, model_subject FROM sniffer_verdicts
+      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
+    `).get(key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
+    if (!row)
+      return;
+    return {
+      tier: row.tier,
+      category: row.category,
+      confidence: row.confidence,
+      failSafe: row.fail_safe === 1,
+      decidedAt: row.decided_at,
+      ...row.content_hash ? { contentHash: row.content_hash } : {},
+      ...row.model_subject ? { modelSubject: row.model_subject } : {}
+    };
+  }
+  putVerdict(key, verdict, subject) {
+    this.db.query(`
+      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at, model_subject)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
+        tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
+        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at, content_hash = NULL, model_subject = excluded.model_subject
+    `).run(key.materialHash, key.modelId, key.promptVersion, key.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString(), subject ? snifferSubjectKey(subject) : null);
+  }
+  deleteVerdict(key) {
+    this.db.query("DELETE FROM sniffer_verdicts WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?").run(key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
+  }
+  markFinalModelContent(key, contentHash) {
+    this.db.query(`UPDATE sniffer_verdicts SET content_hash = ?
+      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0`).run(contentHash, key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
+  }
+  getFinalModelContentVerdict(key) {
+    const row = this.db.query(`SELECT material_hash FROM sniffer_verdicts
+      WHERE content_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0
+        AND (tier = 'private' OR material_hash = ?)
+      ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`).get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision, key.materialHash ?? null);
+    return row ? this.getVerdict({ ...key, materialHash: row.material_hash }) : undefined;
+  }
+  judgedContentLabel(subject, modelId, contentHash) {
+    const row = this.db.query(`SELECT tier FROM sniffer_verdicts
+      WHERE model_subject = ? AND model_id = ? AND content_hash = ? AND fail_safe = 0
+      ORDER BY decided_at DESC LIMIT 1`).get(snifferSubjectKey(subject), modelId, contentHash);
+    return row?.tier;
+  }
+  trainingVerdict(subject, modelId) {
+    const key = snifferSubjectKey(subject);
+    if (this.readOnly) {
+      let labels = this.trainingReads.get(modelId);
+      if (!labels) {
+        labels = new Map;
+        const rows = iterateRows(this.db, `SELECT model_subject, tier, decided_at, content_hash FROM sniffer_verdicts
+          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`, modelId);
+        for (const row of rows) {
+          const prior = labels.get(row.model_subject);
+          if (!prior || row.decided_at > prior.decidedAt)
+            labels.set(row.model_subject, {
+              tier: row.tier,
+              decidedAt: row.decided_at,
+              ambiguous: false,
+              ...row.content_hash ? { contentHash: row.content_hash } : {}
+            });
+          else if (row.decided_at === prior.decidedAt) {
+            if (row.tier !== prior.tier)
+              prior.ambiguous = true;
+            if (row.content_hash !== prior.contentHash)
+              delete prior.contentHash;
+          }
+        }
+        this.trainingReads.set(modelId, labels);
+      }
+      return labels.get(key);
+    }
+    const row = this.db.query(`SELECT MIN(tier) AS tier, decided_at, COUNT(DISTINCT tier) AS tiers,
+        CASE WHEN COUNT(content_hash) = COUNT(*) AND COUNT(DISTINCT content_hash) = 1
+          THEN MIN(content_hash) END AS content_hash
+      FROM sniffer_verdicts WHERE model_subject = ? AND model_id = ? AND fail_safe = 0
+      GROUP BY decided_at ORDER BY decided_at DESC LIMIT 1`).get(key, modelId);
+    return row ? {
+      tier: row.tier,
+      decidedAt: row.decided_at,
+      ambiguous: row.tiers !== 1,
+      ...row.content_hash ? { contentHash: row.content_hash } : {}
+    } : undefined;
+  }
+  changeMarker(options = {}) {
+    const own = this.db.query("SELECT total_changes() AS changes").get();
+    const external = this.db.query("PRAGMA data_version").get();
+    return `${external.data_version}:${own.changes - (options.ignoreScanProgress ? this.scanProgressChanges : 0)}`;
+  }
+  enqueue(question) {
+    const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
+    const requestedPriority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
+    const order = question.legacyHoldOrder;
+    const priority = requestedPriority === HELD_UNTIL_JUDGED_PRIORITY && order !== undefined && Number.isSafeInteger(order) && order > 0 ? HELD_UNTIL_JUDGED_PRIORITY - order : requestedPriority;
+    const hinted = question.conversationOrder !== undefined;
+    const hint = question.conversationOrder === 1 ? 1 : question.conversationOrder === -1 ? -1 : 0;
+    return this.db.transaction(() => {
+      if (question.stillAsk && !question.stillAsk())
+        return false;
+      const before = this.db.query(`
+        SELECT priority, conversation_order FROM sniffer_questions
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+      `).get(...subjectParams(question.subject), question.pass);
+      const conversationOrder = hinted ? hint : before?.conversation_order ?? 0;
+      this.db.query(`
+      INSERT INTO sniffer_questions (
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority, content_hash, conversation_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
+        held_sniffer_id = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
+          AND sniffer_questions.map_revision = excluded.map_revision AND sniffer_questions.flags_json = excluded.flags_json
+          THEN sniffer_questions.held_sniffer_id ELSE NULL END,
+        attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
+          AND sniffer_questions.map_revision = excluded.map_revision
+          THEN sniffer_questions.attempts ELSE 0 END,
+        content_hash = excluded.content_hash,
+        material_hash = excluded.material_hash,
+        map_revision = excluded.map_revision,
+        material = excluded.material,
+        -- A new arrival stays one when a sweep or re-judge asks about it again.
+        priority = CASE WHEN sniffer_questions.priority >= ${NEW_ARRIVAL_PRIORITY}
+          THEN MAX(sniffer_questions.priority, excluded.priority) ELSE excluded.priority END,
+        conversation_order = excluded.conversation_order,
+        flags_json = excluded.flags_json
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority, question.contentHash ?? null, conversationOrder);
+      if (!before && (priority > 0 || conversationOrder > 0) || before && (priority > before.priority || conversationOrder !== before.conversation_order)) {
+        this.db.query("DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)").run("all:recent", `${question.pass}:recent`);
+      }
+      return true;
+    }).immediate();
+  }
+  hasArrivalWaiting() {
+    return this.db.query(`SELECT 1 FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} LIMIT 1`).get() != null;
+  }
+  arrivalContentQuestions(limit = 20) {
+    return this.db.query(`SELECT * FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} AND pass = 'content'
+      ORDER BY priority DESC LIMIT ?`).all(Math.max(1, Math.trunc(limit))).map(questionFromRow);
+  }
+  async retainedQuestionNames(items, read) {
+    const names = new Map;
+    if (!items.length)
+      return names;
+    const sql = `SELECT k.key AS idx, q.pass, substr(q.material, 1, ?) AS material FROM json_each(?) k CROSS JOIN sniffer_questions q
+      WHERE (q.provider, q.account_scope, q.conversation_key, q.provider_item_id) = (k.value ->> '$.provider',
+        k.value ->> '$.accountScope', COALESCE(k.value ->> '$.providerConversationId', ''), k.value ->> '$.providerItemId')
+      ORDER BY q.pass`;
+    const params = [SNIFFER_NAMES_MAX_CHARS + "Names: ".length, JSON.stringify(items)];
+    const rows = read ? await read({ sql, params, mode: "all" }) : this.db.query(sql).all(...params);
+    for (const row of rows) {
+      const value = row.pass === "metadata" ? row.material : row.material.match(/^Names: ([^\n]+)/)?.[1];
+      if (value) {
+        const key = snifferSubjectKey(items[row.idx]);
+        const candidates = names.get(key) ?? [];
+        candidates.push(value);
+        names.set(key, candidates);
+      }
+    }
+    return names;
+  }
+  questionFor(subject, pass) {
+    const row = this.db.query(`
+      SELECT * FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).get(...subjectParams(subject), pass);
+    return row ? questionFromRow(row) : undefined;
+  }
+  listQuestions(options = {}) {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
+    const scanLimit = Math.max(64, limit);
+    const accepted = new Map;
+    const eligible = (question) => {
+      if (!accepted.has(question.sequence))
+        accepted.set(question.sequence, options.eligible?.(question) ?? true);
+      return accepted.get(question.sequence);
+    };
+    const read = (oldest, count) => {
+      const key = `${options.pass ?? "all"}:${oldest ? "oldest" : "recent"}`;
+      let cursor = options.eligible && !this.readOnly ? this.db.query("SELECT conversation_order, priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?").get(key) : null;
+      if (oldest && cursor?.candidate_pk != null) {
+        const pinned = this.db.query("SELECT * FROM sniffer_questions WHERE question_pk = ?").get(cursor.candidate_pk);
+        if (pinned) {
+          const question = questionFromRow(pinned);
+          if (eligible(question))
+            return [question];
+        }
+        cursor = null;
+        this.scanProgressChanges += this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key).changes;
+      }
+      const filters = [];
+      const params = [];
+      if (options.pass) {
+        filters.push("pass = ?");
+        params.push(options.pass);
+      }
+      if (cursor) {
+        filters.push(oldest ? "(queued_at, question_pk) > (?, ?)" : "(priority, conversation_order, queued_at, question_pk) < (?, ?, ?, ?)");
+        if (!oldest)
+          params.push(cursor.priority, cursor.conversation_order);
+        params.push(cursor.queued_at, cursor.question_pk);
+      }
+      const rows = this.db.query(`SELECT * FROM sniffer_questions
+        ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
+        ORDER BY ${oldest ? "queued_at, question_pk" : "priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC"} LIMIT ?`).all(...params, scanLimit);
+      const found = [];
+      for (const row of rows) {
+        const question = questionFromRow(row);
+        if (eligible(question))
+          found.push(question);
+        if (found.length === count)
+          break;
+      }
+      if (options.eligible && !this.readOnly) {
+        const last = rows.at(-1);
+        if (oldest && found[0]) {
+          const candidate = found[0];
+          this.scanProgressChanges += this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`).run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence).changes;
+        } else if (found.length === 0 && rows.length === scanLimit && last) {
+          this.scanProgressChanges += this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`).run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk).changes;
+        } else
+          this.scanProgressChanges += this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key).changes;
+      }
+      return found;
+    };
+    const questions = read(false, limit);
+    const oldest = read(true, 1)[0];
+    if (oldest && !questions.some((question) => question.sequence === oldest.sequence))
+      questions.push(oldest);
+    return questions;
+  }
+  dispatchCount() {
+    const used = this.db.query("SELECT dispatches FROM sniffer_schedule WHERE id = 1").get().dispatches;
+    return used;
+  }
+  recordDispatch() {
+    this.db.exec("UPDATE sniffer_schedule SET dispatches = dispatches + 1 WHERE id = 1");
+  }
+  clockMs() {
+    return this.now().getTime();
+  }
+  deleteQuestion(subject, pass, materialHash) {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+        AND (? IS NULL OR material_hash = ?)
+    `).run(...subjectParams(subject), pass, materialHash ?? null, materialHash ?? null).changes > 0;
+  }
+  deleteItemQuestions(subject) {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...subjectParams(subject)).changes;
+  }
+  deleteAccountScopeQuestions(provider, accountScope) {
+    return this.db.query("DELETE FROM sniffer_questions WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+  }
+  rekey(subject, pass, mapRevision) {
+    this.db.query(`
+      UPDATE sniffer_questions SET map_revision = ?, attempts = 0, held_sniffer_id = NULL
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(mapRevision, ...subjectParams(subject), pass);
+  }
+  recordAttemptFailure(subject, pass) {
+    this.db.query(`
+      UPDATE sniffer_questions SET attempts = attempts + 1
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(...subjectParams(subject), pass);
+    return this.questionFor(subject, pass)?.attempts ?? 0;
+  }
+  markHeldLowering(question, snifferId) {
+    this.db.query(`UPDATE sniffer_questions SET held_sniffer_id = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+        AND material_hash = ? AND map_revision = ?`).run(snifferId, ...subjectParams(question), question.pass, question.materialHash, question.mapRevision);
+  }
+  questionWorkCounts(snifferId) {
+    const marker = this.changeMarker({ ignoreScanProgress: true });
+    if (marker !== this.workCountMarker || this.db.inTransaction) {
+      this.workCounts.clear();
+      this.workCountMarker = this.db.inTransaction ? undefined : marker;
+    }
+    const cached = this.workCounts.get(snifferId);
+    if (cached)
+      return { ...cached };
+    const counts = this.db.query(`SELECT
+      COUNT(CASE WHEN held_sniffer_id IS NULL OR held_sniffer_id != ? THEN 1 END) AS unanswered,
+      COUNT(CASE WHEN held_sniffer_id = ? THEN 1 END) AS heldLowering
+      FROM sniffer_questions`).get(snifferId, snifferId);
+    if (this.workCountMarker !== undefined)
+      this.workCounts.set(snifferId, counts);
+    return { ...counts };
+  }
+  verdictCount() {
+    return this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
+  }
+  counts() {
+    const byPass = { metadata: 0, content: 0 };
+    let questions = 0;
+    for (const row of this.db.query("SELECT pass, COUNT(*) AS n FROM sniffer_questions GROUP BY pass").all()) {
+      byPass[row.pass] = row.n;
+      questions += row.n;
+    }
+    const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
+    const items = this.db.query(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
+      )
+    `).get().n;
+    return { questions, items, byPass, verdicts };
+  }
+}
+function questionFromRow(row) {
+  return {
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
+    pass: row.pass,
+    materialHash: row.material_hash,
+    ...row.content_hash ? { contentHash: row.content_hash } : {},
+    mapRevision: row.map_revision,
+    material: row.material,
+    flags: JSON.parse(row.flags_json),
+    attempts: row.attempts,
+    queuedAt: row.queued_at,
+    priority: row.priority ?? 0,
+    conversationOrder: row.conversation_order ?? 0,
+    sequence: row.question_pk
+  };
+}
+function subjectParams(subject) {
+  return [subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId];
+}
+function restrictFiles(dbPath) {
+  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync25(path))
+      chmodSync7(path, 384);
+  }
+}
+function snifferMigrations() {
+  return [
+    {
+      version: 1,
+      name: "create_tier_sniffer",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS sniffer_verdicts (
+            material_hash TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            tier TEXT NOT NULL CHECK (tier IN ('personal', 'private')),
+            category TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+            fail_safe INTEGER NOT NULL DEFAULT 0 CHECK (fail_safe IN (0, 1)),
+            decided_at TEXT NOT NULL,
+            PRIMARY KEY (material_hash, model_id, prompt_version, map_revision)
+          );
+          CREATE TABLE IF NOT EXISTS sniffer_questions (
+            question_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            pass TEXT NOT NULL CHECK (pass IN ('metadata', 'content')),
+            material_hash TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            material TEXT NOT NULL,
+            flags_json TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            queued_at TEXT NOT NULL,
+            UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
+          );
+        `);
+      }
+    },
+    {
+      version: 2,
+      name: "priority_and_aging",
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
+          CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
+          INSERT INTO sniffer_schedule (id, dispatches) VALUES (1, 0);`);
+      }
+    },
+    {
+      version: 3,
+      name: "bounded_queue_scans",
+      up(db) {
+        db.exec(`CREATE INDEX sniffer_oldest ON sniffer_questions(queued_at, question_pk);
+          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, queued_at DESC, question_pk DESC);
+          CREATE INDEX sniffer_pass_oldest ON sniffer_questions(pass, queued_at, question_pk);
+          CREATE TABLE sniffer_scan (
+            scan_key TEXT PRIMARY KEY, priority INTEGER NOT NULL,
+            queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
+          );`);
+      }
+    },
+    {
+      version: 4,
+      name: "held_lowering_answers",
+      up(db) {
+        db.exec("ALTER TABLE sniffer_questions ADD COLUMN held_sniffer_id TEXT;");
+      }
+    },
+    {
+      version: 5,
+      name: "final_model_content_reuse",
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN content_hash TEXT;
+          ALTER TABLE sniffer_verdicts ADD COLUMN content_hash TEXT;
+          ALTER TABLE sniffer_verdicts ADD COLUMN model_subject TEXT;
+          CREATE INDEX sniffer_final_content ON sniffer_verdicts(content_hash, model_id, prompt_version, map_revision)
+            WHERE fail_safe = 0 AND content_hash IS NOT NULL;`);
+      }
+    },
+    {
+      version: 6,
+      name: "conversation_queue_order",
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN conversation_order INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE sniffer_scan ADD COLUMN conversation_order INTEGER NOT NULL DEFAULT 0;
+          DROP INDEX sniffer_recent;
+          DROP INDEX sniffer_pass_recent;
+          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
+          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
+          DELETE FROM sniffer_scan WHERE scan_key LIKE '%:recent';`);
+      }
+    },
+    {
+      version: 7,
+      name: "subject_training_verdict_lookup",
+      up(db) {
+        db.exec(`CREATE INDEX sniffer_training_subject ON sniffer_verdicts(model_subject, model_id, decided_at DESC)
+          WHERE fail_safe = 0 AND model_subject IS NOT NULL;`);
+      }
+    },
+    {
+      version: 8,
+      name: "chunk_window_verdicts",
+      up(db) {
+        db.exec(`CREATE TABLE chunk_window_verdicts (
+          subject_key TEXT NOT NULL, content_hash TEXT NOT NULL,
+          model_id TEXT NOT NULL, prompt_version TEXT NOT NULL,
+          material_hash TEXT NOT NULL, window_index INTEGER NOT NULL,
+          tier TEXT NOT NULL CHECK (tier IN ('private', 'secure', 'secrets')),
+          PRIMARY KEY (subject_key, content_hash, model_id, prompt_version, material_hash, window_index)
+        );`);
+      }
+    }
+  ];
+}
+var init_sniffer_store = __esm(() => {
+  init_sqlite_migrations();
+  init_sqlite_store();
+  init_store_write_guard();
+  init_tier_classifier();
+  init_tier_ledger_path();
+});
+
 // src/workers/classification/tier-set-binding.ts
 import { existsSync as existsSync26 } from "node:fs";
-import { basename as basename6, dirname as dirname31, join as join36, resolve as resolve10 } from "node:path";
+import { basename as basename6, dirname as dirname31, join as join37, resolve as resolve10 } from "node:path";
 function tierStoreDataRoot(storeDbPath) {
   const folder = dirname31(resolve10(storeDbPath));
   return accountSiblingStorePath(storeDbPath, "secure_local") ? dirname31(dirname31(dirname31(dirname31(folder)))) : folder;
@@ -47587,7 +49472,7 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   const secure = accountSiblingStorePath(storeDbPath, "secure_local");
   if (secure)
     candidates.push(tierLedgerPathForStore(secure));
-  candidates.push(join36(dirname31(storeDbPath), basename6(recordedLedgerPath)));
+  candidates.push(join37(dirname31(storeDbPath), basename6(recordedLedgerPath)));
   candidates.push(recordedLedgerPath);
   return [...new Set(candidates)].filter((path) => tierLedgerIsWithin(tierStoreDataRoot(storeDbPath), path));
 }
@@ -47623,7 +49508,7 @@ var tierSets;
 // src/workers/local-pacing.ts
 import { execFile as execFile2, spawn as spawn3 } from "node:child_process";
 import { existsSync as existsSync27, readdirSync as readdirSync5, readFileSync as readFileSync30 } from "node:fs";
-import { join as join37 } from "node:path";
+import { join as join38 } from "node:path";
 function embedsOnThisComputer(provider) {
   try {
     return provider?.runsOnThisComputer?.() === true;
@@ -47675,7 +49560,7 @@ function readLinuxPower(root = "/sys/class/power_supply") {
     for (const name of readdirSync5(root)) {
       const read = (file) => {
         try {
-          return readFileSync30(join37(root, name, file), "utf8").trim();
+          return readFileSync30(join38(root, name, file), "utf8").trim();
         } catch {
           return;
         }
@@ -48097,27 +49982,8 @@ var init_sqlite_memory = __esm(() => {
   byDatabase = new WeakMap;
 });
 
-// src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-function withSourceIndexReadProgress(report, run) {
-  return progress2.run(report, run);
-}
-function noteSourceIndexReadProgress() {
-  const report = progress2.getStore();
-  if (!report)
-    return;
-  report();
-}
-function currentSourceIndexReadProgress() {
-  return progress2.getStore();
-}
-var progress2;
-var init_read_progress = __esm(() => {
-  progress2 = new AsyncLocalStorage7;
-});
-
 // src/core/limit-stops.ts
-import { createHash as createHash18 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 function registerLimit(input) {
   const prior = limits.get(input.id);
   if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
@@ -48202,7 +50068,7 @@ function limitStopSubjects(stop) {
   return [stop.subject];
 }
 function limitStopReference(stop) {
-  return "limit:" + createHash18("sha256").update(stop.id).update("\x00").update(stop.subject).digest("hex");
+  return "limit:" + createHash19("sha256").update(stop.id).update("\x00").update(stop.subject).digest("hex");
 }
 function installLimitStopHooks(hooks) {
   stopHooks = hooks;
@@ -48239,13 +50105,13 @@ var init_limit_stops = __esm(() => {
 });
 
 // src/core/owner-limit-settings.ts
-import { readFileSync as readFileSync31, mkdirSync as mkdirSync17, statSync as statSync13 } from "node:fs";
+import { readFileSync as readFileSync31, mkdirSync as mkdirSync17, statSync as statSync14 } from "node:fs";
 import { dirname as dirname32 } from "node:path";
 function ownerLimitSettingsPath() {
   return sharedDataPath("limit-settings");
 }
 function readSettings(path) {
-  const stat = statSync13(path, { throwIfNoEntry: false });
+  const stat = statSync14(path, { throwIfNoEntry: false });
   if (!stat)
     return {};
   const stamp = `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}:${stat.ino}`;
@@ -48307,12 +50173,12 @@ var init_owner_limit_settings = __esm(() => {
 });
 
 // src/core/source-size-limits.ts
-import { createHash as createHash19 } from "node:crypto";
+import { createHash as createHash20 } from "node:crypto";
 function sourceSizeLimitForProvider(provider) {
   return SOURCE_SIZE_LIMITS.find((limit) => limit.providers.includes(provider));
 }
 function sizeHeldItemKey(ref) {
-  return createHash19("sha256").update(JSON.stringify([ref.provider, ref.accountScope, ref.providerItemId, ref.localItemId ?? "", ref.sourceVersion ?? "", ref.contentHash ?? ""])).digest("hex");
+  return createHash20("sha256").update(JSON.stringify([ref.provider, ref.accountScope, ref.providerItemId, ref.localItemId ?? "", ref.sourceVersion ?? "", ref.contentHash ?? ""])).digest("hex");
 }
 function sourceSizeBytes(policy, ref, now = new Date, fallback = policy.defaultBytes) {
   return Math.min(sourceSizeCeiling(policy, ref?.mimeType), readOwnerLimitOverride(policy.id, now, undefined, ref ? sizeHeldItemKey(ref) : undefined) ?? fallback);
@@ -48688,8 +50554,8 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
-import { createHash as createHash20 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+import { createHash as createHash21 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -49505,7 +51371,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString(value) {
-  return createHash20("sha256").update(value).digest("hex");
+  return createHash21("sha256").update(value).digest("hex");
 }
 function memoizeQueryEmbeddings(provider) {
   const queries = new Map;
@@ -49549,7 +51415,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage8;
+  priorityQueryEmbedding = new AsyncLocalStorage10;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -49946,613 +51812,6 @@ var init_front_loop_sql_guard = __esm(() => {
       this.name = "FrontLoopSqlError";
     }
   };
-});
-
-// src/core/store-reclaim-admission.ts
-import { join as join38 } from "node:path";
-import { closeSync as closeSync14, openSync as openSync14, futimesSync, statSync as statSync14 } from "node:fs";
-async function withStoreReadPriority(read) {
-  return withFileLease(target("readers"), async () => {
-    const fd = openSync14(target("last-ask"), "a", 384);
-    try {
-      const now = new Date;
-      futimesSync(fd, now, now);
-    } finally {
-      closeSync14(fd);
-    }
-    return withFileLease(target("work"), async () => read(), { mode: "shared", pollIntervalMs: 1 });
-  }, { mode: "shared" });
-}
-function storeReadHasPriority() {
-  try {
-    return withFileLeaseSync(target("readers"), () => false, probe);
-  } catch (error) {
-    if (error instanceof FileLeaseBusyError)
-      return true;
-    throw error;
-  }
-}
-async function withIdleStoreReclaim(work) {
-  if (storeReadHasPriority())
-    return;
-  try {
-    return await withFileLease(target("work"), async () => {
-      if (storeReadHasPriority())
-        return;
-      return work();
-    }, probe);
-  } catch (error) {
-    if (error instanceof FileLeaseBusyError)
-      return;
-    throw error;
-  }
-}
-function storeOwnerIdleMs(now = Date.now()) {
-  try {
-    return Math.max(0, now - statSync14(target("last-ask")).mtimeMs);
-  } catch (error) {
-    if (error.code === "ENOENT")
-      return Number.POSITIVE_INFINITY;
-    throw error;
-  }
-}
-var probe, target = (name) => join38(sharedDataPath("engine-run"), `store-reclaim-${name}`);
-var init_store_reclaim_admission = __esm(() => {
-  init_file_lease();
-  init_olympus_layout();
-  probe = { acquireTimeoutMs: 1, pollIntervalMs: 1 };
-});
-
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
-import { createHash as createHash21, randomUUID as randomUUID8 } from "node:crypto";
-function poolSqlSite(sql) {
-  const shape = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (token) => token.startsWith("--") || token.startsWith("/*") ? " " : "?").replace(/\b(?:0x[\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, "N").replace(/\s+/g, " ").trim();
-  const hash = createHash21("sha256").update(shape).digest("hex").slice(0, 16);
-  const prefix = shape.replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)");
-  return `${prefix.slice(0, POOL_SQL_SITE_CHARS)} #${hash}`;
-}
-function withSlowestSql(reads) {
-  const sites = poolSqlSites.get(reads);
-  const slowest = sites?.size ? [...sites.values()].sort((left, right) => right.sql_ms - left.sql_ms).slice(0, POOL_SQL_SITES_KEPT).map((site) => ({
-    ...site,
-    sql_ms: preciseMs(site.sql_ms),
-    sql_max_ms: preciseMs(site.sql_max_ms),
-    ...site.sql_cpu_ms !== undefined ? { sql_cpu_ms: preciseMs(site.sql_cpu_ms), sql_cpu_max_ms: preciseMs(site.sql_cpu_max_ms) } : {}
-  })) : undefined;
-  return copyPoolDetail({ ...reads, ...slowest ? { slowest_sql: slowest } : {} });
-}
-function copyPoolDetail(pool) {
-  return {
-    ...pool,
-    ...pool.slowest_sql ? { slowest_sql: pool.slowest_sql.map((site) => ({ ...site })) } : {},
-    ...pool.vector_work ? { vector_work: { ...pool.vector_work, digest_unpack_score_ms: preciseMs(pool.vector_work.digest_unpack_score_ms) } } : {},
-    ...pool.keyword_concept_counts ? { keyword_concept_counts: pool.keyword_concept_counts.map((pass) => pass.map((count) => ({ ...count }))) } : {}
-  };
-}
-function preciseMs(ms) {
-  return Math.round(unroundedMs(ms) * 1000) / 1000;
-}
-function seatItemHash(corpusId, itemKey) {
-  return createHash21("sha256").update(`${corpusId}\x00${itemKey}`).digest("hex").slice(0, SEAT_ITEM_HASH_HEX);
-}
-function runInSourceAnswerLane(corpusId, run) {
-  return laneStorage.run(corpusId, run);
-}
-function poolReads(query, corpusId) {
-  let reads = query.poolByCorpus.get(corpusId);
-  if (!reads) {
-    reads = {
-      reads: 0,
-      queue_wait_ms: 0,
-      queue_wait_max_ms: 0,
-      run_ms: 0,
-      run_max_ms: 0,
-      sql_ms: 0,
-      sql_max_ms: 0,
-      snapshot_reads: 0,
-      snapshot_sql_ms: 0,
-      refused: 0,
-      dropped_queued: 0,
-      past_deadline_running: 0,
-      errors: 0
-    };
-    query.poolByCorpus.set(corpusId, reads);
-  }
-  return reads;
-}
-function sourceAnswerVectorWork() {
-  const query = queryStorage.getStore();
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  return poolReads(query, corpusId).vector_work ??= {
-    digest_pages_read: 0,
-    digest_rows_scanned: 0,
-    full_vectors_rescored: 0,
-    digest_unpack_score_ms: 0
-  };
-}
-function beginSourceAnswerConceptCounts() {
-  const query = queryStorage.getStore();
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  const passes = poolReads(query, corpusId).keyword_concept_counts ??= [];
-  const pass = [];
-  passes.push(pass);
-  return pass;
-}
-function beginSourceAnswerStoreTiming() {
-  const query = queryStorage.getStore();
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  const startedAt = performance.now();
-  const stages = {
-    adapter_elapsed_ms: 0,
-    keyword_lane_ms: 0,
-    keyword_relaxation_ms: 0,
-    keyword_revalidation_ms: 0,
-    recency_read_ms: 0,
-    fusion_ms: 0,
-    finalize_ms: 0,
-    unattributed_ms: 0
-  };
-  return { stages, finish: () => {
-    stages.adapter_elapsed_ms = performance.now() - startedAt;
-    const attributed = (stages.join_wait_ms ?? stages.keyword_lane_ms) + (stages.post_join_setup_ms ?? 0) + stages.keyword_relaxation_ms + stages.keyword_revalidation_ms + (stages.vector_revalidation_ms ?? 0) + (stages.vector_summary_ms ?? 0) + stages.recency_read_ms + stages.fusion_ms + stages.finalize_ms;
-    stages.unattributed_ms = Math.max(0, stages.adapter_elapsed_ms - attributed);
-    query.adapterStages.set(corpusId, stages);
-  } };
-}
-function beginSourceAnswerPoolRead(statement, label) {
-  const query = queryStorage.getStore();
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  let site = query.sqlShapes.get(statement);
-  if (site === undefined) {
-    site = poolSqlSite(statement);
-    query.sqlShapes.set(statement, site);
-  }
-  const key = label ? `${label}\x00${site}` : site;
-  return ({ queueWaitMs, runMs, sqlMs, cpuMs, outcome, snapshot }) => {
-    const reads = poolReads(query, corpusId);
-    if (sqlMs !== undefined) {
-      reads.thread_cpu_available = reads.thread_cpu_available === true || cpuMs !== undefined;
-    }
-    const wait = unroundedMs(queueWaitMs);
-    const ran = unroundedMs(runMs);
-    reads.reads += 1;
-    reads.queue_wait_ms += wait;
-    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
-    reads.run_ms += ran;
-    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    const sql = unroundedMs(sqlMs ?? 0);
-    reads.sql_ms += sql;
-    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
-    if (snapshot) {
-      reads.snapshot_reads += 1;
-      reads.snapshot_sql_ms += sql;
-    }
-    let sites = poolSqlSites.get(reads);
-    if (!sites)
-      poolSqlSites.set(reads, sites = new Map);
-    const entry = sites.get(key) ?? { site, ...label ? { label } : {}, reads: 0, sql_ms: 0, sql_max_ms: 0 };
-    entry.reads += 1;
-    entry.sql_ms += sql;
-    entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
-    if (cpuMs !== undefined) {
-      const cpu = unroundedMs(cpuMs);
-      entry.sql_cpu_ms = (entry.sql_cpu_ms ?? 0) + cpu;
-      entry.sql_cpu_max_ms = Math.max(entry.sql_cpu_max_ms ?? 0, cpu);
-    }
-    sites.set(key, entry);
-    if (outcome === "refused")
-      reads.refused += 1;
-    else if (outcome === "dropped_queued")
-      reads.dropped_queued += 1;
-    else if (outcome === "past_deadline_running")
-      reads.past_deadline_running += 1;
-    else if (outcome === "error")
-      reads.errors += 1;
-  };
-}
-function createSourceAnswerTrace(now = () => new Date) {
-  const received = now();
-  return {
-    correlationId: randomUUID8(),
-    receivedAt: received.toISOString(),
-    receivedAtMs: received.getTime(),
-    sqliteRetryCount: 0,
-    sqliteBackoffMs: 0,
-    queryPlannerMs: 0,
-    queryFormulationCount: 0,
-    queryPlannerAwaitedCount: 0,
-    queryPlannerIgnoredAfterStrongLiteralCount: 0,
-    queryPlannerFailedCount: 0,
-    retrievalAttempts: [],
-    routeResolutionMs: 0,
-    orderedRoute: [],
-    analystLegs: [],
-    residualAnalystOrphanCount: 0,
-    selfHealRebuildMs: 0,
-    recordBuildMs: 0,
-    appendMs: 0,
-    mainThreadSql: { statements: 0, total_ms: 0, max_ms: 0, slow: [], by_site: [] }
-  };
-}
-function runWithSourceAnswerTrace(trace, run) {
-  return withStoreReadPriority(() => storage2.run(trace, run));
-}
-function currentSourceAnswerTrace() {
-  return storage2.getStore();
-}
-function sourceAnswerTraceActive() {
-  return storage2.getStore() !== undefined;
-}
-function recordSourceAnswerMainThreadSql(elapsedMs, site) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  const ms = unroundedMs(elapsedMs);
-  const sql = trace.mainThreadSql;
-  sql.statements += 1;
-  sql.total_ms += ms;
-  sql.max_ms = Math.max(sql.max_ms, ms);
-  if (ms < SITE_TALLY_MS)
-    return;
-  const where = site();
-  const tally = sql.by_site.find((entry) => entry.site === where);
-  if (tally) {
-    tally.statements += 1;
-    tally.ms += ms;
-  } else {
-    sql.by_site.push({ site: where, statements: 1, ms });
-  }
-  if (ms < SLOW_MAIN_THREAD_SQL_MS)
-    return;
-  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
-  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
-    sql.slow.sort((left, right) => right.ms - left.ms);
-    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
-  }
-}
-function recordSourceAnswerPhaseTimings(timings) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.phaseTimings = { ...timings };
-}
-function recordSourceAnswerSqliteRetry(backoffMs) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.sqliteRetryCount += 1;
-  trace.sqliteBackoffMs += nonNegativeMs(backoffMs);
-}
-function recordSourceAnswerQueryPlanner(elapsedMs, formulationCount) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.queryPlannerMs += nonNegativeMs(elapsedMs);
-  trace.queryFormulationCount += Math.max(0, Math.floor(formulationCount));
-}
-function recordSourceAnswerQueryPlannerDisposition(disposition) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  if (disposition === "awaited")
-    trace.queryPlannerAwaitedCount += 1;
-  else if (disposition === "ignored_after_strong_literal") {
-    trace.queryPlannerIgnoredAfterStrongLiteralCount += 1;
-  } else
-    trace.queryPlannerFailedCount += 1;
-}
-async function observeSourceAnswerRetrievalAttempt(kind, run) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return run().finally(() => noteSourceAnswerProgress("searching"));
-  const previous = trace.activeAttempt;
-  const attempt = {
-    kind,
-    startedAtMs: Date.now(),
-    hydrationMs: 0,
-    queries: []
-  };
-  trace.activeAttempt = attempt;
-  try {
-    return await run();
-  } finally {
-    const elapsedMs = nonNegativeMs(Date.now() - attempt.startedAtMs);
-    trace.retrievalAttempts.push({
-      kind,
-      elapsed_ms: elapsedMs,
-      hydration_ms: attempt.hydrationMs,
-      queries: attempt.queries
-    });
-    if (kind === "self_heal_rebuild")
-      trace.selfHealRebuildMs += elapsedMs;
-    noteSourceAnswerProgress("searching");
-    if (previous)
-      trace.activeAttempt = previous;
-    else
-      delete trace.activeAttempt;
-  }
-}
-function recordSourceAnswerHydration(elapsedMs) {
-  noteSourceAnswerProgress("reading evidence");
-  const attempt = currentSourceAnswerTrace()?.activeAttempt;
-  if (attempt)
-    attempt.hydrationMs += nonNegativeMs(elapsedMs);
-}
-async function observeSourceAnswerRoutedQuery(ordinal, run) {
-  const trace = currentSourceAnswerTrace();
-  const attempt = trace?.activeAttempt;
-  if (!trace || !attempt)
-    return run();
-  const query = {
-    ordinal: Math.max(1, Math.floor(ordinal)),
-    startedAtMs: Date.now(),
-    corpusTimings: [],
-    poolByCorpus: new Map,
-    adapterStages: new Map,
-    sqlShapes: new Map
-  };
-  try {
-    return await queryStorage.run(query, run);
-  } finally {
-    attempt.queries.push({
-      ordinal: query.ordinal,
-      elapsed_ms: nonNegativeMs(Date.now() - query.startedAtMs),
-      corpus_timings: query.corpusTimings.map((timing) => ({
-        corpus_id: timing.corpus_id,
-        elapsed_ms: nonNegativeMs(timing.elapsed_ms),
-        ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
-        outcome: timing.outcome,
-        ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {},
-        ...query.adapterStages.has(timing.corpus_id) ? { adapter_stages: query.adapterStages.get(timing.corpus_id) } : {},
-        ...query.poolByCorpus.has(timing.corpus_id) ? { pool: withSlowestSql(query.poolByCorpus.get(timing.corpus_id)) } : {}
-      })),
-      ...query.stages ? { stages: { ...query.stages } } : {}
-    });
-  }
-}
-function recordSourceAnswerQueryStages(stages) {
-  const query = queryStorage.getStore();
-  if (!query)
-    return;
-  query.stages = copyQueryStages(stages);
-}
-function copyQueryStages(stages) {
-  return {
-    prepare_ms: nonNegativeMs(stages.prepare_ms),
-    prepare_keywords_max_ms: nonNegativeMs(stages.prepare_keywords_max_ms),
-    ...stages.keyword_model && { keyword_model: stages.keyword_model },
-    prepare_semantic_max_ms: nonNegativeMs(stages.prepare_semantic_max_ms),
-    lanes_ms: nonNegativeMs(stages.lanes_ms),
-    after_lanes_ms: nonNegativeMs(stages.after_lanes_ms)
-  };
-}
-function recordSourceAnswerCorpusTiming(timing) {
-  noteSourceAnswerProgress("searching");
-  const query = queryStorage.getStore();
-  if (!query)
-    return;
-  query.corpusTimings.push({
-    corpus_id: timing.corpus_id,
-    elapsed_ms: nonNegativeMs(timing.elapsed_ms),
-    ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
-    outcome: timing.outcome,
-    ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}
-  });
-}
-function recordSourceAnswerRoute(elapsedMs, route) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.routeResolutionMs += nonNegativeMs(elapsedMs);
-  trace.orderedRoute = route.map((step) => ({
-    profile_id: step.profile_id,
-    backend: step.backend,
-    model_id: step.model_id
-  }));
-}
-async function observeSourceAnswerAnalystLeg(input, run) {
-  const startedAt = Date.now();
-  noteSourceAnswerProgress("writing the answer");
-  try {
-    const result = await run();
-    noteSourceAnswerProgress("writing the answer");
-    recordAnalystLeg(input, startedAt, "success");
-    return result;
-  } catch (error) {
-    recordAnalystLeg(input, startedAt, errorClass(error) === "TrustedAnalystTimeoutError" ? "timeout" : "error", error);
-    throw error;
-  }
-}
-function recordSourceAnswerSkippedAnalystLeg(input) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.analystLegs.push({
-    profile_id: input.profile_id,
-    backend: input.backend,
-    model_id: input.model_id,
-    budget_ms: nonNegativeMs(input.budgetMs),
-    elapsed_ms: 0,
-    outcome: input.outcome ?? "policy_skipped",
-    error_class: sanitizeErrorClass(input.errorClass)
-  });
-}
-function recordSourceAnswerPackSeats(corpusIds, recencySeats = 0, itemKeys) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.evidenceSeats = {
-    packCorpora: [...corpusIds],
-    ...itemKeys ? { itemHashes: corpusIds.map((corpusId, index) => seatItemHash(corpusId, itemKeys[index] ?? "")) } : {},
-    recencySeats: nonNegativeCount(recencySeats),
-    fits: []
-  };
-}
-function recordSourceAnswerAnalystFit(lane, keptSeats, measurement, budget) {
-  const seats = currentSourceAnswerTrace()?.evidenceSeats;
-  if (!seats)
-    return;
-  seats.fits.push({
-    lane,
-    keptSeats: keptSeats.map(nonNegativeCount),
-    ...budget ? { promptBudgetBytes: budget.bytes, promptBudgetSource: budget.source } : {},
-    promptBytes: nonNegativeCount(measurement.promptBytes),
-    packCandidates: nonNegativeCount(measurement.packCandidates),
-    keptCandidates: nonNegativeCount(measurement.keptCandidates),
-    packGapEntries: nonNegativeCount(measurement.packGapEntries),
-    packGapBytes: nonNegativeCount(measurement.packGapBytes),
-    sentGapBytes: nonNegativeCount(measurement.sentGapBytes),
-    overheadBytes: nonNegativeCount(measurement.overheadBytes),
-    evidenceFormat: measurement.evidenceFormat
-  });
-}
-function recordSourceAnswerRerank(audit) {
-  noteSourceAnswerProgress("ranking evidence");
-  const trace = currentSourceAnswerTrace();
-  if (trace && audit)
-    trace.rerank = { ...audit };
-}
-function recordSourceAnswerResidualAnalystOrphan() {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.residualAnalystOrphanCount += 1;
-}
-function recordSourceAnswerReleaseDecision(decision) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.releaseDecision = decision;
-}
-function recordSourceAnswerLedgerBuild(elapsedMs) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.recordBuildMs += nonNegativeMs(elapsedMs);
-}
-function recordSourceAnswerLedgerAppend(elapsedMs) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.appendMs += nonNegativeMs(elapsedMs);
-}
-function snapshotSourceAnswerTrace(trace) {
-  return {
-    correlationId: trace.correlationId,
-    receivedAt: trace.receivedAt,
-    receivedAtMs: trace.receivedAtMs,
-    sqliteRetryCount: trace.sqliteRetryCount,
-    sqliteBackoffMs: trace.sqliteBackoffMs,
-    queryPlannerMs: trace.queryPlannerMs,
-    queryFormulationCount: trace.queryFormulationCount,
-    queryPlannerAwaitedCount: trace.queryPlannerAwaitedCount,
-    queryPlannerIgnoredAfterStrongLiteralCount: trace.queryPlannerIgnoredAfterStrongLiteralCount,
-    queryPlannerFailedCount: trace.queryPlannerFailedCount,
-    retrievalAttempts: trace.retrievalAttempts.map((attempt) => ({
-      ...attempt,
-      queries: attempt.queries.map((query) => ({
-        ...query,
-        corpus_timings: query.corpus_timings.map((timing) => ({
-          ...timing,
-          ...timing.adapter_stages ? { adapter_stages: { ...timing.adapter_stages } } : {},
-          ...timing.pool ? { pool: copyPoolDetail(timing.pool) } : {}
-        }))
-      }))
-    })),
-    routeResolutionMs: trace.routeResolutionMs,
-    orderedRoute: trace.orderedRoute.map((step) => ({ ...step })),
-    analystLegs: trace.analystLegs.map((leg) => ({ ...leg })),
-    residualAnalystOrphanCount: Math.max(0, Math.floor(trace.residualAnalystOrphanCount)),
-    ...trace.phaseTimings ? { phaseTimings: { ...trace.phaseTimings } } : {},
-    selfHealRebuildMs: trace.selfHealRebuildMs,
-    recordBuildMs: trace.recordBuildMs,
-    appendMs: trace.appendMs,
-    ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {},
-    mainThreadSql: {
-      statements: trace.mainThreadSql.statements,
-      total_ms: nonNegativeMs(trace.mainThreadSql.total_ms),
-      max_ms: nonNegativeMs(trace.mainThreadSql.max_ms),
-      slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry })),
-      by_site: [...trace.mainThreadSql.by_site].sort((left, right) => right.ms - left.ms).slice(0, SITE_TALLY_KEPT).map((entry) => ({ site: entry.site, statements: entry.statements, ms: nonNegativeMs(entry.ms) }))
-    },
-    ...trace.evidenceSeats ? {
-      evidenceSeats: {
-        packCorpora: [...trace.evidenceSeats.packCorpora],
-        ...trace.evidenceSeats.itemHashes ? { itemHashes: [...trace.evidenceSeats.itemHashes] } : {},
-        recencySeats: trace.evidenceSeats.recencySeats,
-        fits: trace.evidenceSeats.fits.map((fit) => ({ ...fit, keptSeats: [...fit.keptSeats] }))
-      }
-    } : {},
-    ...trace.rerank ? { rerank: { ...trace.rerank } } : {}
-  };
-}
-function sourceAnswerTraceErrorClass(error) {
-  return sanitizeErrorClass(errorClass(error));
-}
-function recordAnalystLeg(input, startedAt, outcome, error) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.analystLegs.push({
-    profile_id: input.profile_id,
-    backend: input.backend,
-    model_id: input.model_id,
-    budget_ms: nonNegativeMs(input.budgetMs),
-    elapsed_ms: nonNegativeMs(Date.now() - startedAt),
-    outcome,
-    ...error !== undefined ? { error_class: sourceAnswerTraceErrorClass(error) } : {}
-  });
-}
-function errorClass(error) {
-  const candidate = error;
-  if (typeof candidate?.name === "string" && candidate.name.trim())
-    return candidate.name;
-  if (typeof candidate?.constructor?.name === "string" && candidate.constructor.name.trim()) {
-    return candidate.constructor.name;
-  }
-  return "UnknownError";
-}
-function sanitizeErrorClass(value) {
-  const normalized = value.replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
-  return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : "Error";
-}
-function unroundedMs(value) {
-  return Number.isFinite(value) ? Math.max(0, value) : 0;
-}
-function nonNegativeCount(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
-}
-function nonNegativeMs(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-var POOL_SQL_SITE_CHARS = 120, POOL_SQL_SITES_KEPT = 5, poolSqlSites, SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, SITE_TALLY_MS = 25, SITE_TALLY_KEPT = 10, SEAT_ITEM_HASH_HEX = 12, storage2, queryStorage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
-var init_answer_latency_trace = __esm(() => {
-  init_source_answer_jobs();
-  init_store_reclaim_admission();
-  poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage9;
-  queryStorage = new AsyncLocalStorage9;
-  laneStorage = new AsyncLocalStorage9;
-  CONTENT_FREE_ERROR_CLASSES = new Set([
-    "AbortError",
-    "AnalystUnavailable",
-    "AnalystCircuitOpen",
-    "EmailSourceWorkerError",
-    "Error",
-    "LocalTrustProviderMismatch",
-    "OperationError",
-    "RangeError",
-    "SourceModelPolicyDeniedError",
-    "SecureEvidencePolicySkip",
-    "SecureAnalystPoolE2EEGateError",
-    "SyntaxError",
-    "TrustedAnalystTimeoutError",
-    "TypeError"
-  ]);
 });
 
 // src/workers/connector-store/main-thread-sql-trace.ts
@@ -51617,16 +52876,6 @@ var init_job_names = __esm(() => {
     { status: "blocked_policy", kind: "store_item_tier_move_queued" }
   ];
 });
-
-// src/core/child-item-id.ts
-function childProviderItemId(parentProviderItemId, key) {
-  if (!parentProviderItemId)
-    throw new TypeError("A child needs its parent's id.");
-  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
-    throw new TypeError("A child's key must be plain text.");
-  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
-}
-var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/core/source-index/keyword-languages.ts
 function detectLanguage(text) {
@@ -54560,797 +55809,6 @@ var init_keyword_expansion = __esm(() => {
   runningTranslations = new WeakMap;
 });
 
-// src/core/log-redaction.ts
-function redactLogLine(line) {
-  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
-}
-function boundedLogErrorMessage(error) {
-  const message = error instanceof Error ? error.message : String(error);
-  const oneLine = message.replace(/\s+/g, " ").trim();
-  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
-}
-function logErrorOrigin(error) {
-  if (!(error instanceof Error))
-    return JSON.stringify(typeof error);
-  const frame = errorFirstFrame(error);
-  return JSON.stringify(redactLogLine(frame ? `${error.name} at ${frame}` : error.name).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
-}
-function errorFirstFrame(error) {
-  const line = error.stack?.split(`
-`).map((entry) => entry.trim()).find((entry) => entry.startsWith("at "));
-  if (!line)
-    return;
-  return line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+(?::\d+)?)/g, "$1").slice(0, 160);
-}
-function errorFromBoundary(message, name, frame, where) {
-  const error = new Error(message);
-  if (name)
-    error.name = name;
-  error.stack = `${error.name}: ${message}
-    at ${frame ?? "unknown"} (${where})`;
-  return error;
-}
-var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
-
-// src/core/source-index/lane-busy.ts
-function isSourceIndexLaneBusyError(error) {
-  return typeof error === "object" && error !== null && error.code === SOURCE_INDEX_LANE_BUSY_CODE;
-}
-var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
-
-// src/workers/connector-store/off-thread-reads.ts
-function readInBackground(dbPath, query) {
-  return withOffThreadSnapshot(dbPath, async (read) => read(query), BACKGROUND_READS);
-}
-function setAskBenchReadPoolSqlDir(dir) {
-  benchSqlDir = dir;
-}
-function instrumentBenchWorker(source, dir, store) {
-  const module = new URL("./ask-bench-sql.ts", import.meta.url).href;
-  return source.replace("/*ask-bench-init*/", () => `
-import { createAskBenchSqlRecorder } from ${JSON.stringify(module)};
-const benchStore = ${JSON.stringify(store)};
-const benchSql = createAskBenchSqlRecorder(${JSON.stringify(dir)}, benchStore);
-let benchSample;
-let benchSite;
-`).replace("/*ask-bench-before*/", "benchSite = event.data.site ?? '(unlabelled pool read)'; benchSample = benchSql.sample();").replace("/*ask-bench-after*/", "benchSql.record(benchSample, ms, benchStore, benchSite); benchSample = undefined;");
-}
-function sampleReadPoolMemory(sampleSqlite = true) {
-  const now = Date.now();
-  let workers = 0, connections = 0, cache = 0, heap = 0, external = 0, arrayBuffers = 0, age = 0;
-  for (const reader of threads) {
-    const measured = reader.memory;
-    if (measured) {
-      workers++;
-      connections += measured.measured;
-      cache += measured.cacheBytes;
-      heap += measured.heapUsed;
-      external += measured.external;
-      arrayBuffers += measured.arrayBuffers;
-      age = Math.max(age, now - measured.at);
-    }
-    if (!reader.retired && reader.pending.size === 0 && !reader.job)
-      reader.worker.postMessage({ op: "memory", sampleSqlite });
-  }
-  return {
-    read_heap_workers: workers,
-    read_heap_age_ms: age,
-    read_heap_size_mb: heap,
-    read_extra_memory_mb: external,
-    read_array_buffers_mb: arrayBuffers,
-    ...sampleSqlite && { sqlite_read_connections_sampled: connections, sqlite_read_cache_budget_mb: cache }
-  };
-}
-function readPoolMemoryCounts() {
-  return { read_workers: threads.length, read_connections: connectionTotal ? Atomics.load(connectionTotal, 0) : heldConnections };
-}
-function readPoolDiagnostics() {
-  const stores = {};
-  for (const path of new Set([...storeOpens.keys(), ...queues.keys(), ...threads.flatMap((t) => t.executingStore ? [t.executingStore] : [])])) {
-    const running = threads.filter((t) => t.executingStore === path);
-    stores[path] = {
-      inFlight: running.length,
-      abandoned: running.filter((t) => t.retired || t.job?.settled).length,
-      queued: queues.get(path)?.length ?? 0,
-      opens: storeOpens.get(path)?.opens ?? 0,
-      openMs: storeOpens.get(path)?.openMs ?? 0
-    };
-  }
-  return { ...counters, threads: threads.length, stores };
-}
-function live() {
-  return threads.filter((reader) => !reader.retired);
-}
-function busy(reader) {
-  return reader.pending.size + reader.snapshots + (reader.job ? 1 : 0);
-}
-function runtimeHasWorkers() {
-  return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
-}
-function startThread(store, lane = "shared") {
-  const limit = lane === "shared" ? READ_POOL_SIZE : lane === "rescore" ? READ_POOL_RESCORE_READERS : 1;
-  if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
-    return;
-  try {
-    const source = sqliteMmapWorkerSource(WORKER_SOURCE);
-    const url = URL.createObjectURL(new Blob([benchSqlDir ? instrumentBenchWorker(source, benchSqlDir, store) : source], { type: "application/javascript" }));
-    const worker = workerFactory(url);
-    worker.unref?.();
-    counters.starts += 1;
-    if (startedStores.has(store))
-      counters.restarts += 1;
-    startedStores.add(store);
-    const started = { store, lane, worker, pending: new Map, snapshots: 0, connections: 0 };
-    if (typeof SharedArrayBuffer === "function") {
-      const buffer = new SharedArrayBuffer(12);
-      connectionTotal ??= new Int32Array(new SharedArrayBuffer(4));
-      started.progress = new Int32Array(buffer);
-      worker.postMessage({ op: "progress", buffer, connections: connectionTotal.buffer });
-    }
-    let closed = false;
-    worker.onmessage = (event) => {
-      if (closed)
-        return;
-      const message = event.data;
-      const diagnostic = message;
-      if (diagnostic.diagnostic === "memory") {
-        started.memory = message;
-        return;
-      }
-      if (diagnostic.diagnostic === "connections") {
-        started.connections += diagnostic.delta;
-        heldConnections += diagnostic.delta;
-        return;
-      }
-      if (diagnostic.diagnostic === "open") {
-        counters.opens += 1;
-        counters.openMs += diagnostic.ms;
-        const held = storeOpens.get(diagnostic.path) ?? { opens: 0, openMs: 0 };
-        held.opens += 1;
-        held.openMs += diagnostic.ms;
-        storeOpens.set(diagnostic.path, held);
-        return;
-      }
-      started.executingStore = undefined;
-      const waiting = started.pending.get(message.id);
-      if (!waiting) {
-        counters.lateReplies += 1;
-        return;
-      }
-      started.pending.delete(message.id);
-      if (typeof message.ms === "number")
-        waiting.statementTiming?.(message.ms, message.cpuMs);
-      if (message.ok)
-        waiting.resolve(message.rows ?? null);
-      else
-        waiting.reject(errorFromBoundary(message.error ?? "off-thread read failed", message.errorName, message.errorFrame, `read pool ${message.op ?? "read"}${message.sqlHead ? `: ${message.sqlHead}` : ""}`));
-    };
-    worker.onerror = (event) => {
-      retire(started, new Error(event.message || "off-thread reader stopped"));
-    };
-    worker.addEventListener("close", () => {
-      closed = true;
-      const at = threads.indexOf(started);
-      if (at >= 0) {
-        if (connectionTotal && started.progress) {
-          Atomics.sub(connectionTotal, 0, Atomics.exchange(started.progress, 2, 0));
-        } else
-          heldConnections -= started.connections;
-        started.connections = 0;
-        threads.splice(at, 1);
-      }
-      if (!started.retired)
-        retire(started, new Error("off-thread reader stopped"));
-      dispatch();
-    });
-    threads.push(started);
-    return started;
-  } catch {
-    return;
-  }
-}
-function retire(stopped, error) {
-  if (stopped.retired)
-    return;
-  stopped.retired = true;
-  counters.terminations += 1;
-  for (const waiting of stopped.pending.values())
-    waiting.reject(error);
-  stopped.pending.clear();
-  try {
-    stopped.worker.terminate();
-  } catch {}
-}
-function offThreadReadsSupported(dbPath) {
-  return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
-}
-function send(reader, message, statementTiming, job) {
-  if (reader.retired)
-    return Promise.reject(new Error("off-thread reader stopped"));
-  const id = nextId++;
-  return new Promise((resolve, reject) => {
-    reader.pending.set(id, { resolve, reject, ...statementTiming ? { statementTiming } : {} });
-    armLostReplyCheck();
-    try {
-      if (job)
-        observer?.(job.store, job.read);
-      reader.worker.postMessage({ ...message, id, ...statementTiming ? { measureCpu: true } : {} });
-      if (job)
-        reader.executingStore = job.store;
-    } catch (error) {
-      reader.pending.delete(id);
-      reject(error instanceof Error ? error : new Error(String(error)));
-    }
-  });
-}
-function armLostReplyCheck() {
-  if (lostReplyCheck !== undefined)
-    return;
-  lostReplyCheck = clock2.setTimeout(checkLostReplies, lostReplyCheckMs);
-}
-function checkLostReplies() {
-  lostReplyCheck = undefined;
-  for (const reader of live()) {
-    if (!reader.progress)
-      continue;
-    const finished = Atomics.load(reader.progress, 1);
-    for (const [id, waiting] of reader.pending) {
-      if (id > finished)
-        continue;
-      if (!waiting.finishedSeen) {
-        waiting.finishedSeen = true;
-        continue;
-      }
-      counters.lostReplies += 1;
-      retire(reader, new OffThreadReadLostError);
-      break;
-    }
-  }
-  if (threads.some((reader) => !reader.retired && reader.pending.size > 0))
-    armLostReplyCheck();
-}
-async function withOffThreadSnapshot(dbPath, work, options = {}) {
-  const lane = options.lane ?? "shared";
-  const site = callerSite();
-  if (!runtimeHasWorkers())
-    throw new Error("off-thread reads are unavailable");
-  const generation = releases.get(dbPath) ?? 0;
-  const askedAtMs = clock2.now();
-  const free = options.noWait ? snapshotThreadNow(dbPath, lane) : undefined;
-  if (options.noWait && !free)
-    throw new OffThreadReadBusyError;
-  if (free)
-    free.snapshots += 1;
-  let reader = free ?? await snapshotThread(dbPath, lane);
-  try {
-    if ((releases.get(dbPath) ?? 0) !== generation)
-      throw new OffThreadReadBusyError;
-    let snapshot = nextId++;
-    let reserveWaitMs = clock2.now() - askedAtMs;
-    const perRead = lane === "background" || options.perRead === true;
-    const open = async () => {
-      await send(reader, { op: "open", snapshot, path: dbPath, perRead });
-    };
-    let retryLeft = true;
-    let moving;
-    const moveToFreshWorker = () => {
-      if (moving)
-        return moving;
-      retryLeft = false;
-      counters.retries += 1;
-      moving = (async () => {
-        reader.snapshots -= 1;
-        reader = undefined;
-        dispatch();
-        reader = await snapshotThread(dbPath, lane);
-        if ((releases.get(dbPath) ?? 0) !== generation)
-          throw new OffThreadReadBusyError;
-        snapshot = nextId++;
-        await open();
-      })();
-      return moving;
-    };
-    try {
-      await open();
-    } catch (error) {
-      if (!(error instanceof OffThreadReadLostError) || !retryLeft)
-        throw error;
-      await moveToFreshWorker();
-    }
-    if (!perRead)
-      markRead(dbPath, snapshot, { atMs: clock2.now(), lane, site });
-    try {
-      return await work(async (query) => {
-        const readId = perRead ? -nextId++ : 0;
-        if (perRead)
-          markRead(dbPath, readId, { atMs: clock2.now(), lane, site });
-        if (observeSnapshots)
-          observer?.(dbPath, query, { lane, site });
-        const report = beginSourceAnswerPoolRead(query.sql, query.site ?? (site === "unknown" ? undefined : site));
-        const sentAtMs = clock2.now();
-        const queueWaitMs = reserveWaitMs;
-        reserveWaitMs = 0;
-        let sqlMs;
-        let cpuMs;
-        const once = async () => {
-          if (moving)
-            await moving;
-          return send(reader, {
-            op: "read",
-            snapshot,
-            sql: query.sql,
-            params: query.params,
-            mode: query.mode,
-            ...benchSqlDir && { site: query.site ?? site }
-          }, report && ((ms, cpu) => {
-            sqlMs = ms;
-            cpuMs = cpu;
-          }));
-        };
-        const laneProgress = currentSourceIndexReadProgress();
-        laneProgress?.began?.();
-        try {
-          let rows;
-          try {
-            rows = await once();
-          } catch (error) {
-            if (!perRead || !(error instanceof OffThreadReadLostError) || !retryLeft && !moving)
-              throw error;
-            await moveToFreshWorker();
-            rows = await once();
-          }
-          noteSourceIndexReadProgress();
-          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, cpuMs, outcome: "rows", snapshot: true });
-          return rows;
-        } catch (error) {
-          report?.({ queueWaitMs, runMs: clock2.now() - sentAtMs, sqlMs, cpuMs, outcome: "error", snapshot: true });
-          throw error;
-        } finally {
-          laneProgress?.ended?.();
-          if (perRead)
-            unmarkRead(dbPath, readId);
-          dispatch();
-        }
-      });
-    } finally {
-      await moving?.catch(() => {
-        return;
-      });
-      if (reader)
-        await send(reader, { op: "close", snapshot }).catch(() => {
-          return;
-        });
-      unmarkRead(dbPath, snapshot);
-    }
-  } finally {
-    if (reader)
-      reader.snapshots -= 1;
-    dispatch();
-  }
-}
-function markRead(dbPath, id, read) {
-  const open = openSnapshots.get(dbPath) ?? new Map;
-  open.set(id, read);
-  openSnapshots.set(dbPath, open);
-}
-function unmarkRead(dbPath, id) {
-  const open = openSnapshots.get(dbPath);
-  if (!open)
-    return;
-  open.delete(id);
-  if (open.size === 0)
-    openSnapshots.delete(dbPath);
-}
-function callerSite() {
-  const frames = (new Error().stack ?? "").split(`
-`).map((line) => line.trim()).filter((line) => line.startsWith("at "));
-  const names = frames.filter((line) => !/off-thread-reads|withOffThreadSnapshot|readInBackground|ledgerReadOffThread|readStepsInBackground|processTicksAndRejections/.test(line)).map((line) => {
-    const match = /^at (?:async )?([\w.$<>]+)?\s*\(?(?:.*[\\/])?([\w.-]+\.(?:ts|js)):(\d+)/.exec(line);
-    return match ? `${match[1] ?? "<anonymous>"}@${match[2]}:${match[3]}` : undefined;
-  }).filter((name) => name !== undefined).slice(0, 2);
-  return names.length > 0 ? names.join("<") : "unknown";
-}
-function oldestOffThreadSnapshot(dbPath) {
-  const open = openSnapshots.get(dbPath);
-  if (!open || open.size === 0)
-    return;
-  let oldest;
-  for (const entry of open.values())
-    if (!oldest || entry.atMs < oldest.atMs)
-      oldest = entry;
-  return oldest ? { ageMs: clock2.now() - oldest.atMs, lane: oldest.lane, site: oldest.site } : undefined;
-}
-function snapshotThreadNow(store, lane) {
-  return live().find((reader) => reader.store === store && reader.lane === lane && !reader.releaseWhenIdle && !reader.job && (lane !== "rescore" || reader.snapshots === 0)) ?? startThread(store, lane);
-}
-function openOffThreadSnapshot(dbPath, options = {}) {
-  return new Promise((resolve, reject) => {
-    let opened = false;
-    const done = withOffThreadSnapshot(dbPath, (read) => new Promise((release) => {
-      opened = true;
-      resolve({ read, close: async () => {
-        release();
-        await done.catch(() => {
-          return;
-        });
-      } });
-    }), options);
-    done.catch((error) => {
-      if (!opened)
-        reject(error);
-    });
-  });
-}
-function snapshotThread(store, lane) {
-  const reader = snapshotThreadNow(store, lane);
-  if (reader) {
-    reader.snapshots += 1;
-    return Promise.resolve(reader);
-  }
-  return new Promise((resolve, reject) => {
-    const waiter = {
-      store,
-      lane,
-      resolve,
-      reject,
-      timer: undefined
-    };
-    snapshotWaiters.push(waiter);
-  });
-}
-function serveSnapshotWaiters() {
-  for (const waiter of [...snapshotWaiters]) {
-    const reader = snapshotThreadNow(waiter.store, waiter.lane);
-    if (!reader)
-      continue;
-    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
-    clearTimeout(waiter.timer);
-    reader.snapshots += 1;
-    waiter.resolve(reader);
-  }
-}
-function readOnPool(dbPath, read, options = {}) {
-  const deadlineAtMs = options.deadlineAtMs ?? Number.POSITIVE_INFINITY;
-  const waiting = queues.get(dbPath) ?? [];
-  const report = beginSourceAnswerPoolRead(read.sql, read.site);
-  if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
-    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
-    return Promise.reject(new OffThreadReadBusyError);
-  }
-  return new Promise((resolve, reject) => {
-    const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
-    if (benchSqlDir && !read.site)
-      job.benchSite = callerSite();
-    if (Number.isFinite(deadlineAtMs))
-      job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
-    waiting.push(job);
-    if (!queues.has(dbPath)) {
-      queues.set(dbPath, waiting);
-      turns.push(dbPath);
-    }
-    dispatch();
-  }).then((rows) => {
-    noteSourceIndexReadProgress();
-    return rows;
-  });
-}
-function releaseOffThreadReads(dbPath) {
-  releases.set(dbPath, (releases.get(dbPath) ?? 0) + 1);
-  for (const waiter of snapshotWaiters.filter((entry) => entry.store === dbPath)) {
-    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
-    clearTimeout(waiter.timer);
-    waiter.reject(new OffThreadReadBusyError);
-  }
-  const waiting = queues.get(dbPath);
-  if (waiting) {
-    queues.delete(dbPath);
-    const turn = turns.indexOf(dbPath);
-    if (turn >= 0)
-      turns.splice(turn, 1);
-    for (const job of waiting)
-      settle(job, { error: new OffThreadReadBusyError });
-  }
-  for (const reader of live().filter((reader) => reader.store === dbPath)) {
-    reader.releaseWhenIdle = true;
-    if (reader.job)
-      settle(reader.job, { error: new OffThreadReadBusyError });
-  }
-  dispatch();
-}
-function settle(job, outcome) {
-  if (job.settled)
-    return;
-  job.settled = true;
-  clock2.clearTimeout(job.timer);
-  if (job.running) {
-    job.running = false;
-    job.lane?.ended?.();
-  }
-  if (job.report) {
-    const now = clock2.now();
-    const sentAtMs = job.sentAtMs;
-    let ended;
-    if ("rows" in outcome)
-      ended = "rows";
-    else if (sentAtMs === undefined)
-      ended = "dropped_queued";
-    else if (outcome.error instanceof OffThreadReadBusyError)
-      ended = "past_deadline_running";
-    else
-      ended = "error";
-    job.report({
-      queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
-      runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
-      sqlMs: job.sqlMs,
-      cpuMs: job.cpuMs,
-      outcome: ended
-    });
-  }
-  if ("rows" in outcome)
-    job.resolve(outcome.rows);
-  else
-    job.reject(outcome.error);
-}
-function missedDeadline(job) {
-  if (job.settled)
-    return;
-  settle(job, { error: new OffThreadReadBusyError });
-  if (job.thread) {
-    return;
-  }
-  const waiting = queues.get(job.store);
-  const at = waiting?.indexOf(job) ?? -1;
-  if (waiting && at >= 0)
-    waiting.splice(at, 1);
-}
-function freeThread(store) {
-  return live().find((reader) => reader.store === store && reader.lane === "shared" && !reader.releaseWhenIdle && !reader.job && reader.pending.size === 0) ?? startThread(store);
-}
-function dispatch() {
-  for (const reader of live()) {
-    if (reader.releaseWhenIdle && busy(reader) === 0)
-      retire(reader, new OffThreadReadBusyError);
-  }
-  serveSnapshotWaiters();
-  for (let remaining = turns.length;remaining > 0; remaining -= 1) {
-    const store = turns.shift();
-    const waiting = queues.get(store);
-    while (waiting.length && clock2.now() >= waiting[0].deadlineAtMs) {
-      settle(waiting.shift(), { error: new OffThreadReadBusyError });
-    }
-    if (!waiting.length) {
-      queues.delete(store);
-      continue;
-    }
-    const reader = freeThread(store);
-    if (!reader) {
-      turns.push(store);
-      continue;
-    }
-    const job = waiting.shift();
-    if (waiting.length)
-      turns.push(store);
-    else
-      queues.delete(store);
-    job.thread = reader;
-    job.sentAtMs = clock2.now();
-    if (job.lane) {
-      job.lane();
-      job.lane.began?.();
-      job.running = true;
-    }
-    reader.job = job;
-    const { sql, params, mode, site } = job.read;
-    send(reader, { op: "query", path: job.store, sql, params, mode, ...benchSqlDir && { site: site ?? job.benchSite } }, job.report && ((ms, cpuMs) => {
-      job.sqlMs = ms;
-      job.cpuMs = cpuMs;
-    }), job).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
-      if (error instanceof OffThreadReadLostError && !job.settled && !job.retried) {
-        job.retried = true;
-        counters.retries += 1;
-        job.thread = undefined;
-        job.sentAtMs = undefined;
-        if (job.running) {
-          job.running = false;
-          job.lane?.ended?.();
-        }
-        const waiting = queues.get(job.store) ?? [];
-        waiting.unshift(job);
-        if (!queues.has(job.store)) {
-          queues.set(job.store, waiting);
-          turns.push(job.store);
-        }
-        return;
-      }
-      settle(job, { error: reader.retired ? new OffThreadReadBusyError : error });
-    }).finally(() => {
-      if (reader.job === job)
-        reader.job = undefined;
-      dispatch();
-    });
-  }
-}
-var READ_POOL_SIZE = 1, BACKGROUND_READS, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, lostReplyCheckMs = 2000, OffThreadReadLostError, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), benchSqlDir, WORKER_SOURCE = `
-import { Database } from 'bun:sqlite';
-import { statSync } from 'node:fs';
-/*ask-bench-init*/
-const snapshots = new Map();
-const connections = new Map();
-const openDatabases = new Map();
-// [request running, last request finished, native connections held], read by the request thread.
-let progress;
-let connectionTotal;
-const noteConnections = (delta) => {
-  if (connectionTotal) {
-    Atomics.add(progress, 2, delta);
-    Atomics.add(connectionTotal, 0, delta);
-  } else postMessage({ diagnostic: 'connections', delta });
-};
-const open = (path) => {
-  const started = performance.now();
-  const db = new Database(path, { readonly: true });
-  db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
-  /*olympus-mmap-pragma*/
-  openDatabases.set(db, undefined);
-  noteConnections(1);
-  postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
-  return db;
-};
-// Snapshot connections are kept for the next snapshot instead of closed:
-// Bun 1.3.x corrupts its heap when pool threads open and close SQLite
-// connections concurrently (olympus-ops#151), and a store's searches would
-// otherwise open one connection per snapshot.
-const IDLE_SNAPSHOT_CONNECTIONS = 8;
-const idleSnapshots = new Map();
-const close = (db) => { db.close(); openDatabases.delete(db); noteConnections(-1); };
-const snapshotConnection = (path) => {
-  const stat = statSync(path);
-  const file = stat.dev + ':' + stat.ino;
-  const idle = idleSnapshots.get(path) ?? [];
-  while (idle.length > 0) {
-    const held = idle.pop();
-    if (held.file === file) {
-      // A snapshot may have changed its connection's settings; the next starts from the defaults.
-      held.db.exec('PRAGMA busy_timeout = 10000');
-      return held;
-    }
-    try { close(held.db); } catch {}
-  }
-  return { db: open(path), file, path };
-};
-const connection = (path) => {
-  const stat = statSync(path);
-  const file = stat.dev + ':' + stat.ino;
-  const held = connections.get(path);
-  if (held && held.file === file) return held.db;
-  if (held) close(held.db);
-  const db = open(path);
-  connections.set(path, { db, file });
-  return db;
-};
-const statementTiming = (started, cpuStarted) => {
-  if (started === undefined) return {};
-  const ms = performance.now() - started;
-  /*ask-bench-after*/
-  if (cpuStarted === undefined) return { ms };
-  const cpu = process.threadCpuUsage(cpuStarted);
-  return { ms, cpuMs: (cpu.user + cpu.system) / 1000 };
-};
-self.onmessage = (event) => {
-  const { id, op, snapshot, path, sql, params, mode, perRead, measureCpu } = event.data;
-  if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
-  if (op === 'memory') {
-    const at = Date.now();
-    const { heapUsed, external, arrayBuffers } = process.memoryUsage();
-    let cacheBytes = 0;
-    let measured = 0;
-    if (event.data.sampleSqlite) for (const [db, cached] of openDatabases) {
-      let bytes = cached;
-      if (bytes === undefined) {
-        try {
-          using cacheSize = db.prepare('PRAGMA main.cache_size');
-          const size = cacheSize.values()[0][0];
-          if (size < 0) bytes = -size * 1024;
-          else {
-            using pageSize = db.prepare('PRAGMA main.page_size');
-            bytes = size * pageSize.values()[0][0];
-          }
-          openDatabases.set(db, bytes);
-        } catch { continue; } // Coverage in the reply shows a failed probe.
-      }
-      cacheBytes += bytes;
-      measured++;
-    }
-    postMessage({ diagnostic: 'memory', at, heapUsed, external, arrayBuffers, cacheBytes, measured });
-    return;
-  }
-  if (op === 'release') {
-    const held = connections.get(path);
-    connections.delete(path);
-    try { held && close(held.db); } catch {}
-    for (const idle of idleSnapshots.get(path) ?? []) { try { close(idle.db); } catch {} }
-    idleSnapshots.delete(path);
-    // A snapshot still open on the released store closes, rather than idles, when it ends.
-    for (const open of snapshots.values()) if (open.path === path) open.discard = true;
-    return;
-  }
-  if (progress) Atomics.store(progress, 0, id);
-  let started;
-  let cpuStarted;
-  try {
-    if (op === 'open') {
-      const held = snapshotConnection(path);
-      // perRead: no transaction is held between reads, so each read is its
-      // own short one and a checkpoint can pass it between reads.
-      if (!perRead) { try { held.db.exec('BEGIN'); } catch (error) { close(held.db); throw error; } }
-      held.perRead = perRead === true;
-      snapshots.set(snapshot, held);
-      postMessage({ id, ok: true, rows: null });
-    } else if (op === 'close') {
-      const held = snapshots.get(snapshot);
-      snapshots.delete(snapshot);
-      if (held) {
-        let reusable = false;
-        try { if (!held.perRead) held.db.exec('COMMIT'); reusable = true; } finally {
-          const idle = idleSnapshots.get(held.path) ?? [];
-          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else close(held.db);
-        }
-      }
-      postMessage({ id, ok: true, rows: null });
-    } else {
-      const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
-      if (!db) throw new Error('unknown snapshot');
-      cpuStarted = measureCpu ? process.threadCpuUsage?.() : undefined;
-      /*ask-bench-before*/
-      started = performance.now();
-      const query = db.query(sql);
-      const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows, ...statementTiming(started, cpuStarted) });
-    }
-  } catch (error) {
-    const timing = statementTiming(started, cpuStarted);
-    const frame = error instanceof Error && error.stack ? error.stack.split('\\n').map((line) => line.trim()).find((line) => line.startsWith('at ')) : undefined;
-    postMessage({ id, ok: false, ...timing, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
-  } finally {
-    // After the reply is posted: finished, so a reply missing past here was lost.
-    if (progress) { Atomics.store(progress, 1, id); Atomics.store(progress, 0, 0); }
-  }
-};
-`, threads, heldConnections = 0, connectionTotal, nextId = 1, counters, startedStores, storeOpens, queues, turns, lostReplyCheck, openSnapshots, snapshotWaiters, releases;
-var init_off_thread_reads = __esm(() => {
-  init_read_progress();
-  init_answer_latency_trace();
-  BACKGROUND_READS = { lane: "background" };
-  OffThreadReadLostError = class OffThreadReadLostError extends Error {
-    constructor() {
-      super("off-thread read reply was lost");
-      this.name = "OffThreadReadLostError";
-    }
-  };
-  OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
-    code = SOURCE_INDEX_LANE_BUSY_CODE;
-    constructor() {
-      super("The store is busy; try again.");
-      this.name = "OffThreadReadBusyError";
-    }
-  };
-  REAL_CLOCK = {
-    now: () => Date.now(),
-    setTimeout: (callback, ms) => setTimeout(callback, ms),
-    clearTimeout: (timer) => clearTimeout(timer)
-  };
-  clock2 = REAL_CLOCK;
-  threads = [];
-  counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0, lostReplies: 0, retries: 0, lateReplies: 0 };
-  startedStores = new Set;
-  storeOpens = new Map;
-  queues = new Map;
-  turns = [];
-  openSnapshots = new Map;
-  snapshotWaiters = [];
-  releases = new Map;
-});
-
 // connect-relay/shared/directory-tools.ts
 function isDirectoryTool(name) {
   return typeof name === "string" && DIRECTORY_TOOLS.has(name);
@@ -56404,7 +56862,7 @@ var init_source_item_read = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
 function privateQuestionKey(ref) {
   if (!ref || typeof ref !== "object")
     return;
@@ -56567,7 +57025,7 @@ function recordRemoteOperation(input) {
 }
 var storage3, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage10;
+  storage3 = new AsyncLocalStorage11;
   PROVIDER_APP_NAMES = {
     openai: "ChatGPT",
     anthropic: "Claude",
@@ -56644,7 +57102,7 @@ function applyParentLabels(candidates, corpusIds, resolver, scope) {
     parents = resolver(candidates.map((candidate, index) => ({
       corpusId: corpusIds[index] ?? "",
       sourceItem: candidate.provenance.sourceItem
-    })));
+    })), (id) => namesCorpusInScope(id, scope));
   } catch {
     return unchanged;
   }
@@ -58018,7 +58476,7 @@ var init_remote_result = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
 function currentAccess(authorized) {
   try {
     return authorized();
@@ -58040,7 +58498,7 @@ function currentRemoteReadAccess() {
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage11;
+  readAuthorization = new AsyncLocalStorage12;
 });
 
 // src/workers/connector-store/tier-placement.ts
@@ -58432,472 +58890,6 @@ var init_parent_context = __esm(() => {
   init_sniffer();
   init_tier_classifier();
   init_stored_names();
-});
-
-// src/workers/connector-store/child-visibility.ts
-import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
-function* visibilityRead(here, offThread) {
-  return yield { here, offThread };
-}
-function visibilityHere(steps) {
-  let next = steps.next();
-  while (!next.done) {
-    let result;
-    try {
-      result = next.value.here();
-    } catch (error) {
-      next = steps.throw(error);
-      continue;
-    }
-    next = steps.next(result);
-  }
-  return next.value;
-}
-async function visibilityOffThread(steps, lane, options = {}) {
-  const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
-  let changed = false;
-  let next = steps.next();
-  while (!next.done) {
-    let result;
-    try {
-      result = await next.value.offThread();
-    } catch (error) {
-      if (error instanceof VisibilityChangedError)
-        changed = true;
-      next = steps.throw(error);
-      continue;
-    }
-    next = steps.next(result);
-  }
-  if (changed && options.voidOnChange !== false || unchanged && !unchanged())
-    throw new VisibilityChangedError;
-  return next.value;
-}
-async function judgedAwaited(attempt, here) {
-  for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
-    try {
-      return await attempt();
-    } catch (error) {
-      if (!(error instanceof VisibilityChangedError))
-        throw error;
-    }
-  }
-  return here();
-}
-function visibilityAwaited(make, lane) {
-  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
-}
-function memoVisibilityItemsHere(owner, kind, marker, items, keyOf, read) {
-  const asked = new Map(items.map((item) => [keyOf(item), item]));
-  const before = marker();
-  const memo = askReadMemo(owner, kind, before);
-  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
-  const fresh = missing.length > 0 ? read(missing) : new Map;
-  if (memo)
-    for (const item of missing)
-      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
-  const out = new Map;
-  for (const key of asked.keys()) {
-    const row = memo ? memo.rows.get(key) : fresh.get(key);
-    if (row !== undefined)
-      out.set(key, row);
-  }
-  return out;
-}
-function askReadMemo(owner, kind, marker) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  let owners = askReads.get(trace);
-  if (!owners)
-    askReads.set(trace, owners = new Map);
-  let kinds = owners.get(owner);
-  if (!kinds)
-    owners.set(owner, kinds = new Map);
-  let memo = kinds.get(kind);
-  if (memo?.marker !== marker)
-    kinds.set(kind, memo = { marker, rows: new Map });
-  return memo;
-}
-async function memoVisibilityItems(owner, kind, marker, items, keyOf, read, writesHeld) {
-  const asked = new Map(items.map((item) => [keyOf(item), item]));
-  if (writesHeld?.())
-    throw new VisibilityChangedError;
-  const before = marker();
-  const memo = askReadMemo(owner, kind, before);
-  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
-  const fresh = missing.length > 0 ? await read(missing) : new Map;
-  if (marker() !== before || writesHeld?.())
-    throw new VisibilityChangedError;
-  if (memo)
-    for (const item of missing)
-      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
-  const out = new Map;
-  for (const key of asked.keys()) {
-    const row = memo ? memo.rows.get(key) : fresh.get(key);
-    if (row !== undefined)
-      out.set(key, row);
-  }
-  return out;
-}
-function itemStatesOffThread(ledger, identities) {
-  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS), () => ledger.writesHeld());
-}
-function* itemSecretSteps(ledger, identity) {
-  const key = tierLedgerIdentityKey(identity);
-  const rows = yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, (missing) => new Map(missing.map((item) => [tierLedgerIdentityKey(item), ledger.itemIsSecret(item)]))), () => memoVisibilityItems(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, async (missing) => {
-    const rows = new Map;
-    for (const item of missing)
-      rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item), ASK_LEDGER_READS));
-    return rows;
-  }, () => ledger.writesHeld()));
-  return rows.get(key) === true;
-}
-function visibilityRows(identities, read) {
-  return new Map(identities.map((identity) => {
-    const key = tierLedgerIdentityKey(identity);
-    return [key, { copies: read.copies.get(key), hiddenWithoutCopies: read.hiddenWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
-  }));
-}
-function visibilityFromRows(rows) {
-  const result = { copies: new Map, hiddenWithoutCopies: new Set, personalFirstWaiting: new Set };
-  for (const [key, row] of rows) {
-    if (row.copies)
-      result.copies.set(key, row.copies);
-    if (row.hiddenWithoutCopies)
-      result.hiddenWithoutCopies.add(key);
-    if (row.waiting)
-      result.personalFirstWaiting.add(key);
-  }
-  return result;
-}
-function ledgerVisibilityHere(ledger, identities, options = {}) {
-  return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
-}
-async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
-  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)), () => ledger.writesHeld());
-  return visibilityFromRows(rows);
-}
-async function ledgerReadOffThread(ledger, steps, options = {}) {
-  if (!offThreadReadsSupported(ledger.dbPath))
-    return ledger.readSteps(steps);
-  if (!releasing.has(ledger)) {
-    releasing.add(ledger);
-    ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
-  }
-  return withOffThreadSnapshot(ledger.dbPath, async (read) => {
-    let next = steps.next();
-    while (!next.done)
-      next = steps.next(await read(next.value));
-    return next.value;
-  }, options);
-}
-async function settleStaleEmbedHolds(ledger, pageSize = 500, turn = ingestionTurn) {
-  changeMemoryActivity("embedding_settlement", 1);
-  try {
-    let settled = 0;
-    let after;
-    do {
-      if (after)
-        await turn();
-      const page = await ledgerReadOffThread(ledger, ledger.staleEmbedHoldSteps(after, pageSize), { lane: "background" });
-      settled += ledger.settleStaleEmbedHoldRows(page.rowIds);
-      after = page.next;
-    } while (after);
-    return settled;
-  } finally {
-    changeMemoryActivity("embedding_settlement", -1);
-  }
-}
-function parentIdentityOf(child) {
-  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
-  if (cut <= 0)
-    return;
-  return {
-    provider: child.provider,
-    accountScope: child.accountScope,
-    providerItemId: child.providerItemId.slice(0, cut),
-    ...child.providerConversationId ? { providerConversationId: child.providerConversationId } : {}
-  };
-}
-function parentIdentityField(child) {
-  const identity = parentIdentityOf(child);
-  return identity ? { identity } : {};
-}
-function withSearchVisibilityStores(allowed, read) {
-  searchStores ??= new AsyncLocalStorage12;
-  return searchStores.run(allowed, read);
-}
-function searchVisibilityScoped() {
-  return searchStores?.getStore() !== undefined;
-}
-function childVisibilityStores(lane) {
-  const allowed = searchStores?.getStore();
-  const stores = lane.stores();
-  return allowed ? stores.filter(allowed) : stores;
-}
-function childVisibilityUnchanged(lane) {
-  const stores = childVisibilityStores(lane);
-  const ledger = lane.ledger();
-  const ledgerMarker = ledger?.changeMarker();
-  const markers = stores.map((store) => store.childVisibilityMarker?.());
-  return () => {
-    const current = childVisibilityStores(lane);
-    return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker && current.length === stores.length && current.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
-  };
-}
-function parentKey(parent) {
-  return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
-}
-function parentVerdicts(lane, parents) {
-  return visibilityHere(parentVerdictsSteps(lane, parents));
-}
-function* parentVerdictsSteps(lane, parents) {
-  const unique = new Map;
-  for (const parent of parents)
-    unique.set(parentKey(parent), parent);
-  try {
-    return yield* judge(lane, [...unique.values()], 0);
-  } catch {
-    return new Map([...unique.keys()].map((key) => [key, HIDDEN]));
-  }
-}
-function* judge(lane, parents, depth) {
-  const verdicts = new Map;
-  if (parents.length === 0)
-    return verdicts;
-  if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
-    for (const parent of parents)
-      verdicts.set(parentKey(parent), HIDDEN);
-    return verdicts;
-  }
-  const rows = new Map;
-  for (const store of childVisibilityStores(lane)) {
-    for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
-      const key = parentKey(row);
-      const list = rows.get(key) ?? [];
-      list.push({ ...row, corpusId: store.corpusId });
-      rows.set(key, list);
-    }
-  }
-  const ledger = lane.ledger();
-  const identities = new Map;
-  for (const list of rows.values()) {
-    for (const row of list)
-      identities.set(tierLedgerIdentityKey(row.identity), row.identity);
-  }
-  for (const parent of parents) {
-    if (!rows.has(parentKey(parent)) && parent.identity)
-      identities.set(tierLedgerIdentityKey(parent.identity), parent.identity);
-  }
-  const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
-  const climbing = new Map;
-  for (const parent of parents) {
-    const key = parentKey(parent);
-    const list = rows.get(key) ?? [];
-    const identity = list[0]?.identity;
-    const knownIdentity = identity ?? parent.identity;
-    const state = knownIdentity && states?.get(tierLedgerIdentityKey(knownIdentity));
-    if (state?.hidingIntent === "deletion") {
-      verdicts.set(key, HIDDEN);
-      continue;
-    }
-    const active = list.filter((row) => row.active);
-    const locations = list.filter((row) => row.secret);
-    if (locations.length > 0) {
-      const above = locations.find((row) => row.grandparentLocalItemId !== undefined);
-      if (above)
-        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
-      verdicts.set(key, { visible: true, gone: false });
-      continue;
-    }
-    if (!identity) {
-      if (state?.hidingIntent === "secret" || ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
-        verdicts.set(key, HIDDEN);
-      } else {
-        verdicts.set(key, { visible: false, gone: true });
-      }
-      continue;
-    }
-    let visible;
-    if (!ledger) {
-      visible = active.length > 0;
-    } else {
-      const copies = state?.copies ?? [];
-      visible = copies.length === 0 ? state?.record?.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
-      if (!visible && active.length > 0 && (state?.hidingIntent === "secret" || (yield* itemSecretSteps(ledger, identity))))
-        visible = true;
-    }
-    if (visible) {
-      const above = active.find((row) => row.grandparentLocalItemId !== undefined);
-      if (above)
-        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
-      verdicts.set(key, { visible: true, gone: false });
-    } else {
-      verdicts.set(key, { visible: false, gone: active.length === 0 });
-    }
-  }
-  if (climbing.size > 0) {
-    const above = yield* judge(lane, [...climbing.values()], depth + 1);
-    for (const [key, grandparent] of climbing) {
-      if (above.get(parentKey(grandparent))?.visible !== true)
-        verdicts.set(key, HIDDEN);
-    }
-  }
-  return verdicts;
-}
-function goneParents(lane, parents) {
-  const gone = new Set;
-  try {
-    const unique = new Map;
-    for (const parent of parents)
-      unique.set(parentKey(parent), parent);
-    const present = new Set;
-    for (const store of lane.stores()) {
-      for (const row of store.parentStandings([...unique.values()])) {
-        if (row.active || row.secret)
-          present.add(parentKey(row));
-      }
-    }
-    const candidates = [...unique].filter(([key]) => !present.has(key)).map(([, parent]) => parent);
-    if (candidates.length === 0)
-      return gone;
-    const verdicts = parentVerdicts(lane, candidates);
-    for (const parent of candidates) {
-      const key = parentKey(parent);
-      if (verdicts.get(key)?.gone === true)
-        gone.add(key);
-    }
-  } catch {}
-  return gone;
-}
-function itemVerdicts(lane, items) {
-  return visibilityHere(itemVerdictsSteps(lane, items));
-}
-function* itemVerdictsSteps(lane, items) {
-  const asked = new Map;
-  for (const item of items)
-    asked.set(tierLedgerIdentityKey(item), item);
-  const out = new Map;
-  if (asked.size === 0)
-    return out;
-  try {
-    const refs = new Map;
-    const refKeyOf = new Map;
-    for (const store of childVisibilityStores(lane)) {
-      for (const [key, row] of yield* visibilityRead(() => store.itemStandings([...asked.values()]), () => store.itemStandingsOffThread?.([...asked.values()]) ?? Promise.resolve(store.itemStandings([...asked.values()])))) {
-        const ref = {
-          provider: row.provider,
-          accountScope: row.accountScope,
-          parentLocalItemId: row.parentLocalItemId,
-          identity: row.identity
-        };
-        refs.set(parentKey(ref), ref);
-        refKeyOf.set(key, parentKey(ref));
-      }
-    }
-    for (const [key, item] of asked) {
-      if (refKeyOf.has(key))
-        continue;
-      const ref = {
-        provider: item.provider,
-        accountScope: item.accountScope,
-        parentLocalItemId: `identity:${key}`,
-        identity: {
-          provider: item.provider,
-          accountScope: item.accountScope,
-          providerItemId: item.providerItemId,
-          ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}
-        }
-      };
-      refs.set(parentKey(ref), ref);
-      refKeyOf.set(key, parentKey(ref));
-    }
-    const verdicts = yield* parentVerdictsSteps(lane, [...refs.values()]);
-    for (const [key, refKey] of refKeyOf)
-      out.set(key, verdicts.get(refKey) ?? HIDDEN);
-  } catch {
-    for (const key of asked.keys())
-      out.set(key, HIDDEN);
-  }
-  return out;
-}
-function hiddenByParentIdentity(lane, probes) {
-  const hidden = new Set;
-  const named = [];
-  for (const probe of probes) {
-    const parent = parentIdentityOf(probe);
-    if (parent)
-      named.push({ key: tierLedgerIdentityKey(probe), parent });
-  }
-  if (named.length === 0)
-    return hidden;
-  const verdicts = itemVerdicts(lane, named.map((child) => child.parent));
-  for (const child of named) {
-    if (verdicts.get(tierLedgerIdentityKey(child.parent))?.visible !== true)
-      hidden.add(child.key);
-  }
-  return hidden;
-}
-function hiddenProbesByParentIdentity(lane, probes) {
-  const hidden = hiddenByParentIdentity(lane, probes);
-  return new Set(probes.filter((probe) => hidden.has(tierLedgerIdentityKey(probe))));
-}
-function* childrenWithHiddenParentsSteps(lane, children) {
-  const hidden = new Set;
-  if (children.length === 0)
-    return hidden;
-  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
-  for (const child of children) {
-    if (verdicts.get(parentKey(child.parent))?.visible !== true)
-      hidden.add(child.key);
-  }
-  return hidden;
-}
-function* childLinksSteps(lane, probes) {
-  const found = new Map;
-  let remaining = probes;
-  for (const store of childVisibilityStores(lane)) {
-    if (remaining.length === 0)
-      break;
-    const asked = remaining;
-    for (const [key, parent] of yield* visibilityRead(() => store.parentLinksOf(asked), () => store.parentLinksOfOffThread?.(asked) ?? Promise.resolve(store.parentLinksOf(asked))))
-      found.set(key, parent);
-    remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
-  }
-  return [...found].map(([key, parent]) => ({ key, parent }));
-}
-function hiddenChildKeys(lane, probes) {
-  return visibilityHere(hiddenChildKeysSteps(lane, probes));
-}
-function* hiddenChildKeysSteps(lane, probes) {
-  if (probes.length === 0)
-    return new Set;
-  let links;
-  try {
-    links = yield* childLinksSteps(lane, probes);
-  } catch {
-    return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
-  }
-  return yield* childrenWithHiddenParentsSteps(lane, links);
-}
-var VisibilityChangedError, VISIBILITY_CHANGE_RETRIES = 3, askReads, ASK_LEDGER_READS, releasing, searchStores, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
-var init_child_visibility = __esm(() => {
-  init_tier_ledger();
-  init_memory_counters();
-  init_control_path_headroom();
-  init_answer_latency_trace();
-  init_off_thread_reads();
-  VisibilityChangedError = class VisibilityChangedError extends Error {
-    constructor() {
-      super("Visibility changed during read");
-      this.name = "VisibilityChangedError";
-    }
-  };
-  askReads = new WeakMap;
-  ASK_LEDGER_READS = { perRead: true };
-  releasing = new WeakSet;
-  HIDDEN = { visible: false, gone: false };
 });
 
 // src/workers/connector-store/loop-pass.ts
@@ -113524,7 +113516,6 @@ function createAnalystSourceIndexAnswerHandler(options) {
         evidenceByteBudget,
         ...options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {},
         ...activeLanes.visibilityGate ? { visibilityGate: activeLanes.visibilityGate } : {},
-        ...activeLanes.secretLocations ? { secretLocations: activeLanes.secretLocations } : {},
         ...activeLanes.classificationCoverage ? { classificationCoverage: activeLanes.classificationCoverage } : {},
         ...activeLanes.parentLabels ? { parentLabels: activeLanes.parentLabels } : {}
       });
@@ -113752,6 +113743,9 @@ function createAnalystSourceIndexAnswerHandler(options) {
       synthesizedGap
     } = routedAnalysis;
     const analystMs = Date.now() - analystStartedAt;
+    const deepRead = await triggerDeepRead(detail, analystResult, options.deepRead?.());
+    if (lanes.secretLocations)
+      detail = { ...detail, secretLocations: lanes.secretLocations(request.query?.trim() || question, pack.coverage.searchedCorpora) };
     const releaseGateStartedAt = Date.now();
     const { decision, facts, opsec, answer: releasedAnswer, unanswered: releasedNotes } = releaseAnalystAnswer({
       detail,
@@ -113774,7 +113768,6 @@ function createAnalystSourceIndexAnswerHandler(options) {
     const releaseGateMs = Date.now() - releaseGateStartedAt;
     recordSourceAnswerReleaseDecision(decision.decision);
     const released = decision.decision === "allow" || decision.decision === "redact";
-    const deepRead = await triggerDeepRead(detail, analystResult, options.deepRead?.());
     const deepReadNotice = released ? deepRead.notice : deepRead.notice ? remoteDeepReadFields({ deep_read: deepRead.job, deep_read_notice: deepRead.notice, deep_read_refused: deepRead.refused }, "").remoteNotice.trim() : undefined;
     const totalLatencyMs = Date.now() - startedAt;
     const phaseTimings = {
@@ -229906,9 +229899,8 @@ function createEmailSourceWorker(options = {}) {
           };
           const parentAllowed = (candidate) => plans.get(candidate.corpusId)?.store === candidate;
           const planFor = (id) => plans.get(id);
-          const withheldIdentifiers = (corpusId, identities, lane) => plans.get(corpusId)?.store.childrenWithWithheldSearchIdentifiers(identities, !personalNamesOnly, planFor, lane) ?? new Set(identities);
           const prepare = (corpusId, ids) => withSearchVisibilityStores(parentAllowed, async () => {
-            const searchConnectorStore = async ({ store, scope, readScopeSignature, searchRequest }) => {
+            const searchConnectorStore = async ({ store, scope, ancestorScope, readScopeSignature, searchRequest }) => {
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
               const searchEmbeddingProvider = connectorStoreEmbeddingProvider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? connectorStoreEmbeddingProvider : undefined;
               const retrievalMode = searchRequest.retrievalMode ?? (searchEmbeddingProvider && store.vectorLaneServable(searchEmbeddingProvider.modelId) ? "hybrid" : "keyword");
@@ -229954,7 +229946,7 @@ function createEmailSourceWorker(options = {}) {
                 result,
                 privateMatches,
                 readScopeSignature,
-                scope: { corpusId: store.corpusId, ...scope }
+                scope: { ...scope, store, ancestorScope }
               };
             };
             const runs = [];
@@ -229982,10 +229974,11 @@ function createEmailSourceWorker(options = {}) {
               }]);
             })));
             const tagged = [...taggedByHit.values()];
-            return () => withSearchVisibilityStores((candidate) => {
+            const currentGrant = (candidate) => {
               const plan = plans.get(candidate.corpusId);
               return plan?.store === candidate && JSON.stringify(connectorStoreReadScope?.(plan.store)) === plan.readScopeSignature;
-            }, () => {
+            };
+            return () => withSearchVisibilityStores(currentGrant, () => {
               const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
               const verdictScopes = new Map;
               const unreadCorpora = new Set;
@@ -230029,7 +230022,7 @@ function createEmailSourceWorker(options = {}) {
                 }
               }
               const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
-              const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope), withheldIdentifiers) ?? [] : [];
+              const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.filter((run) => currentGrant(run.store)).map((run) => run.scope), !personalNamesOnly) ?? [] : [];
               const pendingPrivacy = readPendingPrivacyItems(options);
               const released = runs.map((run) => deliverCorpusSearch([run.result]));
               const withheld = new Set(runs.flatMap((run) => [...run.privateMatches]));
@@ -230057,7 +230050,7 @@ function createEmailSourceWorker(options = {}) {
                 const governed = hits.filter((hit) => hit.corpusId === store.corpusId);
                 if (governed.length === 0)
                   continue;
-                const hidden = withheldIdentifiers(store.corpusId, governed.map((hit) => hit.sourceItem));
+                const hidden = store.childrenWithWithheldSearchIdentifiers(governed.map((hit) => hit.sourceItem), !personalNamesOnly, planFor);
                 for (const hit of governed) {
                   if (hidden.has(hit.sourceItem))
                     withheldChildIdentifiers.add(hit);
@@ -247002,12 +246995,14 @@ function createOwnerQuestionActivity(relay, now = Date.now) {
 function createSourceAnswerLanes(deps) {
   return (request, mode) => {
     deps.ownerQuestions?.retrieving();
+    const selected = sourceAnswerCorpusIds(request);
     const ancestorPlans = new Map;
     const ancestorPlanFor = (id) => {
+      if (selected && !selected.includes(id))
+        return;
       const plan = ancestorPlans.get(id);
       return plan && JSON.stringify(deps.readScope(plan.store)) === plan.readScopeSignature ? plan : undefined;
     };
-    const searchScopes = new Map;
     const requestEmbeddings = new Map;
     const sharedMemos = new Map;
     const memoized = (key, provider) => {
@@ -247039,11 +247034,9 @@ function createSourceAnswerLanes(deps) {
       const connectorStoreEmbedding = requestEmbedding(store);
       const connectorStoreAccount = scope.accountScope ?? mandatoryScope.accountScope ?? (request.account?.trim() || deps.accountScope(store));
       const filters = scope.filters || mandatoryScope.filters ? { ...scope.filters, ...mandatoryScope.filters } : undefined;
-      searchScopes.set(store.corpusId, {
-        ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
-        ...filters ? { filters } : {}
-      });
       ancestorPlans.set(store.corpusId, {
+        ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
+        ...filters ? { filters } : {},
         store,
         ancestorScope: searchAncestorScope(mandatoryScope.accountScope ?? connectorStoreAccount, scope.filters, mandatoryScope.filters),
         readScopeSignature: JSON.stringify(mandatoryScope)
@@ -247060,6 +247053,10 @@ function createSourceAnswerLanes(deps) {
         ...connectorStoreEmbedding ? { embeddingProvider: connectorStoreEmbedding } : {}
       });
     };
+    const secretScopes = (ids) => ids.flatMap((id) => {
+      const plan = ancestorPlanFor(id);
+      return plan ? [plan] : [];
+    });
     const stores = deps.stores();
     const registry = deps.registry();
     const mounted = new Set(stores.map((store) => store.corpusId));
@@ -247068,20 +247065,12 @@ function createSourceAnswerLanes(deps) {
       registry,
       unmountedCorpusIds: new Set(registry.list().map((corpus) => corpus.corpusId).filter((corpusId) => !mounted.has(corpusId))),
       ...deps.visibilityGate ? { visibilityGate: deps.visibilityGate } : {},
-      ...deps.parentLabels ? { parentLabels: deps.parentLabels } : {},
+      ...deps.parentLabels ? { parentLabels: deps.parentLabels(ancestorPlanFor) } : {},
       ...deps.secretLocations ? {
-        secretLocations: (query, searchedCorpora) => deps.secretLocations(query, searchedCorpora.flatMap((corpusId) => {
-          const scope = searchScopes.get(corpusId);
-          return scope ? [{ corpusId, ...scope }] : [];
-        }))
+        secretLocations: (query, searchedCorpora) => deps.secretLocations(query, secretScopes(searchedCorpora), mode === "built_in_only")
       } : {},
       ...deps.checkSecretLocations ? {
-        checkSecretLocations: (locations) => {
-          const selected = sourceAnswerCorpusIds(request);
-          const secure = new Set(deps.registry().list().filter((c) => c.trustDomain === "secure_local" && (!selected || selected.includes(c.corpusId))).map((c) => c.corpusId));
-          const scopes = [...searchScopes].flatMap(([corpusId, scope]) => secure.has(corpusId) ? [{ corpusId, ...scope }] : []);
-          return deps.checkSecretLocations(locations, scopes);
-        }
+        checkSecretLocations: (locations) => deps.checkSecretLocations(locations, secretScopes(deps.registry().list().map((c) => c.corpusId)), mode === "built_in_only")
       } : {},
       ...deps.heldItems ? {
         classificationCoverage: (searchedCorpora) => searchedCorpora.flatMap((corpusId) => {
@@ -248168,22 +248157,22 @@ var init_runtime3 = __esm(() => {
 });
 
 // src/workers/connector-store/parent-label.ts
-function createParentLabelResolver(sources) {
-  return (requests) => {
-    const stores = sources.stores();
+function createParentLabelResolver(sources, planFor) {
+  return (requests, corpusAllowed) => {
+    const stores = sources.stores().filter((store) => !corpusAllowed || corpusAllowed(store.corpusId));
     const scopes = sources.scopes();
     return requests.map((request) => {
       try {
-        return resolveOne(request, stores, scopes);
+        return resolveOne(request, stores, scopes, planFor);
       } catch {
         return;
       }
     });
   };
 }
-function resolveOne(request, stores, scopes) {
+function resolveOne(request, stores, scopes, planFor) {
   const scope = scopes.find((candidate) => candidate.corpusIds.has(request.corpusId));
-  const lane = stores.filter((store) => scope ? scope.corpusIds.has(store.corpusId) : store.corpusId === request.corpusId);
+  const lane = stores.filter((store) => (scope ? scope.corpusIds.has(store.corpusId) : store.corpusId === request.corpusId) && planFor(store.corpusId)?.store === store);
   if (lane.length === 0)
     return;
   const child = request.sourceItem;
@@ -248245,7 +248234,10 @@ function resolveOne(request, stores, scopes) {
     tier = decided && RANK[decided] > RANK[corpusTier] ? decided : corpusTier;
     namesStore = rowStore;
   }
-  if (!namesStore)
+  if (!namesStore || namesStore.childrenWithWithheldSearchIdentifiers([child], true, planFor, {
+    stores: () => lane,
+    ledger: () => scope?.ledger
+  }).has(child))
     return;
   const names = namesStore.itemNames(parent);
   if (!names)
@@ -248295,15 +248287,24 @@ function createUnreadableLocators(input) {
     return [
       ...all.filter((store) => store.corpusId === corpusId),
       ...all.filter((store) => store.corpusId !== corpusId && governed?.has(store.corpusId) === true)
-    ];
+    ].filter((store) => input.planFor(store.corpusId)?.store === store);
   };
   return {
     locate(ref) {
-      for (const store of storesFor(ref.corpusId)) {
+      const stores = storesFor(ref.corpusId);
+      for (const store of stores) {
+        const scope = input.planFor(store.corpusId)?.ancestorScope;
+        if (!scope || !store.itemMatchesSearchFilters(ref.localItemId, scope.accountScope, scope.filters))
+          continue;
         const found = store.localContent(ref.localItemId, 0, undefined, { withoutContent: true });
         if (found) {
+          const child = store.activeLocalItemRow(ref.localItemId)?.identity;
+          const withheld = !child || store.childrenWithWithheldSearchIdentifiers([child], true, input.planFor, {
+            stores: () => stores,
+            ledger: () => [...input.lanes()].find((lane) => lane.corpusIds.has(store.corpusId))?.ledger
+          }).has(child);
           return {
-            ...found.locatorUri ? { locatorUri: found.locatorUri } : {},
+            ...found.locatorUri && !withheld ? { locatorUri: found.locatorUri } : {},
             ...found.providerConversationId ? { providerConversationId: found.providerConversationId } : {}
           };
         }
@@ -248323,6 +248324,40 @@ function createUnreadableLocators(input) {
 var init_unreadable_locators = __esm(() => {
   init_parent_label2();
 });
+
+// src/workers/engine/runtime/tier-secret-locations.ts
+function createTierSecretLocations(lanes) {
+  function admitted(searched, includePrivateNames) {
+    return lanes.flatMap((lane) => {
+      const scope = searched.find((entry) => entry.store.corpusId === lane.secureCorpusId);
+      if (!scope || !lane.secrets)
+        return [];
+      const plans = searched.filter((entry) => lane.corpusIds.has(entry.store.corpusId));
+      return [{ index: lane.secrets, scope, parents: { plans, ledger: lane.ledger, includePrivateNames } }];
+    });
+  }
+  return {
+    search(query, searched, includePrivateNames) {
+      return admitted(searched, includePrivateNames).flatMap(({ index, scope, parents }) => {
+        try {
+          return index.search(query, scope, parents, 5);
+        } catch {
+          return [];
+        }
+      });
+    },
+    recheck(locations, searched, includePrivateNames) {
+      const scopes = admitted(searched, includePrivateNames);
+      return locations.every((location) => scopes.some(({ index, scope, parents }) => {
+        try {
+          return index.recheck(location, scope, parents);
+        } catch {
+          return false;
+        }
+      }));
+    }
+  };
+}
 
 // src/workers/engine/sqlite-wal-sampler.ts
 import { statSync as statSync51 } from "node:fs";
@@ -280440,42 +280475,7 @@ async function main() {
     tierLanes.push(lane);
     return lane;
   };
-  const tierSecretLocations = (query, searched, withholdLocators) => tierLanes.flatMap((lane) => {
-    const scope = searched.find((entry) => entry.corpusId === lane.secureCorpusId);
-    if (!scope || !lane.secrets)
-      return [];
-    const parents = {
-      ledger: () => lane.ledger,
-      stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
-    };
-    try {
-      return lane.secrets.search(query, {
-        ...scope.accountScope ? { accountScope: scope.accountScope } : {},
-        ...scope.filters ? { filters: scope.filters } : {}
-      }, {
-        limit: 5,
-        ...withholdLocators ? { withholdLocators: (ids) => withholdLocators(lane.secureCorpusId, ids, parents) } : {},
-        hide: (identities) => hiddenProbesByParentIdentity(parents, identities)
-      });
-    } catch {
-      return [];
-    }
-  });
-  const checkTierSecretLocations = (locations, searched) => locations.every((location) => tierLanes.some((lane) => {
-    const scope = searched.find((entry) => entry.corpusId === lane.secureCorpusId);
-    if (!scope || !lane.secrets)
-      return false;
-    try {
-      return lane.secrets.recheck(location, scope, {
-        hide: (identities) => hiddenProbesByParentIdentity({
-          ledger: () => lane.ledger,
-          stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
-        }, identities)
-      });
-    } catch {
-      return false;
-    }
-  }));
+  const tierSecretLocations = createTierSecretLocations(tierLanes);
   const pendingGovernance = createPendingGovernance(tierLanes, (store, ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }), (line) => console.warn(line));
   const tierScopes = () => (pendingGovernance.retry(), tierLanes).map((lane) => ({
     ledger: lane.ledger,
@@ -280501,10 +280501,17 @@ async function main() {
   };
   const pendingItemProtection = engineFront ? createPendingItemProtection() : undefined;
   const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities), pendingItemProtection);
-  const parentLabelResolver = createParentLabelResolver({
+  const ownerAncestorPlan = (id) => {
+    const store = connectorStores.find((store) => store.corpusId === id);
+    if (!store)
+      return;
+    const scope = connectorStoreReadScope(store);
+    return scope.allowed ? { store, ancestorScope: scope } : undefined;
+  };
+  const parentLabels = (planFor) => createParentLabelResolver({
     stores: () => connectorStores,
     scopes: tierScopes
-  });
+  }, planFor);
   const onDemandCorpusAbsent = (corpusId) => {
     for (const lane of tierLanes) {
       const store = lane.onDemand.find((candidate) => candidate.corpusId === corpusId);
@@ -282217,9 +282224,9 @@ ${key}`;
         accountScope: (store) => connectorStoreAccountScopes.get(store.corpusId),
         semanticRelevanceBar: (store) => store.corpusId === X_BOOKMARKS_CORPUS_ID ? xBookmarksSemanticRelevanceBar : undefined,
         visibilityGate: tierVisibilityGate,
-        parentLabels: parentLabelResolver,
-        secretLocations: tierSecretLocations,
-        checkSecretLocations: checkTierSecretLocations,
+        parentLabels,
+        secretLocations: tierSecretLocations.search,
+        checkSecretLocations: tierSecretLocations.recheck,
         heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusHeldCopyCount(corpusId) ?? 0
       })
     });
@@ -282247,7 +282254,8 @@ ${key}`;
   const unreadableLocators = createUnreadableLocators({
     stores: () => connectorStores,
     lanes: () => tierLanes,
-    parentLabels: parentLabelResolver
+    parentLabels: parentLabels(ownerAncestorPlan),
+    planFor: ownerAncestorPlan
   });
   const locateUnreadableItem = unreadableLocators.locate;
   const unreadableParentOfItem = unreadableLocators.parentOf;
@@ -283337,7 +283345,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
     ].filter((sibling) => sibling !== corpusId),
     sourceIndexVisibilityGate: tierVisibilityGate,
-    secretLocationSearch: tierSecretLocations,
+    secretLocationSearch: tierSecretLocations.search,
     connectorStoreEmbeddingProviders,
     connectorStoreAccountScopes,
     connectorStorePrincipals,

@@ -191,7 +191,7 @@ function createEvalRequestLanes(input: {
     answerScope: () => ({ kind: 'search' }),
     accountScope: (store) => input.storeScope?.(store)?.accountScope ?? input.scope.accountScope,
     visibilityGate: createTierVisibilityGate(scopes),
-    parentLabels: createParentLabelResolver({ stores, scopes }),
+    parentLabels: planFor => createParentLabelResolver({ stores, scopes }, planFor),
   });
   const onStoreSearch = input.onStoreSearch;
   if (!onStoreSearch) return lanes;
