@@ -283,7 +283,7 @@ function privateAnswerOptions(totalMemoryBytes) {
   const gb = Math.round(totalMemoryBytes / 1024 ** 3);
   return PRIVATE_ANSWER_OPTIONS.map((option) => option.id === "private-cloud-only" ? { ...option, recommended: true, reason: `This computer has ${gb} GB of memory; the local private model needs about 3.5 GB on top of Olympus.` } : { ...option, recommended: false });
 }
-var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS, LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES;
+var SENSITIVITY_TIER_LABELS, AGENT_ITEM_PRIVACY_UNAVAILABLE = "Changing one item's privacy from an AI app is not available in this version. Open the Olympus dashboard, Privacy, to find the item and make it Private.", PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS, LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES;
 var init_privacy_language = __esm(() => {
   SENSITIVITY_TIER_LABELS = {
     public: "Public",
@@ -66525,7 +66525,7 @@ var init_commands = __esm(() => {
   ENGINE_FORWARDED_ROUTES = {
     archive_remove: ["/dashboard/archive-import/remove"],
     delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
-    tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
+    tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/dashboard/privacy/judge-check"],
     people: ["/dashboard/people"],
     source_sync: ["/v1/source/index/sync", "/v1/source/index/x-bookmarks/content/recover"],
     storage_registry: ["/v1/cli/pairing-placement", "/v1/cli/pairing-account"],
@@ -168225,6 +168225,7 @@ async function revalidateStdioSourceAnswer(ctx, result) {
 }
 var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, ASK_ANONYMOUSLY_PARAMS, ARCHIVE_IMPORT_PARAMS, PRIVACY_ITEM_FIND_PARAMS, PRIVACY_ITEM_SET_PARAMS, operations, SOURCE_SPECIFIC_SEARCH_PARAMS;
 var init_operations = __esm(() => {
+  init_privacy_language();
   init_release_manifest();
   init_app_release_agent();
   init_doctor();
@@ -168919,12 +168920,7 @@ var init_operations = __esm(() => {
     },
     {
       name: "privacy_item_find",
-      description: [
-        "Find one of the user's items (an email, file or message) to check its privacy label, by words from its title, sender or file name, or list the items Olympus sorted most recently (recent: true).",
-        "Each item has item_id, source, title, sender, location, tier (Personal or Private: its label), decided_by (override = the user set it by hand; sniffer or move = the privacy judge), owner_set, and judge_reason (the judge's category and confidence) where the judge decided it.",
-        "Items whose names are Private, and Secret items, are never listed here.",
-        "Use it when the user says an item should be private, then call privacy_item_set."
-      ].join(" "),
+      description: AGENT_ITEM_PRIVACY_UNAVAILABLE,
       params: PRIVACY_ITEM_FIND_PARAMS,
       mutating: false,
       nativeExposure: "sourceIndexEnabledOnly",
@@ -168948,12 +168944,7 @@ var init_operations = __esm(() => {
     },
     {
       name: "privacy_item_set",
-      description: [
-        'Make one item Private when the user says it should be ("that email should be private"). Only raising is possible here: it adds protection, and the item is hidden from Personal search at once.',
-        "It is the user's decision on that one item, never a rule for its sender, chat or folder.",
-        "Making an item Personal, or putting it back to the judge's label, is done only by the user on the Olympus dashboard on their computer (Privacy): tell them so, and never retry another way.",
-        "Returns {ok: true, item, applies} or {ok: false, code, message}: tell the user the message in those words."
-      ].join(" "),
+      description: AGENT_ITEM_PRIVACY_UNAVAILABLE,
       params: PRIVACY_ITEM_SET_PARAMS,
       mutating: true,
       nativeExposure: "sourceIndexEnabledOnly",
@@ -227602,27 +227593,12 @@ function createEmailSourceWorker(options = {}) {
           throw new EmailSourceWorkerError(404, "not_found", "No such archive route.");
         }
         if (request.method === "POST" && url.pathname.startsWith(`${basePath}/privacy-item/`)) {
-          if (!ownerTierItems) {
-            throw new EmailSourceWorkerError(501, "privacy_items_not_supported", "Changing one item's privacy is not set up in this engine.");
-          }
-          const record = await parseObjectBody(request);
           const action = url.pathname.slice(`${basePath}/privacy-item/`.length);
-          if (action === "find") {
-            const query = asOptionalString(record.query);
-            const recent = asOptionalBoolean(record.recent);
-            const limit = asOptionalNumber(record.limit, "limit");
-            return json(ownerTierItems.find({
-              ...query !== undefined ? { query } : {},
-              ...recent !== undefined ? { recent } : {},
-              ...limit !== undefined ? { limit } : {},
-              personalNamesOnly: true
-            }));
-          }
+          const unavailable = { unavailable: true, message: AGENT_ITEM_PRIVACY_UNAVAILABLE };
+          if (action === "find")
+            return json(unavailable);
           if (action === "raise") {
-            const itemId = asOptionalString(record.item_id);
-            if (!itemId)
-              throw new EmailSourceWorkerError(400, "invalid_request", "item_id is required.");
-            return json(ownerTierItems.set({ itemId, choice: "private", allowLower: false }));
+            return json(unavailable);
           }
           throw new EmailSourceWorkerError(404, "not_found", "No such privacy item route.");
         }

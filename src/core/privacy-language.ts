@@ -6,6 +6,8 @@ export const SENSITIVITY_TIER_LABELS = {
   secrets: 'Secrets',
 } as const;
 
+export const AGENT_ITEM_PRIVACY_UNAVAILABLE = "Changing one item's privacy from an AI app is not available in this version. Open the Olympus dashboard, Privacy, to find the item and make it Private.";
+
 export const PRIVACY_PRESET_LABELS = {
   'local-first': 'Local models with Venice fallback',
   'local-only': 'Local models',

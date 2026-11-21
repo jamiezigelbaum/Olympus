@@ -759,7 +759,7 @@ var ENGINE_JUDGE_NOW_MAX_BUDGET_MS = RELEASE_CHUNK_JUDGE_BUDGET_MS;
 var ENGINE_FORWARDED_ROUTES = {
   archive_remove: ["/dashboard/archive-import/remove"],
   delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
-  tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
+  tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/dashboard/privacy/judge-check"],
   people: ["/dashboard/people"],
   source_sync: ["/v1/source/index/sync", "/v1/source/index/x-bookmarks/content/recover"],
   storage_registry: ["/v1/cli/pairing-placement", "/v1/cli/pairing-account"],

@@ -24,7 +24,7 @@ import {
 } from '../../core/google-own-app.ts';
 import { privateAnswerMode } from '../../core/first-run-privacy.ts';
 import { parseSettingsProposalInput, parseProposalFrom, SettingsProposalError } from '../../core/settings-proposal.ts';
-import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
+import { AGENT_ITEM_PRIVACY_UNAVAILABLE, PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { createDashboardMessagingService, dashboardMessagingFailure } from './dashboard/dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { type AgentAnswerReceipt, recordAgentAnswerReceipt, agentAnswerReceipt } from '../../core/app-release-agent.ts';
@@ -637,31 +637,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');
         }
 
-        // An agent's side of the one-item privacy change (tier-owner-items.ts):
-        // find items whose names are Personal, and raise one to Private. It
-        // never lowers: Personal and the judge's label are the dashboard's
-        // local routes below.
         if (request.method === 'POST' && url.pathname.startsWith(`${basePath}/privacy-item/`)) {
-          if (!ownerTierItems) {
-            throw new EmailSourceWorkerError(501, 'privacy_items_not_supported', 'Changing one item\'s privacy is not set up in this engine.');
-          }
-          const record = await parseObjectBody(request);
           const action = url.pathname.slice(`${basePath}/privacy-item/`.length);
-          if (action === 'find') {
-            const query = asOptionalString(record.query);
-            const recent = asOptionalBoolean(record.recent);
-            const limit = asOptionalNumber(record.limit, 'limit');
-            return json(ownerTierItems.find({
-              ...(query !== undefined ? { query } : {}),
-              ...(recent !== undefined ? { recent } : {}),
-              ...(limit !== undefined ? { limit } : {}),
-              personalNamesOnly: true,
-            }));
-          }
+          const unavailable = { unavailable: true, message: AGENT_ITEM_PRIVACY_UNAVAILABLE };
+          if (action === 'find') return json(unavailable);
           if (action === 'raise') {
-            const itemId = asOptionalString(record.item_id);
-            if (!itemId) throw new EmailSourceWorkerError(400, 'invalid_request', 'item_id is required.');
-            return json(ownerTierItems.set({ itemId, choice: 'private', allowLower: false }));
+            return json(unavailable);
           }
           throw new EmailSourceWorkerError(404, 'not_found', 'No such privacy item route.');
         }
