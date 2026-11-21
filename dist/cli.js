@@ -48520,16 +48520,21 @@ function* childLinksSteps(lane, probes) {
 function hiddenChildKeys(lane, probes) {
   return visibilityHere(hiddenChildKeysSteps(lane, probes));
 }
-function* hiddenChildKeysSteps(lane, probes) {
+function* hiddenChildKeysSteps(lane, probes, excludedByScope) {
   if (probes.length === 0)
     return new Set;
   let links;
   try {
     links = yield* childLinksSteps(lane, probes);
+    const hidden = yield* childrenWithHiddenParentsSteps(lane, links);
+    if (excludedByScope) {
+      for (const key of yield* excludedByScope(probes, links))
+        hidden.add(key);
+    }
+    return hidden;
   } catch {
     return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
   }
-  return yield* childrenWithHiddenParentsSteps(lane, links);
 }
 var VisibilityChangedError, VISIBILITY_CHANGE_RETRIES = 3, askReads, ASK_LEDGER_READS, releasing, searchStores, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
@@ -48570,11 +48575,13 @@ function screenParents(locations, parents) {
   }));
   const lane = { ledger: () => parents.ledger, stores: () => parents.plans.map((plan) => plan.store) };
   try {
+    const planFor = (id) => parents.plans.find((plan) => plan.store.corpusId === id);
+    const excluded = first.store.childrenOutsideAncestorScope(identities, planFor, lane);
     const hidden = hiddenProbesByParentIdentity(lane, identities);
-    const withheld = first.store.childrenWithWithheldSearchIdentifiers(identities, parents.includePrivateNames, (id) => parents.plans.find((plan) => plan.store.corpusId === id), lane);
+    const withheld = first.store.childrenWithWithheldSearchIdentifiers(identities, parents.includePrivateNames, planFor, lane);
     return locations.flatMap((location, index) => {
       const identity = identities[index];
-      if (hidden.has(identity))
+      if (hidden.has(identity) || excluded.has(tierLedgerIdentityKey(identity)))
         return [];
       return [withheld.has(identity) ? { ...location, locator: null } : location];
     });
@@ -48841,6 +48848,7 @@ var init_secret_locations = __esm(() => {
   init_sqlite_store();
   init_store_write_guard();
   init_child_visibility();
+  init_tier_ledger();
   init_engine();
   init_tier_classifier();
   init_tier_ledger_path();
@@ -68380,6 +68388,7 @@ var init_router = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
+import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
 import { createHash as createHash34, randomUUID as randomUUID12 } from "node:crypto";
 import { closeSync as closeSync17, existsSync as existsSync39, fsyncSync as fsyncSync3, lstatSync as lstatSync22, mkdirSync as mkdirSync24, openSync as openSync17, statSync as statSync18, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
@@ -69634,6 +69643,10 @@ function defineConnectorCorpus(options) {
     description: "Shared connector-store corpus: generic local index over a Contract 1 SourceConnector."
   });
 }
+function ancestorPlansForStore(store, accountScope, filters) {
+  const plan = { store, ancestorScope: searchAncestorScope(accountScope, filters) };
+  return (id) => id === store.corpusId ? plan : undefined;
+}
 function searchAncestorScope(accountScope, filters, owner) {
   const { authoredAfter, authoredBefore, conversationId, senderId, senderLabel, senderIdentities, searchTextExactLines, ...admission } = filters ?? {};
   return { ...accountScope ? { accountScope } : {}, filters: { ...admission, ...owner } };
@@ -69719,19 +69732,19 @@ async function withVectorMetadataFallbacks(store, request, rows, accountScope, f
 function createConnectorStoreCorpusAdapter(options) {
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
-  const ownAncestorPlan = { store, ancestorScope: searchAncestorScope(options.accountScope, filters) };
+  const planFor = options.ancestorPlanFor ?? ancestorPlansForStore(store, options.accountScope, filters);
   const scopedSearch = (search) => async (input) => {
     assertConnectorStoreCorpusRequest(store, input);
     const publish = input.onPartialResponse;
     const request = {
       ...input,
-      ancestorPlanFor: options.ancestorPlanFor ?? ((id) => id === store.corpusId ? ownAncestorPlan : undefined),
+      ancestorPlanFor: planFor,
       ...usesSearchGrants(filters) ? { startGrantEpoch: store.onDemandGrantEpoch() } : {},
       ...publish && !input[DEFER_SEARCH_DELIVERY] ? {
         onPartialResponse: (response, lane) => publish(deliverCorpusSearch([response], input.maxResults), lane)
       } : {}
     };
-    const result = await search(request);
+    const result = await readAncestorPlans.run(options.ownerPlanFor ?? planFor, () => search(request));
     return input[DEFER_SEARCH_DELIVERY] ? result : deliverCorpusSearch([result]);
   };
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
@@ -69920,7 +69933,7 @@ function createConnectorStoreCorpusAdapter(options) {
     return response;
   });
   expanded.metadataMatches = scopedSearch((request) => withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store));
-  expanded.selectedItemServable = (sourceItem, layer) => store.selectedItemServable(sourceItem, options.accountScope, filters, layer);
+  expanded.selectedItemServable = (sourceItem, layer) => readAncestorPlans.run(options.ownerPlanFor ?? planFor, () => store.selectedItemServable(sourceItem, options.accountScope, filters, layer));
   expanded.prepareKeywords = async (query) => {
     const status = { incomplete: false };
     await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: keywordPrepareWaitMs(), status });
@@ -70472,7 +70485,7 @@ function createConnectorStoreContentProvider(options) {
       return;
     }
   };
-  return {
+  const provider = {
     contentServable(request) {
       if (request.trustDomain !== store.trustDomain)
         return false;
@@ -70568,6 +70581,12 @@ function createConnectorStoreContentProvider(options) {
       }, store);
       return releaseGranted && !releaseGranted() ? undefined : result;
     }
+  };
+  const planFor = options.ancestorPlanFor ?? ancestorPlansForStore(store, options.accountScope, options.metadataFilters ?? options.filters);
+  return {
+    contentServable: (request) => readAncestorPlans.run(planFor, () => provider.contentServable(request)),
+    conversationNeighbours: (request) => readAncestorPlans.run(planFor, () => provider.conversationNeighbours(request)),
+    fetchLocalContent: (request) => readAncestorPlans.run(planFor, () => provider.fetchLocalContent(request))
   };
 }
 function connectorStoreCoverageGaps(content, metadataOnlyRuleId) {
@@ -71390,12 +71409,16 @@ function identityAmbiguous(identity, counts) {
 function identityRowsSql(extraSql) {
   return `
       SELECT CAST(j.key AS INTEGER) AS idx, i.item_pk, i.local_item_id, i.title, i.source_version
-      FROM json_each(?) j
+      ${identityRowsFromSql(extraSql, false)}
+      ORDER BY j.key
+    `;
+}
+function identityRowsFromSql(extraSql, includeSecretPresence) {
+  return `FROM json_each(?) j
       CROSS JOIN items i
       WHERE i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
         AND i.normalized_conversation = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
-        AND i.tombstoned = 0 ${extraSql}
-      ORDER BY j.key
+        AND ${includeSecretPresence ? "(i.tombstoned = 0 OR i.trust_tier = 'S5')" : "i.tombstoned = 0"} ${extraSql}
     `;
 }
 function observedOwnerPredicate(exact, prefix, previous) {
@@ -72745,7 +72768,7 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, LEGACY_CAPPED_TAGS, RECOVERABLE_LABEL_SET, KNOWN_LABEL_SET, STORED_LABEL_FIELDS, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };", admitRecencyIndexBuild, recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECENCY_INDEX_BUSY_RETRY_MS = 2000, RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, grantNotifications, ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, LEGACY_CAPPED_TAGS, RECOVERABLE_LABEL_SET, KNOWN_LABEL_SET, STORED_LABEL_FIELDS, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };", admitRecencyIndexBuild, recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECENCY_INDEX_BUSY_RETRY_MS = 2000, RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, grantNotifications, ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250, LocalConnectorStore, readAncestorPlans, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
   SELECT
     SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
     SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
@@ -73720,10 +73743,10 @@ var init_local_index = __esm(() => {
       }
       return hidden;
     }
-    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed) {
-      return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable, copiesAllowed));
+    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed, planFor = readAncestorPlans.getStore()) {
+      return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable, copiesAllowed, planFor));
     }
-    *tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed) {
+    *tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed, planFor = readAncestorPlans.getStore()) {
       rows = rows.filter((row) => layerOf(row) !== "content" || !this.onDemandContentHeld(identityOf(row)));
       if (rows.length === 0)
         return [];
@@ -73746,7 +73769,7 @@ var init_local_index = __esm(() => {
         const here = visibility.copies.get(key);
         return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
       }) : [...rows];
-      const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf));
+      const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf), planFor ? (identities, links) => this.excludedAncestorKeys(identities, planFor, { kind: "scope", links }) : undefined);
       return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
     }
     tierHiddenItemPks(options = {}) {
@@ -74696,6 +74719,9 @@ var init_local_index = __esm(() => {
       const sender = row.sender_label?.trim();
       return { ...title ? { title } : {}, ...path ? { path } : {}, ...sender ? { sender } : {} };
     }
+    scopedAncestorPlans(accountScope, filters) {
+      return readAncestorPlans.getStore() ?? (accountScope || filters ? ancestorPlansForStore(this, accountScope, filters) : undefined);
+    }
     useChildVisibility(lane) {
       this.childLane = lane;
     }
@@ -74707,13 +74733,16 @@ var init_local_index = __esm(() => {
     }
     childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, planFor, locationLane) {
       try {
-        const keys = this.withheldSearchIdentifierKeys(identities, includePrivateNames, planFor, locationLane);
+        const keys = visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: "names", includePrivateNames }, locationLane));
         return new Set(identities.filter((identity) => keys.has(tierLedgerIdentityKey(identity))));
       } catch {
         return new Set(identities);
       }
     }
-    withheldSearchIdentifierKeys(identities, includePrivateNames, planFor, locationLane) {
+    childrenOutsideAncestorScope(identities, planFor, lane) {
+      return visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: "scope" }, lane));
+    }
+    *excludedAncestorKeys(identities, planFor, check, locationLane) {
       const withheld = new Set;
       const lookupKey = (parent) => ("parentLocalItemId" in parent) ? `local:${parentKey(parent)}` : `provider:${tierLedgerIdentityKey(parent)}`;
       let pending = new Map;
@@ -74727,14 +74756,19 @@ var init_local_index = __esm(() => {
         pending.set(key, entry);
       };
       const lane = locationLane ?? this.childVisibilityLane();
-      const admittedPlans = () => childVisibilityStores(lane).flatMap((store) => {
+      const admittedPlans = () => (check.kind === "scope" ? lane.stores() : childVisibilityStores(lane)).flatMap((store) => {
         const plan = planFor(store.corpusId);
         return plan?.store === store ? [plan] : [];
       });
       const locationPlans = locationLane ? admittedPlans() : undefined;
-      for (const store of locationPlans?.map((plan) => plan.store) ?? [this]) {
-        for (const [child, parent] of store.parentLinksOf(identities))
-          queue(parent, [child]);
+      if (check.kind === "scope" && check.links) {
+        for (const { key, parent } of check.links)
+          queue(parent, [key]);
+      } else {
+        for (const store of locationPlans?.map((plan) => plan.store) ?? [this]) {
+          for (const [child, parent] of store.parentLinksOf(identities))
+            queue(parent, [child]);
+        }
       }
       for (const identity of identities)
         queue(parentIdentityOf(identity), [tierLedgerIdentityKey(identity)]);
@@ -74756,32 +74790,58 @@ var init_local_index = __esm(() => {
           else
             encoded.push(parent);
         }
-        const rows = plans.flatMap(({ store, ancestorScope }) => {
-          const active = [
-            ...store.parentStandings(linked).map((row) => ({ ...row, key: lookupKey(row) })),
-            ...Array.from(store.itemStandings(encoded).values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
-          ].filter((row) => row.active);
+        const rows = [];
+        for (const { store, ancestorScope } of plans) {
+          const byLink = yield* visibilityRead(() => store.parentStandings(linked), () => store.parentStandingsOffThread(linked));
+          const byId = yield* visibilityRead(() => store.itemStandings(encoded), () => store.itemStandingsOffThread(encoded));
+          const present = [
+            ...byLink.map((row) => ({ ...row, key: lookupKey(row) })),
+            ...Array.from(byId.values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
+          ].filter((row) => row.active || check.kind === "scope" && row.secret);
+          if (!present.length)
+            continue;
           const account = normalizeOptionalAccountScope(ancestorScope.accountScope);
           const predicate = connectorStoreFilterSql(ancestorScope.filters);
-          const matches = predicate.sql ? new Set(store.itemRowsForIdentities(active.map((row) => row.identity), (id) => normalizeConversationId(id.providerConversationId), predicate).map((row) => row.idx)) : undefined;
-          return active.map((row, index) => ({
+          let matches;
+          if (predicate.sql) {
+            const keys = present.map(({ identity }) => [
+              identity.provider,
+              identity.accountScope,
+              normalizeConversationId(identity.providerConversationId),
+              identity.providerItemId
+            ]);
+            const matched = yield* store.visibilityStoreRead({
+              mode: "all",
+              sql: `SELECT CAST(j.key AS INTEGER) AS idx ${identityRowsFromSql(predicate.sql, check.kind === "scope")}`,
+              params: [JSON.stringify(keys), ...predicate.params]
+            });
+            matches = new Set(matched.map((row) => row.idx));
+          }
+          rows.push(...present.map((row, index) => ({
             ...row,
             corpusId: store.corpusId,
             inScope: (!account || row.accountScope === account) && (!matches || matches.has(index))
-          }));
-        });
-        const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map((row) => ({
+          })));
+        }
+        const identities = rows.map((row) => row.identity);
+        const states = check.kind === "scope" && ledger ? yield* visibilityRead(() => ledger.itemStatesForMany(identities), () => itemStatesOffThread(ledger, identities)) : undefined;
+        const verdicts = check.kind === "names" ? visibilityHere(effectiveItemVerdicts(() => scopes, rows.map((row) => ({
           ...row.identity,
           corpusId: row.corpusId,
           privateAtAnswer: false,
           layer: "names"
-        }))));
+        })))) : undefined;
         const allowed = new Map;
         const denied = new Set;
         rows.forEach((row, index) => {
           const key = row.key;
-          const verdict = verdicts[index];
-          const canRelease = row.inScope && !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
+          const state = states?.get(tierLedgerIdentityKey(row.identity));
+          if (state && !row.secret && (state.copies.length || state.record?.routed) && !state.copies.some((copy) => copy.corpusId === row.corpusId && copy.state === "current"))
+            return;
+          const verdict = verdicts?.[index];
+          const includePrivateNames = check.kind === "names" && check.includePrivateNames;
+          const namesAllowed = verdict && !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
+          const canRelease = row.inScope && (check.kind === "scope" ? state?.hidingIntent !== "deletion" : namesAllowed);
           const previous = allowed.get(key);
           if (!canRelease || previous && (previous.grandparentLocalItemId !== row.grandparentLocalItemId || tierLedgerIdentityKey(previous.identity) !== tierLedgerIdentityKey(row.identity))) {
             denied.add(key);
@@ -81047,7 +81107,7 @@ ${parentKey(ref)}`, { ref, origin });
       const excludedItemPks = this.vectorScanExcludedItemPks();
       if (excludedItemPks)
         pageOptions.excludedItemPks = excludedItemPks;
-      const eligiblePks = input.searchEligibility ? (pks, onDemandReadsTablePresent) => this.visibleVectorItemPks(pks, selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility) : undefined;
+      const eligiblePks = input.searchEligibility || readAncestorPlans.getStore() || filters ? (pks, onDemandReadsTablePresent) => this.visibleVectorItemPks(pks, selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility) : undefined;
       const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks);
       if ("skippedReason" in scanned)
         return { rows: [], skippedReason: scanned.skippedReason };
@@ -81294,7 +81354,7 @@ ${parentKey(ref)}`, { ref, origin });
           providerItemId: row.provider_item_id,
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
         });
-        const current = this.tierVisibleRows(rows, identityOf, () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold));
+        const current = this.tierVisibleRows(rows, identityOf, () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold), this.scopedAncestorPlans(accountScope, filters));
         const eligible = searchEligibility?.(current.map((row) => ({ sourceItem: identityOf(row), trustTier: trustTierFromRow(row.trust_tier) })));
         current.forEach((row, index) => {
           if (!eligible || eligible[index])
@@ -81585,7 +81645,7 @@ ${parentKey(ref)}`, { ref, origin });
           accountScope: row.account_scope,
           providerItemId: row.provider_item_id,
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-        }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
+        }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content", false, undefined, this.scopedAncestorPlans(accountScope, filters));
         const eligible = ftsOptions.searchEligibility?.(current.map((row) => ({
           sourceItem: sourceItemFromRow(row),
           trustTier: trustTierFromRow(row.trust_tier)
@@ -81792,7 +81852,7 @@ ${parentKey(ref)}`, { ref, origin });
     }
     recentItems(maxResults, accountScope, filters) {
       const read = this.recentItemsRead(maxResults, accountScope, filters);
-      return this.visibleRecentRows(this.db.query(read.sql).all(...read.params));
+      return this.visibleRecentRows(this.db.query(read.sql).all(...read.params), accountScope, filters);
     }
     async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs, onCutShort) {
       if (!offThreadReadsSupported(this.dbPath))
@@ -81810,7 +81870,7 @@ ${parentKey(ref)}`, { ref, origin });
         onCutShort?.();
         return [];
       }
-      return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows), this.childVisibilityLane())).map((row) => searchRowFromItemRow(row));
+      return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows, accountScope, filters), this.childVisibilityLane())).map((row) => searchRowFromItemRow(row));
     }
     recentItemsRead(maxResults, accountScope, filters) {
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -81928,19 +81988,19 @@ ${parentKey(ref)}`, { ref, origin });
         if (after[index])
           ordered.push(after[index]);
       }
-      return this.visibleRecentRows(ordered);
+      return this.visibleRecentRows(ordered, accountScope, filters);
     }
     conversationIndexReady;
-    visibleRecentRows(rows) {
-      return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
+    visibleRecentRows(rows, accountScope, filters) {
+      return visibilityHere(this.visibleRecentRowsSteps(rows, accountScope, filters)).map((row) => searchRowFromItemRow(row));
     }
-    visibleRecentRowsSteps(rows) {
+    visibleRecentRowsSteps(rows, accountScope, filters) {
       return this.tierVisibleRowsSteps(rows, (row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
         providerItemId: row.provider_item_id,
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-      }), () => "content");
+      }), () => "content", false, undefined, this.scopedAncestorPlans(accountScope, filters));
     }
     privateTierRowWindow(options) {
       const after = Math.max(0, Math.floor(options.after ?? 0));
@@ -82039,6 +82099,9 @@ ${parentKey(ref)}`, { ref, origin });
           return "not_in_scope";
         const scope = options.scope?.();
         if (scope?.allowed === false || !this.itemMatchesSearchFilters(localItemId, scope?.accountScope, scope?.filters))
+          return "not_in_scope";
+        const planFor = options.ancestorPlanFor ?? ancestorPlansForStore(this, scope?.accountScope, scope?.filters);
+        if (this.childrenOutsideAncestorScope([identity], planFor).size)
           return "not_in_scope";
         const now = this.activeLocalItemRow(localItemId);
         if (!now || tierLedgerIdentityKey(now.identity) !== tierLedgerIdentityKey(identity))
@@ -82914,6 +82977,7 @@ ${parentKey(ref)}`, { ref, origin });
       return row ? syncRunFromRow(row) : undefined;
     }
   };
+  readAncestorPlans = new AsyncLocalStorage14;
   lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_COPY_ITEM_COLUMNS = [
     "provider",
@@ -112831,7 +112895,8 @@ function selectedItemsToRoutedSlice(input) {
       skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: skipReason });
       continue;
     }
-    if (input.requireScopedSelection && input.adapters[corpus.corpusId]?.selectedItemServable?.(selected.sourceItem, "metadata") !== true) {
+    const servable = input.adapters[corpus.corpusId]?.selectedItemServable;
+    if (input.excludedCorpusIds?.has(corpus.corpusId) || (servable ? !servable(selected.sourceItem, "metadata") : input.requireScopedSelection)) {
       continue;
     }
     searched.add(corpus.corpusId);
@@ -113498,6 +113563,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
         ...build,
         ...request.query?.trim() ? { searchQuery: request.query.trim() } : {},
         ...request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {},
+        ...activeLanes.excludedCorpusIds ? { excludedCorpusIds: activeLanes.excludedCorpusIds } : {},
         requireScopedSelection: Boolean(request.approved_scope_key),
         ...options.queryPlanner ? { queryPlanner: options.queryPlanner } : {},
         ...reranker ? { reranker } : {},
@@ -122270,7 +122336,7 @@ var init_dropbox = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/command-runner.ts
-import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
 import { Buffer as Buffer4 } from "node:buffer";
 import { execFile as execFile3, spawn as spawn7 } from "node:child_process";
 import { readFile as readFile6, readdir } from "node:fs/promises";
@@ -122540,7 +122606,7 @@ var init_command_runner = __esm(() => {
   init_memory_counters();
   init_descendant_groups();
   init_native_process_service();
-  activeExtraction = new AsyncLocalStorage14;
+  activeExtraction = new AsyncLocalStorage15;
   ExtractionCommandError = class ExtractionCommandError extends Error {
     command;
     exitCode;
@@ -171615,7 +171681,7 @@ var init_tier_cli = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-import-allowance.ts
-import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
 function withGmailImportRunOnce(run) {
   const permission = { active: true };
   return operatorImport.run(permission, async () => {
@@ -171701,7 +171767,7 @@ var init_gmail_import_allowance = __esm(() => {
   init_limit_stops();
   registerLimit({ id: "gmail.import_allowance", kind: "requests", scope: "source", label: "Gmail import request allowance reached", unit: "requests", continue: "run_once" });
   GMAIL_IMPORT_LIMIT_SUBJECT = JSON.stringify(["gmail.email", "internal.email", "gmail.import_allowance"]);
-  operatorImport = new AsyncLocalStorage15;
+  operatorImport = new AsyncLocalStorage16;
   GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
   GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
   GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
@@ -194832,7 +194898,7 @@ var init_built_in_reranker = __esm(() => {
 });
 
 // src/workers/classification/judge-pacing.ts
-import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage17 } from "node:async_hooks";
 import { createHash as createHash96 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
@@ -194849,7 +194915,7 @@ class JudgeRateLimitPacer {
   lastSeq = 0;
   reportSeq = 0;
   blockedUntil = 0;
-  calls = new AsyncLocalStorage16;
+  calls = new AsyncLocalStorage17;
   constructor(clock = realClock) {
     this.clock = clock;
   }
@@ -196035,6 +196101,7 @@ async function answerOnThisComputer(input, options) {
     question,
     ...explicitQuery ? { searchQuery: explicitQuery } : {},
     ...selectedItems.length > 0 ? { selectedItems } : {},
+    ...lanes.excludedCorpusIds ? { excludedCorpusIds: lanes.excludedCorpusIds } : {},
     requireScopedSelection: Boolean(request.approved_scope_key),
     maxResults: LOCAL_MAX_RESULTS,
     searchContext: {
@@ -227502,6 +227569,29 @@ function createEmailSourceWorker(options = {}) {
   const connectorStorePrincipals = options.connectorStorePrincipals ?? new Map;
   const connectorStoreFilterCapabilities = options.connectorStoreFilterCapabilities ?? CONNECTOR_STORE_FILTER_CAPABILITIES;
   const connectorStoreReadScope = options.connectorStoreReadScope;
+  const readScope = (holder, scope = connectorStoreReadScope?.(holder)) => {
+    if (scope?.allowed === false)
+      return scope;
+    const principal = connectorStorePrincipals.get(holder.corpusId);
+    return {
+      allowed: true,
+      ...scope,
+      accountScope: scope?.accountScope ?? connectorStoreAccountScopes.get(holder.corpusId) ?? principal?.accountScope,
+      ...principal ? { filters: { ...scope?.filters, provider: principal.provider } } : {}
+    };
+  };
+  const ownerPlanFor = (id) => {
+    const store = connectorStores.find((candidate) => candidate.corpusId === id);
+    if (!store)
+      return;
+    const grant = connectorStoreReadScope?.(store);
+    const scope = readScope(store, grant);
+    return scope.allowed ? {
+      store,
+      ancestorScope: searchAncestorScope(scope.accountScope, scope.filters),
+      readScopeSignature: JSON.stringify(grant)
+    } : undefined;
+  };
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
@@ -229788,18 +229878,8 @@ function createEmailSourceWorker(options = {}) {
             page,
             pages,
             releaseCheck: options.sourceAnswerReleaseCheck,
-            scope: () => {
-              const scope = connectorStoreReadScope?.(store);
-              if (scope?.allowed === false)
-                return scope;
-              const principal = connectorStorePrincipals.get(store.corpusId);
-              return {
-                allowed: true,
-                ...scope,
-                accountScope: scope?.accountScope ?? connectorStoreAccountScopes.get(store.corpusId) ?? principal?.accountScope,
-                ...principal ? { filters: { ...scope?.filters, provider: principal.provider } } : {}
-              };
-            }
+            scope: () => readScope(store),
+            ancestorPlanFor: ownerPlanFor
           });
           if (currentRemoteReadAccess() !== "active")
             return json(refused);
@@ -229900,6 +229980,15 @@ function createEmailSourceWorker(options = {}) {
           const parentAllowed = (candidate) => plans.get(candidate.corpusId)?.store === candidate;
           const planFor = (id) => plans.get(id);
           const prepare = (corpusId, ids) => withSearchVisibilityStores(parentAllowed, async () => {
+            const parentGrants = new Map;
+            const ownerAncestorPlan = (id) => {
+              if (!canSearch(id) || planErrors.has(id))
+                return;
+              const plan = plans.get(id) ?? ownerPlanFor(id);
+              if (plan && !parentGrants.has(plan.store))
+                parentGrants.set(plan.store, plan.readScopeSignature);
+              return plan;
+            };
             const searchConnectorStore = async ({ store, scope, ancestorScope, readScopeSignature, searchRequest }) => {
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
               const searchEmbeddingProvider = connectorStoreEmbeddingProvider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? connectorStoreEmbeddingProvider : undefined;
@@ -229907,6 +229996,8 @@ function createEmailSourceWorker(options = {}) {
               const privateMatches = new Set;
               const adapter = createConnectorStoreCorpusAdapter({
                 store,
+                ancestorPlanFor: planFor,
+                ownerPlanFor: ownerAncestorPlan,
                 retrievalMode,
                 ...personalNamesOnly ? {
                   searchEligibility(rows) {
@@ -229979,6 +230070,9 @@ function createEmailSourceWorker(options = {}) {
               return plan?.store === candidate && JSON.stringify(connectorStoreReadScope?.(plan.store)) === plan.readScopeSignature;
             };
             return () => withSearchVisibilityStores(currentGrant, () => {
+              if ([...parentGrants].some(([store, scope]) => JSON.stringify(connectorStoreReadScope?.(store)) !== scope)) {
+                throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The parent read scope changed during search. Retry under the current scope.");
+              }
               const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
               const verdictScopes = new Map;
               const unreadCorpora = new Set;
@@ -246930,9 +247024,9 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/engine/runtime/source-answer-lanes.ts
-import { AsyncLocalStorage as AsyncLocalStorage17 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage18 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay, now = Date.now) {
-  const context = new AsyncLocalStorage17;
+  const context = new AsyncLocalStorage18;
   let inFlight = 0;
   let startedAt;
   let lastEndedAt;
@@ -246997,12 +247091,11 @@ function createSourceAnswerLanes(deps) {
     deps.ownerQuestions?.retrieving();
     const selected = sourceAnswerCorpusIds(request);
     const ancestorPlans = new Map;
-    const ancestorPlanFor = (id) => {
-      if (selected && !selected.includes(id))
-        return;
+    const ownerPlanFor = (id) => {
       const plan = ancestorPlans.get(id);
       return plan && JSON.stringify(deps.readScope(plan.store)) === plan.readScopeSignature ? plan : undefined;
     };
+    const ancestorPlanFor = (id) => selected && !selected.includes(id) ? undefined : ownerPlanFor(id);
     const requestEmbeddings = new Map;
     const sharedMemos = new Map;
     const memoized = (key, provider) => {
@@ -247045,6 +247138,7 @@ function createSourceAnswerLanes(deps) {
       return createConnectorStoreCorpusAdapter({
         store,
         ancestorPlanFor,
+        ownerPlanFor,
         retrievalMode: request.retrieval_mode ?? "keyword",
         localKeywordFallback: mode === "built_in_only" ? true : mode === "private_search" && store.trustDomain === "secure_local" ? "private_search" : false,
         ...semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {},
@@ -247094,6 +247188,7 @@ function createSourceAnswerLanes(deps) {
         const passageEmbedding = request.retrieval_mode === "hybrid" ? requestEmbedding(store) : undefined;
         return mandatoryScope.allowed ? [[store.corpusId, createConnectorStoreContentProvider({
           store,
+          ancestorPlanFor: ownerPlanFor,
           ...passageEmbedding ? { embeddingProvider: passageEmbedding } : {},
           ...mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {},
           ...mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {},
@@ -253025,7 +253120,7 @@ var init_control_plane = __esm(() => {
 });
 
 // src/workers/engine-split/runtime.ts
-import { AsyncLocalStorage as AsyncLocalStorage18 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage19 } from "node:async_hooks";
 import { randomUUID as randomUUID44 } from "node:crypto";
 import { lstatSync as lstatSync56 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
@@ -253245,7 +253340,7 @@ function restartingResponse(request) {
 function createFrontGate() {
   let open = true;
   let generation = 0;
-  const current = new AsyncLocalStorage18;
+  const current = new AsyncLocalStorage19;
   return {
     isOpen: () => open,
     close() {

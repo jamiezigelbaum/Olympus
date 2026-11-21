@@ -33,7 +33,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import type { SearchAncestorPlan } from '../connector-store/index.ts';
 import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
-import type { TierLedger } from './tier-ledger.ts';
+import { tierLedgerIdentityKey, type TierLedger } from './tier-ledger.ts';
 import { detectSecretFindingKinds } from './engine.ts';
 import { hasCredentialUrl } from './tier-classifier.ts';
 
@@ -153,13 +153,15 @@ function screenParents(locations: readonly SecretLocation[], parents: SecretLoca
   }));
   const lane = { ledger: () => parents.ledger, stores: () => parents.plans.map(plan => plan.store) };
   try {
+    const planFor = (id: string) => parents.plans.find(plan => plan.store.corpusId === id);
+    const excluded = first.store.childrenOutsideAncestorScope(identities, planFor, lane);
     const hidden = hiddenProbesByParentIdentity(lane, identities);
     const withheld = first.store.childrenWithWithheldSearchIdentifiers(
-      identities, parents.includePrivateNames, id => parents.plans.find(plan => plan.store.corpusId === id), lane,
+      identities, parents.includePrivateNames, planFor, lane,
     );
     return locations.flatMap((location, index) => {
       const identity = identities[index]!;
-      if (hidden.has(identity)) return [];
+      if (hidden.has(identity) || excluded.has(tierLedgerIdentityKey(identity))) return [];
       return [withheld.has(identity) ? { ...location, locator: null } : location];
     });
   } catch {

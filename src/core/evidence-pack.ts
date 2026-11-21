@@ -184,6 +184,7 @@ export interface BuildEvidencePackInput {
   selectedItems?: readonly SelectedEvidenceItem[];
   // A selected identity must satisfy the request's narrowing filter before hydration.
   requireScopedSelection?: boolean;
+  excludedCorpusIds?: ReadonlySet<string>;
   // Optional multi-query retrieval expansion (see core/query-planner.ts): the
   // planner proposes extra phrasings for the same question, each query becomes
   // one retrieval lane, and lanes are RRF-fused. No planner = the single
@@ -896,7 +897,8 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
       skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: skipReason });
       continue;
     }
-    if (input.requireScopedSelection && input.adapters[corpus.corpusId]?.selectedItemServable?.(selected.sourceItem, 'metadata') !== true) {
+    const servable = input.adapters[corpus.corpusId]?.selectedItemServable;
+    if (input.excludedCorpusIds?.has(corpus.corpusId) || (servable ? !servable(selected.sourceItem, 'metadata') : input.requireScopedSelection)) {
       continue;
     }
     searched.add(corpus.corpusId);

@@ -13842,6 +13842,9 @@ function stripDataUrlPrefix(dataUrl) {
   return dataUrl.replace(/^data:[^,]+,/, "");
 }
 
+// src/workers/connector-store/local-index.ts
+import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
+
 // src/workers/classification/tier-classifier.ts
 import { createHash as createHash8 } from "node:crypto";
 
@@ -23731,16 +23734,21 @@ function* childLinksSteps(lane, probes) {
 function hiddenChildKeys(lane, probes) {
   return visibilityHere(hiddenChildKeysSteps(lane, probes));
 }
-function* hiddenChildKeysSteps(lane, probes) {
+function* hiddenChildKeysSteps(lane, probes, excludedByScope) {
   if (probes.length === 0)
     return new Set;
   let links;
   try {
     links = yield* childLinksSteps(lane, probes);
+    const hidden = yield* childrenWithHiddenParentsSteps(lane, links);
+    if (excludedByScope) {
+      for (const key of yield* excludedByScope(probes, links))
+        hidden.add(key);
+    }
+    return hidden;
   } catch {
     return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
   }
-  return yield* childrenWithHiddenParentsSteps(lane, links);
 }
 
 // src/workers/classification/secret-locations.ts
@@ -27445,10 +27453,10 @@ class LocalConnectorStore {
     }
     return hidden;
   }
-  tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed) {
-    return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable, copiesAllowed));
+  tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed, planFor = readAncestorPlans.getStore()) {
+    return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable, copiesAllowed, planFor));
   }
-  *tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed) {
+  *tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed, planFor = readAncestorPlans.getStore()) {
     rows = rows.filter((row) => layerOf(row) !== "content" || !this.onDemandContentHeld(identityOf(row)));
     if (rows.length === 0)
       return [];
@@ -27471,7 +27479,7 @@ class LocalConnectorStore {
       const here = visibility.copies.get(key);
       return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
     }) : [...rows];
-    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf));
+    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf), planFor ? (identities, links) => this.excludedAncestorKeys(identities, planFor, { kind: "scope", links }) : undefined);
     return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
   }
   tierHiddenItemPks(options = {}) {
@@ -28421,6 +28429,9 @@ class LocalConnectorStore {
     const sender = row.sender_label?.trim();
     return { ...title ? { title } : {}, ...path ? { path } : {}, ...sender ? { sender } : {} };
   }
+  scopedAncestorPlans(accountScope, filters) {
+    return readAncestorPlans.getStore() ?? (accountScope || filters ? ancestorPlansForStore(this, accountScope, filters) : undefined);
+  }
   useChildVisibility(lane) {
     this.childLane = lane;
   }
@@ -28432,13 +28443,16 @@ class LocalConnectorStore {
   }
   childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, planFor, locationLane) {
     try {
-      const keys = this.withheldSearchIdentifierKeys(identities, includePrivateNames, planFor, locationLane);
+      const keys = visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: "names", includePrivateNames }, locationLane));
       return new Set(identities.filter((identity) => keys.has(tierLedgerIdentityKey(identity))));
     } catch {
       return new Set(identities);
     }
   }
-  withheldSearchIdentifierKeys(identities, includePrivateNames, planFor, locationLane) {
+  childrenOutsideAncestorScope(identities, planFor, lane) {
+    return visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: "scope" }, lane));
+  }
+  *excludedAncestorKeys(identities, planFor, check, locationLane) {
     const withheld = new Set;
     const lookupKey = (parent) => ("parentLocalItemId" in parent) ? `local:${parentKey(parent)}` : `provider:${tierLedgerIdentityKey(parent)}`;
     let pending = new Map;
@@ -28452,14 +28466,19 @@ class LocalConnectorStore {
       pending.set(key, entry);
     };
     const lane = locationLane ?? this.childVisibilityLane();
-    const admittedPlans = () => childVisibilityStores(lane).flatMap((store) => {
+    const admittedPlans = () => (check.kind === "scope" ? lane.stores() : childVisibilityStores(lane)).flatMap((store) => {
       const plan = planFor(store.corpusId);
       return plan?.store === store ? [plan] : [];
     });
     const locationPlans = locationLane ? admittedPlans() : undefined;
-    for (const store of locationPlans?.map((plan) => plan.store) ?? [this]) {
-      for (const [child, parent] of store.parentLinksOf(identities))
-        queue(parent, [child]);
+    if (check.kind === "scope" && check.links) {
+      for (const { key, parent } of check.links)
+        queue(parent, [key]);
+    } else {
+      for (const store of locationPlans?.map((plan) => plan.store) ?? [this]) {
+        for (const [child, parent] of store.parentLinksOf(identities))
+          queue(parent, [child]);
+      }
     }
     for (const identity of identities)
       queue(parentIdentityOf(identity), [tierLedgerIdentityKey(identity)]);
@@ -28481,32 +28500,58 @@ class LocalConnectorStore {
         else
           encoded.push(parent);
       }
-      const rows = plans.flatMap(({ store, ancestorScope }) => {
-        const active = [
-          ...store.parentStandings(linked).map((row) => ({ ...row, key: lookupKey(row) })),
-          ...Array.from(store.itemStandings(encoded).values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
-        ].filter((row) => row.active);
+      const rows = [];
+      for (const { store, ancestorScope } of plans) {
+        const byLink = yield* visibilityRead(() => store.parentStandings(linked), () => store.parentStandingsOffThread(linked));
+        const byId = yield* visibilityRead(() => store.itemStandings(encoded), () => store.itemStandingsOffThread(encoded));
+        const present = [
+          ...byLink.map((row) => ({ ...row, key: lookupKey(row) })),
+          ...Array.from(byId.values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
+        ].filter((row) => row.active || check.kind === "scope" && row.secret);
+        if (!present.length)
+          continue;
         const account = normalizeOptionalAccountScope(ancestorScope.accountScope);
         const predicate = connectorStoreFilterSql(ancestorScope.filters);
-        const matches = predicate.sql ? new Set(store.itemRowsForIdentities(active.map((row) => row.identity), (id) => normalizeConversationId(id.providerConversationId), predicate).map((row) => row.idx)) : undefined;
-        return active.map((row, index) => ({
+        let matches;
+        if (predicate.sql) {
+          const keys = present.map(({ identity }) => [
+            identity.provider,
+            identity.accountScope,
+            normalizeConversationId(identity.providerConversationId),
+            identity.providerItemId
+          ]);
+          const matched = yield* store.visibilityStoreRead({
+            mode: "all",
+            sql: `SELECT CAST(j.key AS INTEGER) AS idx ${identityRowsFromSql(predicate.sql, check.kind === "scope")}`,
+            params: [JSON.stringify(keys), ...predicate.params]
+          });
+          matches = new Set(matched.map((row) => row.idx));
+        }
+        rows.push(...present.map((row, index) => ({
           ...row,
           corpusId: store.corpusId,
           inScope: (!account || row.accountScope === account) && (!matches || matches.has(index))
-        }));
-      });
-      const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map((row) => ({
+        })));
+      }
+      const identities = rows.map((row) => row.identity);
+      const states = check.kind === "scope" && ledger ? yield* visibilityRead(() => ledger.itemStatesForMany(identities), () => itemStatesOffThread(ledger, identities)) : undefined;
+      const verdicts = check.kind === "names" ? visibilityHere(effectiveItemVerdicts(() => scopes, rows.map((row) => ({
         ...row.identity,
         corpusId: row.corpusId,
         privateAtAnswer: false,
         layer: "names"
-      }))));
+      })))) : undefined;
       const allowed = new Map;
       const denied = new Set;
       rows.forEach((row, index) => {
         const key = row.key;
-        const verdict = verdicts[index];
-        const canRelease = row.inScope && !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
+        const state = states?.get(tierLedgerIdentityKey(row.identity));
+        if (state && !row.secret && (state.copies.length || state.record?.routed) && !state.copies.some((copy) => copy.corpusId === row.corpusId && copy.state === "current"))
+          return;
+        const verdict = verdicts?.[index];
+        const includePrivateNames = check.kind === "names" && check.includePrivateNames;
+        const namesAllowed = verdict && !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
+        const canRelease = row.inScope && (check.kind === "scope" ? state?.hidingIntent !== "deletion" : namesAllowed);
         const previous = allowed.get(key);
         if (!canRelease || previous && (previous.grandparentLocalItemId !== row.grandparentLocalItemId || tierLedgerIdentityKey(previous.identity) !== tierLedgerIdentityKey(row.identity))) {
           denied.add(key);
@@ -34772,7 +34817,7 @@ ${parentKey(ref)}`, { ref, origin });
     const excludedItemPks = this.vectorScanExcludedItemPks();
     if (excludedItemPks)
       pageOptions.excludedItemPks = excludedItemPks;
-    const eligiblePks = input.searchEligibility ? (pks, onDemandReadsTablePresent) => this.visibleVectorItemPks(pks, selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility) : undefined;
+    const eligiblePks = input.searchEligibility || readAncestorPlans.getStore() || filters ? (pks, onDemandReadsTablePresent) => this.visibleVectorItemPks(pks, selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility) : undefined;
     const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks);
     if ("skippedReason" in scanned)
       return { rows: [], skippedReason: scanned.skippedReason };
@@ -35019,7 +35064,7 @@ ${parentKey(ref)}`, { ref, origin });
         providerItemId: row.provider_item_id,
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       });
-      const current = this.tierVisibleRows(rows, identityOf, () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold));
+      const current = this.tierVisibleRows(rows, identityOf, () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold), this.scopedAncestorPlans(accountScope, filters));
       const eligible = searchEligibility?.(current.map((row) => ({ sourceItem: identityOf(row), trustTier: trustTierFromRow(row.trust_tier) })));
       current.forEach((row, index) => {
         if (!eligible || eligible[index])
@@ -35310,7 +35355,7 @@ ${parentKey(ref)}`, { ref, origin });
         accountScope: row.account_scope,
         providerItemId: row.provider_item_id,
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-      }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
+      }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content", false, undefined, this.scopedAncestorPlans(accountScope, filters));
       const eligible = ftsOptions.searchEligibility?.(current.map((row) => ({
         sourceItem: sourceItemFromRow(row),
         trustTier: trustTierFromRow(row.trust_tier)
@@ -35517,7 +35562,7 @@ ${parentKey(ref)}`, { ref, origin });
   }
   recentItems(maxResults, accountScope, filters) {
     const read = this.recentItemsRead(maxResults, accountScope, filters);
-    return this.visibleRecentRows(this.db.query(read.sql).all(...read.params));
+    return this.visibleRecentRows(this.db.query(read.sql).all(...read.params), accountScope, filters);
   }
   async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs, onCutShort) {
     if (!offThreadReadsSupported(this.dbPath))
@@ -35535,7 +35580,7 @@ ${parentKey(ref)}`, { ref, origin });
       onCutShort?.();
       return [];
     }
-    return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows), this.childVisibilityLane())).map((row) => searchRowFromItemRow(row));
+    return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows, accountScope, filters), this.childVisibilityLane())).map((row) => searchRowFromItemRow(row));
   }
   recentItemsRead(maxResults, accountScope, filters) {
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -35653,19 +35698,19 @@ ${parentKey(ref)}`, { ref, origin });
       if (after[index])
         ordered.push(after[index]);
     }
-    return this.visibleRecentRows(ordered);
+    return this.visibleRecentRows(ordered, accountScope, filters);
   }
   conversationIndexReady;
-  visibleRecentRows(rows) {
-    return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
+  visibleRecentRows(rows, accountScope, filters) {
+    return visibilityHere(this.visibleRecentRowsSteps(rows, accountScope, filters)).map((row) => searchRowFromItemRow(row));
   }
-  visibleRecentRowsSteps(rows) {
+  visibleRecentRowsSteps(rows, accountScope, filters) {
     return this.tierVisibleRowsSteps(rows, (row) => ({
       provider: row.provider,
       accountScope: row.account_scope,
       providerItemId: row.provider_item_id,
       ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-    }), () => "content");
+    }), () => "content", false, undefined, this.scopedAncestorPlans(accountScope, filters));
   }
   privateTierRowWindow(options) {
     const after = Math.max(0, Math.floor(options.after ?? 0));
@@ -35764,6 +35809,9 @@ ${parentKey(ref)}`, { ref, origin });
         return "not_in_scope";
       const scope = options.scope?.();
       if (scope?.allowed === false || !this.itemMatchesSearchFilters(localItemId, scope?.accountScope, scope?.filters))
+        return "not_in_scope";
+      const planFor = options.ancestorPlanFor ?? ancestorPlansForStore(this, scope?.accountScope, scope?.filters);
+      if (this.childrenOutsideAncestorScope([identity], planFor).size)
         return "not_in_scope";
       const now = this.activeLocalItemRow(localItemId);
       if (!now || tierLedgerIdentityKey(now.identity) !== tierLedgerIdentityKey(identity))
@@ -36638,6 +36686,15 @@ ${parentKey(ref)}`, { ref, origin });
     `).get(connectorId);
     return row ? syncRunFromRow(row) : undefined;
   }
+}
+var readAncestorPlans = new AsyncLocalStorage13;
+function ancestorPlansForStore(store, accountScope, filters) {
+  const plan = { store, ancestorScope: searchAncestorScope(accountScope, filters) };
+  return (id) => id === store.corpusId ? plan : undefined;
+}
+function searchAncestorScope(accountScope, filters, owner) {
+  const { authoredAfter, authoredBefore, conversationId, senderId, senderLabel, senderIdentities, searchTextExactLines, ...admission } = filters ?? {};
+  return { ...accountScope ? { accountScope } : {}, filters: { ...admission, ...owner } };
 }
 function searchGrantIdentityKey(identity) {
   return JSON.stringify([
@@ -37525,12 +37582,16 @@ function identityAmbiguous(identity, counts) {
 function identityRowsSql(extraSql) {
   return `
       SELECT CAST(j.key AS INTEGER) AS idx, i.item_pk, i.local_item_id, i.title, i.source_version
-      FROM json_each(?) j
+      ${identityRowsFromSql(extraSql, false)}
+      ORDER BY j.key
+    `;
+}
+function identityRowsFromSql(extraSql, includeSecretPresence) {
+  return `FROM json_each(?) j
       CROSS JOIN items i
       WHERE i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
         AND i.normalized_conversation = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
-        AND i.tombstoned = 0 ${extraSql}
-      ORDER BY j.key
+        AND ${includeSecretPresence ? "(i.tombstoned = 0 OR i.trust_tier = 'S5')" : "i.tombstoned = 0"} ${extraSql}
     `;
 }
 function observedOwnerPredicate(exact, prefix, previous) {

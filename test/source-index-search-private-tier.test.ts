@@ -20,6 +20,7 @@ import { createParentLabelResolver } from '../src/workers/connector-store/parent
 import { createUnreadableLocators } from '../src/workers/connector-store/unreadable-locators.ts';
 import { createTierSecretLocations } from '../src/workers/engine/runtime/tier-secret-locations.ts';
 import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { defineConnectorCorpus, LocalConnectorStore, type ConnectorStoreSyncOptions } from '../src/workers/connector-store/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
@@ -316,7 +317,7 @@ describe('source_index_search and rows Private by their own tier', () => {
       expect(result.results[0].hits).toContainEqual(expect.objectContaining({
         selected_item: expect.objectContaining({ provider_item_id: 'plan' }),
       }));
-      expect(result.results[0].hits).toContainEqual(expect.objectContaining({
+      expect(result.results[0].hits).not.toContainEqual(expect.objectContaining({
         provenance: expect.objectContaining({ citation: expect.objectContaining({ title: 'orchard enclosure' }) }),
       }));
       expect(JSON.stringify(result)).not.toContain(parentId);
@@ -430,44 +431,74 @@ describe('source_index_search and rows Private by their own tier', () => {
     } finally { internal.close(); }
   });
 
-  test.each(['folder', 'account'] as const)('an unlinked child withholds its id when its encoded parent is outside the approved %s scope', async exclusion => {
-    const parentId = 'garden-plan';
-    const childId = `${parentId}#child:notes`;
+  test.each(['folder', 'account', 'approval'] as const)('Ask and search exclude an attachment when its ancestor is outside the approved %s scope', async exclusion => {
+    const parentId = 'garden-message';
+    const enclosedId = exclusion === 'approval' ? `${parentId}#child:enclosure` : parentId;
+    const childId = `${enclosedId}#child:notes`;
+    const uri = `https://mail.google.com/mail/u/0/#all/${parentId}`;
+    const gmail = { provider: 'gmail', family: 'email' as const };
+    const ledger = new TierLedger({ dbPath: ':memory:' });
     const parent: Fixture = { id: parentId, name: 'plan', text: 'Garden layout', tier: 'S3' };
-    const child: Fixture = { id: childId, name: 'pruning notes', text: 'orchard', tier: 'S3' };
-    const internal = await store(INTERNAL, 'internal', exclusion === 'folder' ? [parent, child] : [child], null, item => ({
+    const internal = await store(GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, 'internal', [
+      ...(exclusion === 'account' ? [] : [parent]),
+      ...(enclosedId === parentId ? [] : [{ id: enclosedId, name: 'enclosure', text: 'enclosure', tier: 'S3' as const }]),
+      { id: childId, parentId: enclosedId, name: 'pruning notes', text: 'orchard', tier: 'S3', locatorUri: uri },
+    ], ledger, item => ({
       accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000001',
       folderKeys: [item.identity.providerItemId === parentId ? 'plans' : 'notes'],
-    }));
-    // Encoded relatives share an identity account, but each store has its own account approval.
-    const ledger = new TierLedger({ dbPath: ':memory:' });
-    const sibling = await store(SECURE, 'secure_local', exclusion === 'account' ? [parent] : [], ledger);
+    }), gmail);
+    const sibling = await store(GMAIL_SECURE_CONNECTOR_CORPUS_ID, 'secure_local', exclusion === 'folder' ? [] : [parent], ledger, undefined, gmail);
     const stores = [internal, sibling];
     const lane = { stores: () => stores, ledger: () => ledger };
     for (const holder of stores) holder.useChildVisibility(lane);
     let restricted = false;
     try {
-      const worker = createEmailSourceWorker({
-        connectorStores: stores,
-        connectorStoreReadScope: holder => ({
-          allowed: true,
+      const readScope = (holder: LocalConnectorStore) => {
+        if (restricted && exclusion === 'approval' && holder === sibling) return { allowed: false as const };
+        return {
+          allowed: true as const, contentAllowed: true,
           accountScope: restricted && exclusion === 'account' && holder === sibling ? 'other' : ACCOUNT,
           filters: { sourceScopeFolderNoneKeys: restricted && exclusion === 'folder' ? ['plans'] : [] },
-        }),
+        };
+      };
+      const worker = createEmailSourceWorker({ connectorStores: stores, connectorStoreReadScope: readScope });
+      const find = async () => (await search(worker, { query: 'orchard', corpus_ids: stores.map(s => s.corpusId) })).results[0];
+      const seen: string[] = [];
+      const handler = createAnalystSourceIndexAnswerHandler({
+        lanes: fixtureLanes(stores, readScope,
+          () => ({ provider: gmail.provider, accountScope: ACCOUNT })),
+        analyst: { async analyze(pack) {
+          seen.push(...pack.candidates.map(c => c.provenance.sourceItem.providerItemId));
+          return { answer: 'Pruning notes.', citations: pack.candidates.map(c => ({ provenance: c.provenance, claim: 'Pruning notes.' })), unanswered: [] };
+        } },
       });
-      const find = () => exclusion === 'folder'
-        ? search(worker, { query: 'orchard', corpus_id: INTERNAL })
-        : search(worker, { query: 'orchard', corpus_ids: [INTERNAL, SECURE] }).then(page => page.results[0]);
-      expect((await find()).hits[0].selected_item.provider_item_id).toBe(childId);
+      const request = { question: 'orchard', corpus_id: internal.corpusId, include_internal: true };
+      const ask = () => handler.answer(request);
+      const selected = { corpus_id: internal.corpusId, provider: gmail.provider, family: gmail.family, account_scope: ACCOUNT,
+        provider_item_id: childId, local_item_id: `${ACCOUNT}:${childId}` };
+      const askSelected = () => handler.answer({ ...request, selected_items: [selected] });
+      expect((await askSelected()).evidence).toContainEqual(expect.objectContaining({ provider_item_id: childId, uri }));
+      expect((await find()).hits).toMatchObject([{ selected_item: { provider_item_id: childId } }]);
+      expect((await ask()).evidence).toContainEqual(expect.objectContaining({ provider_item_id: childId, uri }));
+      if (exclusion === 'approval') {
+        // Both stores still hold the parent. Only the sibling serves its current copy.
+        const identity = { provider: gmail.provider, accountScope: ACCOUNT, providerItemId: parentId };
+        ledger.recordRoutedPlacement(identity, classifyItemTiers({ signals: { title: parent.name }, subject: identity }), {
+          copies: [{ corpusId: sibling.corpusId, trustDomain: sibling.trustDomain, layers: 'both' }], embedHold: true,
+        });
+        expect(ledger.copies(identity)).toMatchObject([{ corpusId: sibling.corpusId, state: 'current' }]);
+        // The parent's pending judgment does not remove the child from the pack.
+        expect((await ask()).evidence).toContainEqual(expect.objectContaining({ title: 'pruning notes' }));
+      }
       restricted = true;
-      const result = await find();
-      const sourceItem = { family: 'file', provider: 'fixture', accountScope: ACCOUNT };
-      expect(result.hits).toEqual([{
-        corpus_id: INTERNAL, sourceItem, score: expect.any(Number), rawExposed: false,
-        provenance: { sourceItem, citation: { sourceLabel: 'fixture', title: 'pruning notes' } },
-      }]);
-      expect(JSON.stringify(result)).not.toContain(parentId);
-      expect(result.audit).not.toHaveProperty('private_tier_withheld');
+      seen.length = 0;
+      const answer = await ask();
+      expect(answer.evidence).toEqual([]);
+      expect(seen).not.toContain(childId);
+      expect(JSON.stringify(answer)).not.toContain(parentId);
+      expect((await askSelected()).evidence).toEqual([]);
+      expect((await find()).hits).toEqual([]);
+      if (exclusion === 'folder') expect(internal.searchItems('orchard', 5, ACCOUNT, readScope(internal).filters)).toEqual([]);
     } finally {
       internal.close();
       sibling.close();
@@ -522,7 +553,7 @@ describe('source_index_search and rows Private by their own tier', () => {
     }
   });
 
-  test.each(['account', 'folder', 'approval'] as const)('a Secret attachment withholds its locator outside its parent’s %s scope', async exclusion => {
+  test.each(['account', 'folder', 'approval'] as const)('a Secret attachment is excluded outside its parent’s %s scope', async exclusion => {
     const gmail = { provider: 'gmail', family: 'email' as const };
     const parentId = 'parentmarker';
     const ledger = new TierLedger({ dbPath: ':memory:' });
@@ -580,9 +611,7 @@ describe('source_index_search and rows Private by their own tier', () => {
       restricted = true;
       expect(stillAllowed()).toBe(false);
       const page = await find('attachment');
-      expect(page.secret_locations).toEqual([{
-        source: gmail.provider, ref: allowed.ref, title: 'attachment', finding_kinds: ['credential_assignment'],
-      }]);
+      expect(page.secret_locations).toBeUndefined();
       const answer = await askForAttachment();
       expect(answer.secret_locations).toEqual(page.secret_locations);
       expect(JSON.stringify(answer)).not.toContain(parentId);

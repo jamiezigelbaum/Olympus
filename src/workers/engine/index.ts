@@ -422,6 +422,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const connectorStoreFilterCapabilities = options.connectorStoreFilterCapabilities
     ?? CONNECTOR_STORE_FILTER_CAPABILITIES;
   const connectorStoreReadScope = options.connectorStoreReadScope;
+  const readScope = (holder: LocalConnectorStore, scope = connectorStoreReadScope?.(holder)) => {
+    if (scope?.allowed === false) return scope;
+    const principal = connectorStorePrincipals.get(holder.corpusId);
+    return { allowed: true, ...scope,
+      accountScope: scope?.accountScope ?? connectorStoreAccountScopes.get(holder.corpusId) ?? principal?.accountScope,
+      ...(principal ? { filters: { ...scope?.filters, provider: principal.provider } } : {}),
+    };
+  };
+  const ownerPlanFor = (id: string) => {
+    const store = connectorStores.find(candidate => candidate.corpusId === id);
+    if (!store) return undefined;
+    const grant = connectorStoreReadScope?.(store);
+    const scope = readScope(store, grant);
+    return scope.allowed ? { store, ancestorScope: searchAncestorScope(scope.accountScope, scope.filters),
+      readScopeSignature: JSON.stringify(grant) } : undefined;
+  };
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
@@ -3528,15 +3544,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             || identity.providerConversationId !== selected.provider_conversation_id) return json(refused);
           const result = await store.readItemPages(selected.local_item_id, {
             page, pages, releaseCheck: options.sourceAnswerReleaseCheck,
-            scope: () => {
-              const scope = connectorStoreReadScope?.(store);
-              if (scope?.allowed === false) return scope;
-              const principal = connectorStorePrincipals.get(store.corpusId);
-              return { allowed: true, ...scope,
-                accountScope: scope?.accountScope ?? connectorStoreAccountScopes.get(store.corpusId) ?? principal?.accountScope,
-                ...(principal ? { filters: { ...scope?.filters, provider: principal.provider } } : {}),
-              };
-            },
+            scope: () => readScope(store),
+            ancestorPlanFor: ownerPlanFor,
           });
           if (currentRemoteReadAccess() !== 'active') return json(refused);
           if (result.couldNotRead.length === 1 && result.couldNotRead[0] === 'names_only' && options.requestOnDemandRead) {
@@ -3644,6 +3653,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const parentAllowed = (candidate: ChildVisibilityStore) => plans.get(candidate.corpusId)?.store === candidate;
           const planFor = (id: string) => plans.get(id);
           const prepare = (corpusId: string, ids: readonly string[]) => withSearchVisibilityStores(parentAllowed, async () => {
+            const parentGrants = new Map<LocalConnectorStore, string | undefined>();
+            const ownerAncestorPlan = (id: string) => {
+              if (!canSearch(id) || planErrors.has(id)) return undefined;
+              const plan = plans.get(id) ?? ownerPlanFor(id);
+              if (plan && !parentGrants.has(plan.store)) parentGrants.set(plan.store, plan.readScopeSignature);
+              return plan;
+            };
             const searchConnectorStore = async ({ store, scope, ancestorScope, readScopeSignature, searchRequest }: SearchPlan) => {
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId)
                 ?? sourceIndexEmbeddingProvider;
@@ -3663,7 +3679,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   : 'keyword');
               const privateMatches = new Set<string>();
               const adapter = createConnectorStoreCorpusAdapter({
-                store,
+                store, ancestorPlanFor: planFor, ownerPlanFor: ownerAncestorPlan,
                 retrievalMode,
                 ...(personalNamesOnly ? {
                   searchEligibility(rows) {
@@ -3736,6 +3752,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               return plan?.store === candidate && JSON.stringify(connectorStoreReadScope?.(plan.store)) === plan.readScopeSignature;
             };
             return () => withSearchVisibilityStores(currentGrant, () => {
+              // Another corpus may have awaited after this candidate batch was admitted.
+              if ([...parentGrants].some(([store, scope]) => JSON.stringify(connectorStoreReadScope?.(store)) !== scope)) {
+                throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'The parent read scope changed during search. Retry under the current scope.');
+              }
               // One tier-ledger snapshot judges every tier's hits together, and
               // a single pinned corpus (`all_tiers: false`) too: an item whose
               // copy here is no longer current (re-tiered, Secret) is never
