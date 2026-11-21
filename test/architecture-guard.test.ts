@@ -14,7 +14,17 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
+import ts from 'typescript';
 import slice2Deletion from '../config/slice2-deleted-paths.json';
+import { lifecycleSourceAliases, lifecycleSourceIds } from '../src/core/account-files.ts';
+import { ARCHIVE_FORMATS } from '../src/core/archive-formats.ts';
+import {
+  createSourceCorpusRegistry,
+  LEGACY_READWISE_LIBRARY_CORPUS_ID,
+  LEGACY_TELEGRAM_MESSAGES_CORPUS_ID,
+} from '../src/core/source-corpus-registry.ts';
+import { SOURCE_FAMILIES } from '../src/core/source-index/types.ts';
+import { withArchiveImportCorpora } from '../src/workers/archive-import/store.ts';
 import {
   isPathDigest,
   literalBasename,
@@ -618,6 +628,36 @@ function lineContainsRegexLiteral(line: string): boolean {
 }
 
 describe('architecture guard: capability, not per-source/per-question code', () => {
+  test('admission uses declared facts without naming sources, providers, corpora or families', () => {
+    const path = 'src/core/admission.ts';
+    const corpora = createSourceCorpusRegistry(withArchiveImportCorpora()).list();
+    const names = new Set([
+      ...SOURCE_FAMILIES,
+      ...corpora.flatMap(({ sourceId, provider, corpusId, family }) => [sourceId, provider, corpusId, family]),
+      ...ARCHIVE_FORMATS.flatMap(({ provider, sourceCard }) => sourceCard ? [provider, sourceCard.id] : [provider]),
+      ...lifecycleSourceIds().flatMap((id) => [id, ...lifecycleSourceAliases(id)]),
+      LEGACY_READWISE_LIBRARY_CORPUS_ID,
+      LEGACY_TELEGRAM_MESSAGES_CORPUS_ID,
+    ]);
+    const escapedNames = [...names].sort((a, b) => b.length - a.length)
+      .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const sourceName = new RegExp(`(?:^|[^\\w])(?:${escapedNames.join('|')})(?:$|[^\\w])`, 'i');
+    const file = ts.createSourceFile(path, read(path), ts.ScriptTarget.Latest);
+    const offenders: string[] = [];
+    const visit = (node: ts.Node): void => {
+      // Parse literals so comments are ignored and escaped spellings and
+      // fixed parts of interpolated strings are checked too.
+      if ((ts.isStringLiteralLike(node) || ts.isTemplateLiteralToken(node) || ts.isRegularExpressionLiteral(node))
+        && sourceName.test(node.text)) {
+        const { line } = file.getLineAndCharacterOfPosition(node.getStart(file));
+        offenders.push(`${path}:${line + 1}: ${JSON.stringify(node.text)}`);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    expect(offenders).toEqual([]);
+  });
+
   test('connector-store retrieval adds no family or source-name branches', () => {
     const remaining = new Set(CONNECTOR_STORE_FAMILY_DEBT.map((entry) => entry.line as string));
     const offenders: string[] = [];

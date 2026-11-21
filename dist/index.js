@@ -3074,6 +3074,9 @@ function accountRawPath(account, name, env = process.env, options = {}) {
 function accountStoreNames(sourceId, archiveFamilies = []) {
   return sourceId === ARCHIVE_IMPORTS ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`)) : FOLDER_ONLY_STORES[sourceId] ? [...FOLDER_ONLY_STORES[sourceId]] : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => file ? [tier] : []);
 }
+function mountedStoreSources() {
+  return Object.keys(MOUNTED_STORE_FILES);
+}
 function legacyAccountPaths(sourceId, env = process.env, archiveFamilies = []) {
   if (!hasLegacyLayout(sourceId))
     return { stores: [], raw: [] };
@@ -3214,7 +3217,7 @@ function legacyMessagingPaths(sourceId, env) {
   }
   return { stores: [], raw: [] };
 }
-var SHARED_DATA_FILES, WHATSAPP_SESSION_FILE = "session.db", ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, TIERS, gmailStore = (infix) => ({ file: `gmail-${infix}connector-store.sqlite` }), driveStore = (infix) => ({ file: `google-drive-${infix}connector-store.sqlite` }), dropboxStore = (infix) => ({ file: `dropbox-files-${infix}connector-store.sqlite` }), localFilesStore = (infix) => ({ file: `local-files-${infix}connector-store.sqlite` }), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_ONLY_STORES, FOLDER_LAYOUT_SOURCES, RAW_OWNER, TELEGRAM_SOURCE_ID = "telegram.messages", WHATSAPP_SOURCE_ID = "whatsapp.personal.messages", MESSAGING_RAW_NAMES, NATIVE_CAPTURE_OWNER_ENV_NAMES, TELEGRAM_PATH_OVERRIDES, WHATSAPP_PATH_OVERRIDES;
+var SHARED_DATA_FILES, WHATSAPP_SESSION_FILE = "session.db", ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, TIERS, gmailStore = (infix) => ({ file: `gmail-${infix}connector-store.sqlite` }), driveStore = (infix) => ({ file: `google-drive-${infix}connector-store.sqlite` }), dropboxStore = (infix) => ({ file: `dropbox-files-${infix}connector-store.sqlite` }), localFilesStore = (infix) => ({ file: `local-files-${infix}connector-store.sqlite` }), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_ONLY_STORES, FOLDER_LAYOUT_SOURCES, RAW_OWNER, MOUNTED_STORE_FILES, TELEGRAM_SOURCE_ID = "telegram.messages", WHATSAPP_SOURCE_ID = "whatsapp.personal.messages", MESSAGING_RAW_NAMES, NATIVE_CAPTURE_OWNER_ENV_NAMES, TELEGRAM_PATH_OVERRIDES, WHATSAPP_PATH_OVERRIDES;
 var init_olympus_layout = __esm(() => {
   init_linux_engine_layout();
   SHARED_DATA_FILES = {
@@ -3315,6 +3318,10 @@ var init_olympus_layout = __esm(() => {
     "archive-staging": ARCHIVE_IMPORTS,
     "evernote-pass.json": "evernote.notes",
     ...messagingRawOwners()
+  };
+  MOUNTED_STORE_FILES = {
+    "reflect.notes": ["reflect-notes.sqlite"],
+    "roam.notes": ["roam-notes.sqlite"]
   };
   MESSAGING_RAW_NAMES = [
     "telegram-spool",
@@ -12467,7 +12474,45 @@ var init_off_thread_reads = __esm(() => {
 });
 
 // src/core/provider-account-identity.ts
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
+function parseProviderAccountId(id) {
+  const labels = new Map;
+  for (const label of id.trim().split(".")) {
+    const kind = LABEL.exec(label)?.[1];
+    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
+      return;
+    if (labels.has(kind))
+      return;
+    labels.set(kind, label);
+  }
+  return labels.size > 0 ? labels : undefined;
+}
+function compareProviderAccounts(recorded, observed) {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b)
+    return recorded.trim() === observed.trim() ? "same" : "different";
+  let shared = false;
+  for (const kind of IMMUTABLE_LABEL_KINDS) {
+    const left = a.get(kind);
+    const right = b.get(kind);
+    if (left === undefined || right === undefined)
+      continue;
+    if (left !== right)
+      return "different";
+    shared = true;
+  }
+  if (shared)
+    return "same";
+  if (hasImmutableAccountLabel(recorded))
+    return "unproven";
+  const address = a.get("google");
+  return address !== undefined && address === b.get("google") ? "same" : "different";
+}
+function hasImmutableAccountLabel(id) {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
+}
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, IMMUTABLE_LABEL_KINDS, LABEL;
 var init_provider_account_identity = __esm(() => {
   init_http_timeout();
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
@@ -12478,6 +12523,8 @@ var init_provider_account_identity = __esm(() => {
     google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
   };
   IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
+  LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
 });
 
 // src/core/store-identity.ts
@@ -34033,6 +34080,324 @@ function failed(status, errorKind, message) {
   return { status, body: { status: "failed", error_kind: errorKind, message } };
 }
 
+// src/workers/engine/runtime/admission-shadow.ts
+import { isDeepStrictEqual as isDeepStrictEqual2 } from "node:util";
+
+// src/core/admission.ts
+init_provider_account_identity();
+function mountedStoreFacts(store, registration, ready) {
+  return { ...registration, trustDomain: store.trustDomain, ready: !registration.requiresRecovery || ready === true };
+}
+function evaluate(context, store) {
+  const { caller, purpose, layer, authority, requestScope } = context;
+  if (!store.ready)
+    return { admitted: false, reason: "recovery_pending" };
+  if (store.item?.tier === "S5" && purpose !== "backup" && purpose !== "migrate")
+    return { admitted: false, reason: "secret_item" };
+  const privateItem = store.item?.tier === "S4" || store.item?.tier === "S4+" || store.item?.tier === "S5";
+  if ((store.trustDomain === "secure_local" || privateItem) && context.destination === "cloud") {
+    return { admitted: false, reason: "private_destination_required" };
+  }
+  if (store.item?.held && purpose === "embed" && layer === "content")
+    return { admitted: false, reason: "embedding_hold" };
+  if (caller === "internal_judge" && purpose === "judge" || caller === "migrate" && purpose === "migrate" || caller === "backup" && purpose === "backup") {
+    return { admitted: true, reason: "privileged_owner_scope_bypass" };
+  }
+  if (caller === "internal_judge" || caller === "migrate" || caller === "backup" || purpose === "judge" || purpose === "migrate" || purpose === "backup") {
+    return { admitted: false, reason: "privileged_purpose_mismatch" };
+  }
+  const grant = caller === "remote_grant" ? authority.grant : undefined;
+  if (caller === "remote_grant" && (!grant || grant.epoch !== authority.epoch || !context.account.id || !grant.owner.id || compareProviderAccounts(context.account.id, grant.owner.id) !== "same"))
+    return { admitted: false, reason: "grant_required" };
+  if (authority.ownershipUnproven)
+    return { admitted: false, reason: "account_unproven" };
+  const scope = {};
+  if (grant?.scope) {
+    if (!grant.scope.value || !store.matchers.includes(grant.scope.matcher))
+      return { admitted: false, reason: "unsupported_grant_scope" };
+    scope.grant = grant.scope;
+  }
+  if (requestScope) {
+    if (!requestScope.value || !store.matchers.includes(requestScope.matcher))
+      return { admitted: false, reason: "unsupported_request_scope" };
+    scope.request = requestScope;
+  }
+  const admit = (reason) => Object.keys(scope).length ? { admitted: true, scope, reason } : { admitted: true, reason };
+  const owner = context.account.id;
+  const ownership = owner && authority.owner?.id ? compareProviderAccounts(owner, authority.owner.id) : undefined;
+  if (ownership === "different")
+    return { admitted: false, reason: "account_mismatch" };
+  if (ownership === "unproven")
+    return { admitted: false, reason: "account_unproven" };
+  const sameOwner = ownership === "same";
+  if ((store.item?.provenance ?? store.provenance) === "owner_import")
+    return admit("owner_import");
+  const observationScope = store.liveScope === "observed";
+  if (!store.selection && (!observationScope || purpose === "search" || purpose === "answer"))
+    return admit("retained");
+  const approved = authority.approved && sameOwner;
+  if (observationScope) {
+    if (authority.accountScope)
+      scope.accountScope = authority.accountScope;
+    if (!scope.accountScope)
+      return { admitted: false, reason: "account_scope_missing" };
+    if (store.retainedOnDevice && context.destination === "device" && sameOwner && (purpose === "embed" || purpose === "count")) {
+      if (approved && purpose === "count" && layer === "content" && authority.contentAfter)
+        scope.contentAfter = authority.contentAfter;
+      if (purpose === "embed")
+        scope.excludeAllEmbeddingHolds = true;
+      return admit("retained_on_device");
+    }
+    if (store.item?.provenance !== "live" && store.importObservationPrefix)
+      scope.importPrefix = store.importObservationPrefix;
+    if (approved && authority.observedUnder) {
+      scope.observedUnder = authority.observedUnder;
+      if (authority.previousObservedUnder)
+        scope.previousObservedUnder = authority.previousObservedUnder;
+      if (layer === "content" && purpose === "count" && authority.contentAfter)
+        scope.contentAfter = authority.contentAfter;
+      return admit("current_observation");
+    }
+    return scope.importPrefix ? admit("imports_only") : { admitted: false, reason: "live_approval_required" };
+  }
+  if (authority.approved && !sameOwner)
+    return { admitted: false, reason: "account_unproven" };
+  if (!approved || !authority.accountScope || !authority.generation)
+    return { admitted: false, reason: "owner_approval_required" };
+  const selections = authority.selections ?? [];
+  const included = (s) => layer === "names" ? s.state !== "exclude" : s.state === "ingest";
+  const include = selections.filter(included).map((s) => s.key);
+  if (!authority.wholeAccount && !include.length)
+    return { admitted: false, reason: "empty_layer_scope" };
+  scope.accountScope = authority.accountScope;
+  scope.generation = authority.generation;
+  if (!store.exactKeys)
+    scope.revision = authority.epoch;
+  scope.matcher = store.selection;
+  if (!authority.wholeAccount)
+    scope.include = include;
+  const exclude = selections.filter((s) => !included(s)).map((s) => s.key);
+  if (exclude.length)
+    scope.exclude = exclude;
+  if (layer === "names") {
+    const namesOnly = selections.filter((s) => s.state === "metadata_only" || s.state === "on_demand").map((s) => s.key);
+    if (namesOnly.length)
+      scope.namesOnly = namesOnly;
+  }
+  return admit("approved_selection");
+}
+function admitsSearchCorpus(input) {
+  return input.mounted && input.enabled && input.searchable && input.requested.has(input.corpusId) && (!input.tierCorpusIds || input.tierCorpusIds.has(input.corpusId));
+}
+function admitsSearchName(input) {
+  if (input.tier === "S5" || input.names === "secret" || input.names === "unknown" || input.pendingDeletion || !input.includePrivateNames && input.gone)
+    return false;
+  if (input.names === "public_or_personal" && input.tier !== undefined)
+    return true;
+  const privateName = input.tier === undefined || input.names === "private" || input.domain === "secure_local" || input.tier === "S4" || input.tier === "S4+";
+  return !privateName || input.includePrivateNames && input.searchedPrivateStore;
+}
+
+// src/workers/engine/runtime/admission-shadow.ts
+function population(verdict, provider) {
+  const scope = verdict.scope;
+  if (!scope)
+    return { admitted: verdict.admitted };
+  const filters = { provider };
+  if (scope.generation)
+    filters.sourceScopeGeneration = scope.generation;
+  if (scope.revision)
+    filters.sourceScopeRevision = scope.revision;
+  if (scope.observedUnder)
+    filters.observedConnectorId = scope.observedUnder;
+  if (scope.previousObservedUnder)
+    filters.previousObservedConnectorId = scope.previousObservedUnder;
+  if (scope.importPrefix)
+    filters.observedConnectorIdPrefix = scope.importPrefix;
+  const paths = scope.matcher === "path_prefix";
+  if (scope.include)
+    filters[paths ? "locatorPathScopes" : "sourceScopeFolderAnyKeys"] = scope.include;
+  if (scope.exclude)
+    filters[paths ? "locatorPathExcludedScopes" : "sourceScopeFolderNoneKeys"] = scope.exclude;
+  if (scope.namesOnly)
+    filters[paths ? "metadataOnlyLocatorPathScopes" : "metadataOnlySourceScopeFolderKeys"] = scope.namesOnly;
+  return {
+    admitted: verdict.admitted,
+    accountScope: scope.accountScope,
+    filters,
+    contentAfter: scope.contentAfter,
+    held: scope.excludeAllEmbeddingHolds
+  };
+}
+function compareAdmissionScopes(input, log = (event) => console.warn(JSON.stringify({ event: "admission_disagreement", ...event }))) {
+  const { corpus, definition, read, status } = input;
+  const facts = mountedStoreFacts(corpus, definition, input.ready);
+  function compare(stage, layer, serving) {
+    const processing = stage !== "search" && stage !== "answer" && stage !== "extract";
+    const verdict = evaluate({
+      caller: "owner",
+      account: input.account,
+      authority: processing ? input.processingAuthority : input.readAuthority,
+      purpose: stage === "backlog" || stage === "manual_embed" ? "embed" : stage,
+      layer,
+      destination: processing ? input.destination : "device"
+    }, facts);
+    const expected = population(verdict, corpus.provider);
+    if (stage === "backlog")
+      expected.held = input.canEmbedHeld && !verdict.scope?.excludeAllEmbeddingHolds;
+    if (!serving.admitted && !expected.admitted && !serving.queueStillEligible)
+      return;
+    const actualFilters = serving.filters ?? {};
+    const expectedFilters = expected.filters ?? {};
+    const keys = new Set([...Object.keys(actualFilters), ...Object.keys(expectedFilters)]);
+    const differingConstraints = [
+      ...serving.queueStillEligible && !expected.admitted ? ["skipQueue"] : [],
+      ...serving.accountScope !== expected.accountScope ? ["accountScope"] : [],
+      ...serving.contentAfter !== expected.contentAfter ? ["contentAfter"] : [],
+      ...!!serving.held !== !!expected.held ? ["holdPolicy"] : [],
+      ...[...keys].filter((key) => !isDeepStrictEqual2(actualFilters[key], expectedFilters[key]))
+    ];
+    if (serving.admitted !== expected.admitted || differingConstraints.length) {
+      log({ corpusId: corpus.corpusId, stage, layer, serving: serving.admitted, shadow: expected.admitted, reason: verdict.reason, differingConstraints });
+    }
+  }
+  for (const layer of ["names", "content"]) {
+    const actual = read.allowed ? {
+      admitted: layer === "names" || read.contentAllowed === true,
+      accountScope: read.accountScope,
+      filters: layer === "names" ? read.filters : read.contentFilters
+    } : { admitted: false };
+    compare("search", layer, actual);
+    compare("answer", layer, actual);
+    compare("count", layer, {
+      admitted: status.itemsAllowed !== false && (layer === "names" || status.contentAllowed !== false),
+      accountScope: status.accountScope,
+      filters: layer === "names" ? status.itemFilters : status.contentFilters,
+      contentAfter: layer === "content" ? status.contentNotBefore : undefined
+    });
+  }
+  if (input.extractionRead) {
+    const read = input.extractionRead;
+    compare("extract", "content", read.allowed ? {
+      admitted: read.contentAllowed === true,
+      filters: read.contentFilters,
+      accountScope: read.accountScope
+    } : { admitted: false });
+  }
+  for (const [stage, scope] of [["embed", input.scheduled], ["manual_embed", input.manual]]) {
+    compare(stage, "content", scope.allowed ? {
+      admitted: true,
+      accountScope: scope.accountScope,
+      filters: scope.filters,
+      held: scope.excludeAllEmbeddingHolds
+    } : { admitted: false, queueStillEligible: stage === "embed" && !scope.skipQueue });
+  }
+  const backlog = status.embedding;
+  compare("backlog", "content", {
+    admitted: backlog?.contentAllowed !== false,
+    accountScope: backlog?.accountScope,
+    filters: backlog?.contentFilters,
+    held: backlog?.includeHeldForJudgment
+  });
+}
+// src/core/source-admission-definitions.ts
+init_archive_formats();
+init_olympus_layout();
+function sourceAdmissionDefinitions() {
+  const archives = archiveImportFamilies();
+  return [
+    {
+      sourceId: "gmail.email",
+      matchers: ["account", "label", "sender"],
+      liveScope: "observed",
+      retainedOnDevice: true,
+      importObservationPrefix: "archive.",
+      corpora: ["internal.email", "secure_local.email.private", "public_safe.email"],
+      extractionHomes: ["internal.email", "secure_local.email.private"]
+    },
+    {
+      sourceId: "google_drive.docs",
+      matchers: ["account", "container_key"],
+      selection: "container_key",
+      corpora: ["internal.drive.docs", "secure_local.drive.docs", "public_safe.drive.docs"],
+      extractionHomes: ["internal.drive.docs", "secure_local.drive.docs"]
+    },
+    {
+      sourceId: "dropbox.files",
+      matchers: ["account", "path_prefix"],
+      selection: "path_prefix",
+      corpora: ["internal.dropbox.files", "secure_local.dropbox.files", "public_safe.dropbox.files"],
+      extractionHomes: ["secure_local.dropbox.files"]
+    },
+    {
+      sourceId: "local.files",
+      matchers: ["account", "path_prefix"],
+      selection: "path_prefix",
+      requiresRecovery: true,
+      corpora: ["internal.local.files", "secure_local.local.files", "public_safe.local.files"],
+      extractionHomes: ["secure_local.local.files"]
+    },
+    {
+      sourceId: "evernote.notes",
+      matchers: ["account", "container_key"],
+      selection: "container_key",
+      exactKeys: true,
+      corpora: ["internal.evernote.notes", "secure_local.evernote.notes"],
+      extractionHomes: ["secure_local.evernote.notes"]
+    },
+    {
+      sourceId: "telegram.messages",
+      matchers: ["account", "conversation", "sender"],
+      corpora: ["internal.telegram.messages", "secure_local.telegram.protected.messages"],
+      extractionHomes: ["internal.telegram.messages", "secure_local.telegram.protected.messages"]
+    },
+    {
+      sourceId: "whatsapp.personal.messages",
+      matchers: ["account", "conversation", "sender"],
+      corpora: ["internal.whatsapp.messages", "secure_local.whatsapp.messages"],
+      extractionHomes: ["secure_local.whatsapp.messages"]
+    },
+    {
+      sourceId: "readwise.library",
+      matchers: ["account"],
+      corpora: ["internal.readwise.library", "secure_local.readwise.library"],
+      extractionHomes: []
+    },
+    {
+      sourceId: "x.bookmarks",
+      matchers: ["account", "container_key"],
+      corpora: ["internal.x.bookmarks", "secure_local.x.bookmarks"],
+      extractionHomes: []
+    },
+    {
+      sourceId: "archive.imports",
+      provenance: "owner_import",
+      matchers: ["account"],
+      corpora: archives.flatMap((family) => ["public_safe", "internal", "secure_local"].map((tier) => archiveCorpusId(tier, family))),
+      extractionHomes: archives.map((family) => archiveCorpusId("secure_local", family))
+    },
+    ...mountedStoreSources().map((sourceId) => ({
+      sourceId,
+      corpora: [`secure_local.${sourceId}`],
+      matchers: ["account"],
+      extractionHomes: []
+    }))
+  ];
+}
+function corpusAdmissions(definition, corpus, input) {
+  const id = corpus.corpusId;
+  const declared = definition.sourceId === corpus.sourceId && definition.corpora.includes(id);
+  const registered = declared && corpus.enabled !== false;
+  const extractionHome = declared && definition.extractionHomes.includes(id);
+  return {
+    registered,
+    answer: registered && corpus.capabilities.includes("answer"),
+    status: registered && corpus.capabilities.includes("status"),
+    extract: input.mounted && (extractionHome || input.configuredExtraction?.has(id) === true),
+    search: admitsSearchCorpus({ ...input, corpusId: id, enabled: registered, searchable: corpus.capabilities.includes("search") })
+  };
+}
+
 // src/native-plugin.ts
 function operationResult(operation, payload) {
   return {
@@ -34545,8 +34910,12 @@ function sourceWatchRouteFromToolContext(context) {
 }
 var native_plugin_default = plugin;
 export {
+  admitsSearchName,
+  compareAdmissionScopes,
+  corpusAdmissions,
   native_plugin_default as default,
   handleSourceWatchDeliveryGatewayRequest,
   sendOpenClawSourceWatchDelivery,
+  sourceAdmissionDefinitions,
   sourceWatchRouteFromToolContext
 };
