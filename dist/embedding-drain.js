@@ -36298,7 +36298,9 @@ ${parentKey(ref)}`, { ref, origin });
       ];
       return { itemParams, contentParams, parityParams, fileScopeParams };
     };
-    const fileScoped = policyHolds.size > 0 || Object.entries(scope ?? {}).some(([key, value]) => key !== "contentNotBefore" && key !== "embedding" && value !== undefined);
+    const ownScope = Object.entries(scope ?? {}).filter(([key]) => key !== "embedding");
+    const embeddingOnly = scope?.embedding !== undefined && ownScope.every(([, value]) => value === undefined);
+    const fileScoped = policyHolds.size > 0 || scope !== undefined && !embeddingOnly && !(scope.contentNotBefore !== undefined && ownScope.every(([key, value]) => key === "contentNotBefore" || value === undefined));
     const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
     const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;

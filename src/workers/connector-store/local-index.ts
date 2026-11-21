@@ -18273,8 +18273,12 @@ export class LocalConnectorStore {
     // A scope that says only "older than this is names only" narrows no
     // population, so it must not switch on the file-scope counts below: those
     // belong to a store whose scope picks WHICH files to read.
-    const fileScoped = policyHolds.size > 0 || Object.entries(scope ?? {})
-      .some(([key, value]) => key !== 'contentNotBefore' && key !== 'embedding' && value !== undefined);
+    // The sweep's embedding population rides along on the scope but picks no
+    // files: a scope carrying only that counts as no scope at all.
+    const ownScope = Object.entries(scope ?? {}).filter(([key]) => key !== 'embedding');
+    const embeddingOnly = scope?.embedding !== undefined && ownScope.every(([, value]) => value === undefined);
+    const fileScoped = policyHolds.size > 0 || (scope !== undefined && !embeddingOnly && !(scope.contentNotBefore !== undefined
+      && ownScope.every(([key, value]) => key === 'contentNotBefore' || value === undefined)));
     // Rows dated before the window that hold no text. julianday reads any ISO
     // form (Z, fractional seconds, offsets), and COALESCE keeps an unparseable
     // date a plain "not outside" instead of a NULL that NOT would swallow.
