@@ -98,6 +98,16 @@ const itemListedAs = (tier: 'Personal' | 'Private', changedByYou: boolean) => as
     actual: listed === 0 ? 'the item is not listed' : `it is listed${labelled === 1 ? ` as ${tier}` : ` but not as ${tier}`}${changedByYou ? (marked === 1 ? ', Changed by you' : ', not marked Changed by you') : ''}`,
   };
 };
+/**
+ * The Changed by you list has arrived: every listed row is marked Changed by you. The chip shows as pressed before the list is
+ * fetched, and on a slow machine the earlier list stays on the page meanwhile; a click on it can land on a row that is about to
+ * be replaced (linux-upgrade leg, 21 Nov 2026).
+ */
+const changedListShown = async ({ count }: StepContext): Promise<{ ok: boolean; expected: string; actual: string }> => {
+  const rows = await count(PI_ROWS, 'host');
+  const marked = await count({ css: '[data-pi-item] .piyou' }, 'host');
+  return { ok: rows > 0 && rows === marked, expected: 'only items changed by you are listed', actual: `${rows} row(s) listed, ${marked} marked Changed by you` };
+};
 const OPEN_ITEM_PANEL: JourneyStep = {
   name: 'Open the item',
   do: { click: itemRow, frame: 'host' },
@@ -596,7 +606,7 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Show the items changed by you: it is there, still Private',
         do: { click: piFilter('changed'), frame: 'host' },
-        expect: [{ present: { css: '[data-pi-filter="changed"][aria-pressed="true"]' }, frame: 'host' }, { custom: itemListedAs('Private', true) }],
+        expect: [{ present: { css: '[data-pi-filter="changed"][aria-pressed="true"]' }, frame: 'host' }, { custom: changedListShown }, { custom: itemListedAs('Private', true) }],
       },
       OPEN_ITEM_PANEL,
       {
@@ -615,7 +625,7 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Show the items changed by you: it is there, now Personal',
         do: { click: piFilter('changed'), frame: 'host' },
-        expect: [{ custom: itemListedAs('Personal', true) }],
+        expect: [{ custom: changedListShown }, { custom: itemListedAs('Personal', true) }],
       },
     ],
   },
