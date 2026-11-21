@@ -16,6 +16,7 @@
 // for the owner's own dashboard, or, for an agent, only when the item's names
 // are Personal or less, the tier its names would be cited at anyway.
 
+import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import {
   applyTierSet,
@@ -149,9 +150,17 @@ export type OwnerTierItemSetResult =
   | { ok: true; item: OwnerTierItem; changed: 'set' | 'cleared' | 'unchanged'; applies: 'now' | 'next_pass'; results: Array<Record<string, unknown>> }
   | { ok: false; code: 'not_found' | 'secret_item' | 'dashboard_only' | 'not_owner_set' | 'override_review_changed'; message: string };
 
+/** Agent finds apply the mounted store's metadata predicate to the row supplying the names. */
+export interface OwnerItemNamesScope {
+  sql: string;
+  params: string[];
+  visible(identity: SourceItemIdentity, trustTier: SourceTrustTier): boolean;
+}
+type OwnerFindScopes = ReadonlyMap<string, OwnerItemNamesScope>;
+
 /** The bound engine the worker serves (engine/index.ts). */
 export interface OwnerTierItems {
-  find(input: OwnerTierItemFindInput): { items: OwnerTierItem[] };
+  find(input: OwnerTierItemFindInput, scopes?: OwnerFindScopes): { items: OwnerTierItem[] };
   set(input: OwnerTierItemSetInput): OwnerTierItemSetResult;
   /** The dashboard's filter counts. Optional so a narrow engine can leave the counts off. */
   counts?(): OwnerTierItemCounts;
@@ -164,7 +173,7 @@ export interface OwnerTierItemsContext extends TierCliContext {
 
 export function createOwnerTierItems(context: OwnerTierItemsContext = {}): OwnerTierItems {
   return {
-    find: (input) => findOwnerTierItems(input, context),
+    find: (input, scopes) => findOwnerTierItems(input, context, scopes),
     set: (input) => setOwnerTierItem(input, context),
     counts: () => countOwnerTierItems(context),
   };
@@ -196,8 +205,9 @@ export function parseOwnerTierItemId(itemId: unknown): TierLedgerIdentity {
 
 interface StoredItemRow {
   local_item_id?: string;
+  trust_tier?: SourceTrustTier;
   provider: string;
-  family: string;
+  family: SourceItemIdentity['family'] | 'unknown';
   account_scope: string;
   provider_item_id: string;
   provider_conversation_id: string | null;
@@ -231,7 +241,7 @@ function namesAbovePersonal(state: ItemState): boolean {
     .some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank('private'));
 }
 
-export function findOwnerTierItems(input: OwnerTierItemFindInput, context: OwnerTierItemsContext = {}): { items: OwnerTierItem[] } {
+export function findOwnerTierItems(input: OwnerTierItemFindInput, context: OwnerTierItemsContext = {}, scopes?: OwnerFindScopes): { items: OwnerTierItem[] } {
   const limit = clampLimit(input.limit);
   const query = input.query?.trim() ?? '';
   if (query.length > OWNER_ITEM_QUERY_MAX) throw new OperationError('invalid_params', `query is at most ${OWNER_ITEM_QUERY_MAX} characters.`);
@@ -248,7 +258,7 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: Owner
     throw new OperationError('invalid_params', 'beforeItem goes with before.');
   }
   const beforeItem = input.beforeItem === undefined ? undefined : parseOwnerTierItemId(input.beforeItem);
-  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before, beforeItem) : searchRows(query, limit * 3, context);
+  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before, beforeItem, scopes) : searchRows(query, limit * 3, context, scopes);
   const items: OwnerTierItem[] = [];
   for (const row of rows) {
     if (items.length >= limit) break;
@@ -279,35 +289,44 @@ function likePattern(words: string): string {
 }
 
 
-function selectColumns(columns: Set<string>): string {
+function selectColumns(columns: Set<string>, scope?: OwnerItemNamesScope): string {
   const sender = columns.has('sender_label') ? 'sender_label, sender_id' : 'NULL AS sender_label, NULL AS sender_id';
-  return `local_item_id, provider, family, account_scope, provider_item_id, provider_conversation_id, title, ${sender}, locator_uri`;
+  return `local_item_id, provider, family, account_scope, provider_item_id, provider_conversation_id, title, ${sender}, locator_uri${scope ? ', trust_tier' : ''}`;
+}
+
+function namesVisible(row: StoredItemRow, scope: OwnerItemNamesScope | undefined): boolean {
+  if (!scope) return true;
+  if (!row.local_item_id || !row.trust_tier || row.family === 'unknown') return false;
+  return scope.visible({ ...identityOfRow(row), family: row.family, localItemId: row.local_item_id }, row.trust_tier);
 }
 
 /** Stored items whose title, sender or file name holds the words, newest first; one row per item across twin stores. */
-function searchRows(query: string, limit: number, context: TierCliContext): StoredItemRow[] {
+function searchRows(query: string, limit: number, context: TierCliContext, scopes?: OwnerFindScopes): StoredItemRow[] {
   const pattern = likePattern(query);
   const found = new Map<string, StoredItemRow & { at: string }>();
   for (const dbPath of knownStorePaths(context)) {
+    const scope = scopes?.get(dbPath);
+    if (scopes && !scope) continue;
     const rows = withStore<Array<StoredItemRow & { at: string }>>(dbPath, [], (db, columns) => {
       const fields = ['title', 'locator_uri', ...(columns.has('sender_label') ? ['sender_label', 'sender_id'] : [])];
       return db.query(`
-        SELECT ${selectColumns(columns)}, COALESCE(authored_at, indexed_at, '') AS at FROM items
+        SELECT ${selectColumns(columns, scope)}, COALESCE(authored_at, indexed_at, '') AS at FROM items i
         WHERE tombstoned = 0 AND (${fields.map((field) => `${field} LIKE ? ESCAPE '\\'`).join(' OR ')})
+        ${scope?.sql ?? ''}
         ORDER BY at DESC
         LIMIT ?
-      `).all(...fields.map(() => pattern), limit) as Array<StoredItemRow & { at: string }>;
+      `).all(...fields.map(() => pattern), ...(scope?.params ?? []), limit) as Array<StoredItemRow & { at: string }>;
     });
     for (const row of rows) {
       const key = tierLedgerIdentityKey(identityOfRow(row));
-      if (!found.has(key)) found.set(key, row);
+      if (!found.has(key) && namesVisible(row, scope)) found.set(key, row);
     }
   }
   return [...found.values()].sort((left, right) => right.at.localeCompare(left.at)).slice(0, limit);
 }
 
 /** The items the ledgers decided most recently, newest first, as their stores keep them; with a filter, only those. */
-function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierItemFilter, before?: string, beforeItem?: TierLedgerIdentity): StoredItemRow[] {
+function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierItemFilter, before?: string, beforeItem?: TierLedgerIdentity, scopes?: OwnerFindScopes): StoredItemRow[] {
   const decided = new Map<string, TierLedgerRecord>();
   for (const ledger of knownTierLedgers(context)) {
     let records: TierLedgerRecord[] = [];
@@ -333,8 +352,10 @@ function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierIt
   for (const record of ordered) {
     const identity = identityOfRecord(record);
     for (const dbPath of stores) {
-      const row = readStoredRow(dbPath, identity);
-      if (row) {
+      const scope = scopes?.get(dbPath);
+      if (scopes && !scope) continue;
+      const row = readStoredRow(dbPath, identity, scope);
+      if (row && namesVisible(row, scope)) {
         rows.push(row);
         break;
       }
@@ -606,13 +627,13 @@ function storedRowFor(identity: TierLedgerIdentity, located: readonly LocatedIte
   };
 }
 
-function readStoredRow(dbPath: string, identity: TierLedgerIdentity): StoredItemRow | undefined {
+function readStoredRow(dbPath: string, identity: TierLedgerIdentity, scope?: OwnerItemNamesScope): StoredItemRow | undefined {
   return withStore(dbPath, undefined, (db, columns) => {
     const predicate = storeItemIdentityPredicate(identity, columns);
     return db.query<StoredItemRow, string[]>(`
-      SELECT ${selectColumns(columns)} FROM items
-      WHERE ${predicate.sql}
+      SELECT ${selectColumns(columns, scope)} FROM items i
+      WHERE ${predicate.sql} ${scope?.sql ?? ''}
       LIMIT 1
-    `).get(...predicate.params) ?? undefined;
+    `).get(...predicate.params, ...(scope?.params ?? [])) ?? undefined;
   });
 }

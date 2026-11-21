@@ -5,15 +5,19 @@
 // routes have no way to lower. Lowering, and putting an item back to the
 // judge, take this computer's own (local-grade) dashboard session.
 
+import { Database } from 'bun:sqlite';
+import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { exposedOperations, type OperationSurface } from '../src/core/operation-exposure.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES, V0_4_PUBLIC_REMOTE_MCP_TOOLS } from '../src/core/public-surface.ts';
-import { ownerLocalMint } from './helpers/owner-local-mint.ts';
+import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, tempDir } from './helpers/tier-fixtures.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { ownerLocalMint, postAsLocalOwner } from './helpers/owner-local-mint.ts';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
-import type { OwnerTierItems, OwnerTierItemFindInput, OwnerTierItemSetInput } from '../src/workers/classification/tier-owner-items.ts';
+import { createOwnerTierItems, type OwnerTierItem, type OwnerTierItems, type OwnerTierItemFindInput, type OwnerTierItemSetInput } from '../src/workers/classification/tier-owner-items.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER,
@@ -93,6 +97,77 @@ describe('the agent operations', () => {
       { query: 'bank letter', personalNamesOnly: true },
       { recent: true, limit: 5, personalNamesOnly: true },
     ]);
+  });
+
+  test('agent find and Personal search see the same names after revocation, while dashboard find keeps all items', async () => {
+    const tmp = tempDir('privacy-item-routes-');
+    const store = new LocalConnectorStore({ dbPath: join(tmp.dir, 'items.sqlite'), corpusId: 'internal.fixture.files',
+      family: 'file', trustDomain: 'internal' });
+    const specs = ['visible', 'excluded', 'revoked', 'private'].map(id => ({ id, name: `report-${id}.txt`, text: 'Garden notes' }));
+    const generation = 'a'.repeat(64);
+    const revision = 'bdca1717-208e-48cc-8dd5-3e843bc3c83d';
+    let allowed = true;
+    let approvedGeneration = 'b'.repeat(64);
+    let renameDuringFind = false;
+    const worker = createEmailSourceWorker({
+      connectorStores: [store], ownerTierItems: createOwnerTierItems({ storePaths: [store.dbPath] }),
+      sourceIndexVisibilityGate(hits) {
+        if (renameDuringFind) {
+          const writer = new Database(store.dbPath);
+          try { writer.run("UPDATE items SET title = 'New title' WHERE provider_item_id = 'visible'"); }
+          finally { writer.close(); }
+        }
+        return hits;
+      },
+      connectorStoreReadScope: () => allowed ? { allowed: true, contentAllowed: false, filters: {
+        sourceScopeGeneration: approvedGeneration, sourceScopeRevision: revision, sourceScopeFolderNoneKeys: ['excluded'],
+      } } : { allowed: false },
+    });
+    const agent = (action: string, body: object) => worker.fetch(post('/v1/privacy-item/' + action, {}, body));
+    try {
+      await store.syncFromConnector(fixtureConnector(() => specs), {
+        fetchContent: true, placement: FIXTURE_PLACEMENT, tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER },
+        sourceScopeObservation: item => ({ scopeRevision: revision,
+          accountGeneration: item.identity.providerItemId === 'revoked' ? 'b'.repeat(64) : generation,
+          folderKeys: [item.identity.providerItemId === 'excluded' ? 'excluded' : 'included'] }),
+      });
+      store.governingTierLedger()!.setOverride(identityOf('private'), { kind: 'tier', tier: 'secure' });
+      expect(await (await agent('find', { query: 'report' })).json()).toMatchObject({ items: [{ title: 'report-revoked.txt' }] });
+      approvedGeneration = generation;
+      const search = await worker.fetch(post('/v1/source/index/search', {}, { query: 'report', corpus_id: store.corpusId }));
+      expect(search.status).toBe(200);
+      expect(await search.json()).toMatchObject({ hits: [{ sourceItem: { providerItemId: 'visible' } }] });
+      for (const body of [{ query: 'report' }, { recent: true }]) {
+        const dashboard = await postAsLocalOwner(worker, '/dashboard/privacy/items/find', body);
+        expect(dashboard.status).toBe(200);
+        const { items } = await dashboard.json() as { items: OwnerTierItem[] };
+        expect(items.map(item => item.title).sort()).toEqual(specs.map(spec => spec.name).sort());
+        const response = await agent('find', body);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ items: [{ title: 'report-visible.txt' }] });
+      }
+      const current = async () => (await (await agent('find', { recent: true })).json() as { items: OwnerTierItem[] }).items;
+      const [visible] = await current();
+      expect(visible).not.toHaveProperty('preview');
+      approvedGeneration = 'c'.repeat(64);
+      expect(await current()).toEqual([]);
+      approvedGeneration = generation;
+      allowed = false;
+      expect(await current()).toEqual([]);
+      allowed = true;
+      renameDuringFind = true;
+      const changed = await agent('find', { query: 'report' });
+      expect(changed.status).toBe(403);
+      expect(await changed.text()).not.toContain('report-visible');
+      renameDuringFind = false;
+      expect(await current()).toMatchObject([{ title: 'New title', item_id: visible!.item_id }]);
+      expect(await (await agent('raise', { item_id: visible!.item_id })).json()).toMatchObject({ ok: true });
+      expect(await current()).toEqual([]);
+    } finally {
+      worker.close();
+      store.close();
+      tmp.cleanup();
+    }
   });
 
   test('the worker\'s agent routes have no way to lower an item', async () => {

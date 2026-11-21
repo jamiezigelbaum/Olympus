@@ -21976,7 +21976,7 @@ function observedOwnerPredicate(exact?: string, prefix?: string, previous?: stri
     AND o.ownership_kind = 'observed' AND (${keys.join(' OR ')}))`, params };
 }
 
-function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefined): {
+export function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefined): {
   sql: string;
   params: Array<string>;
 } {
