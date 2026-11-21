@@ -9,6 +9,7 @@ import {
   defaultSourceCorpusRegistryConfig,
   parsePublicSourceCorpusRegistryConfig,
   parseSourceCorpusRegistryConfig,
+  SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION,
   type SourceCorpusRegistryConfig,
 } from './source-corpus-registry.ts';
 import {
@@ -606,6 +607,7 @@ function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, st
   if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
     config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(
       JSON.parse(readFileSync(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), 'utf8')) as unknown,
+      { migrateStoredV1: true },
     );
   }
   if (env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()) {
@@ -977,7 +979,7 @@ export function configFromPluginConfig(
   const corpora = sourceIndex?.corpora;
   if (Array.isArray(corpora)) {
     config.sourceIndex.corpusRegistry = parsePublicSourceCorpusRegistryConfig({
-      schemaVersion: 1,
+      schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION,
       corpora,
     });
   }

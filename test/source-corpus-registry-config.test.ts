@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { defaultConfig } from '../src/core/config.ts';
+import { configFromPluginConfig, defaultConfig, loadConfig } from '../src/core/config.ts';
 import { operationToolSchema, operations, type OperationContext } from '../src/core/operations.ts';
 import { exposedOperations } from '../src/core/operation-exposure.ts';
 import {
@@ -94,7 +94,12 @@ describe('config-driven source corpus registry', () => {
     const privateCorpus = config.corpora.find(corpus => corpus.corpusId === 'secure_local.readwise.library')!;
     personal.capabilities = ['sync', 'answer', 'status'];
     privateCorpus.capabilities = ['answer', 'status'];
-    const load = () => createSourceCorpusRegistry(parsePublicSourceCorpusRegistryConfig(config));
+    const home = mkdtempSync(join(tmpdir(), 'olympus-v1-registry-'));
+    const path = join(home, 'corpora.json');
+    const load = () => {
+      writeFileSync(path, JSON.stringify(config));
+      return createSourceCorpusRegistry(loadConfig({ HOME: home, OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH: path }).sourceIndex.corpusRegistry);
+    };
     expect(load().has(personal.corpusId, 'search')).toBe(true);
     expect(load().has(privateCorpus.corpusId, 'search')).toBe(true);
     // With the current schema these same lists explicitly omit search.
@@ -107,6 +112,16 @@ describe('config-driven source corpus registry', () => {
     personal.capabilities = ['answer', 'status'];
     expect(load().has(personal.corpusId, 'search')).toBe(false);
     expect(load().list().find(corpus => corpus.corpusId === privateCorpus.corpusId)?.capabilities).toEqual(['status']);
+  });
+
+  test('the corpora shorthand preserves an explicit search opt-out matching a former shipped list', () => {
+    const corpora = defaultSourceCorpusRegistryConfig().corpora
+      .filter(corpus => corpus.sourceId === 'readwise.library')
+      .map(corpus => ({ ...corpus, capabilities: corpus.capabilities.filter(capability => capability !== 'search') }));
+    const config = configFromPluginConfig({ sourceIndex: { corpora } });
+    expect(config.sourceIndex.corpusRegistry.corpora).toEqual(corpora);
+    const inline = configFromPluginConfig({ sourceIndex: { corpusRegistry: { schemaVersion: 1, corpora } } });
+    expect(inline.sourceIndex.corpusRegistry.corpora).toEqual(corpora);
   });
 
   test('canonicalizes the former protected Telegram id without duplicate fan-out', () => {

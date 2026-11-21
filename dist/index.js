@@ -1957,7 +1957,7 @@ function orderCorporaForCapability(corpora, capability) {
   ordered.push(...corpora.filter((corpus) => byId.has(corpus.corpusId)));
   return ordered;
 }
-function parseSourceCorpusRegistryConfig(rawConfig) {
+function parseSourceCorpusRegistryConfig(rawConfig, options = {}) {
   const root = asRecord2(rawConfig);
   if (!root) {
     throw new OperationError("config_error", "sourceIndex corpus registry must be an object.");
@@ -1975,7 +1975,7 @@ function parseSourceCorpusRegistryConfig(rawConfig) {
       throw new OperationError("config_error", `Duplicate source-index corpus id "${corpus.corpusId}" in registry.`);
     }
     seen.add(corpus.corpusId);
-    const former = root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
+    const former = options.migrateStoredV1 && root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
     if (former && former.length === corpus.capabilities.length && former.every((capability) => corpus.capabilities.includes(capability)) && !narrowSourceCorpusToPublic(corpus).violation) {
       corpus.capabilities.push("search");
     }
@@ -5042,7 +5042,7 @@ function applyEnvironmentOverrides(config, env) {
     config.sourceIndex.enabled = parseBoolean(env.OLYMPUS_SOURCE_INDEX_ENABLED, "OLYMPUS_SOURCE_INDEX_ENABLED");
   }
   if (env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH?.trim()) {
-    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync11(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")));
+    config.sourceIndex.corpusRegistry = parseSourceCorpusRegistryConfig(JSON.parse(readFileSync11(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH.trim(), "utf8")), { migrateStoredV1: true });
   }
   if (env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim()) {
     config.sourceIndex.ingestionExclusionsPath = env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV].trim();
@@ -5344,7 +5344,7 @@ function configFromPluginConfig(pluginConfig, options = {}) {
   const corpora = sourceIndex?.corpora;
   if (Array.isArray(corpora)) {
     config.sourceIndex.corpusRegistry = parsePublicSourceCorpusRegistryConfig({
-      schemaVersion: 1,
+      schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION,
       corpora
     });
   }
@@ -25172,7 +25172,7 @@ class EmailClient {
       ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
       ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
       ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
-      ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
+      ...options.includeLocators ? { include_locators: true } : {},
       ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
     });
     return parseSourceIndexSearchResult(data, {
@@ -25191,7 +25191,7 @@ class EmailClient {
       personal_names_only: true,
       retrieval_mode: options.retrievalMode,
       max_results: options.maxResults,
-      include_locators: options.includeLocators
+      ...options.includeLocators ? { include_locators: true } : {}
     });
     const slots = response.results;
     if (!Array.isArray(slots) || slots.length !== searchCorpora.length) {

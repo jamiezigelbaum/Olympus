@@ -5,7 +5,7 @@
 // `trust_domain: "internal"`, and (since the tier is stripped from the result)
 // nothing to say it was Private.
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildSourceSensitivity, type SourceTrustDomain, type SourceTrustTier } from '../src/core/source-index/types.ts';
 import { findOperationByName } from '../src/core/operations.ts';
@@ -15,6 +15,7 @@ import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
@@ -240,6 +241,73 @@ describe('source_index_search and rows Private by their own tier', () => {
           .rejects.toThrow('HTTP 403');
       }
       expect(reads).not.toContain(optedOut);
+    } finally {
+      internal.close();
+      secure.close();
+      ledger.close();
+    }
+  });
+
+  test('searching without locators keeps a corpus with no locator projector', async () => {
+    const corpusId = 'internal.drive.docs';
+    const config = defaultConfig();
+    config.sourceIndex.corpusRegistry.corpora = config.sourceIndex.corpusRegistry.corpora.filter(c => c.corpusId === corpusId);
+    const personal = await store(corpusId, 'internal', [INTERNAL_FIXTURES[0]!]);
+    try {
+      const context = createInProcessOperationContext({
+        config, sourceIndexReadEnabled: true, workerFetch: createEmailSourceWorker({ connectorStores: [personal] }).fetch,
+        caller: { surface: 'remote', displayName: 'fixture' },
+      });
+      for (const selector of [{}, { corpus_id: corpusId }]) {
+        const result = await findOperationByName('source_index_search')!.handler(context, {
+          query: 'orchard', include_locators: false, ...selector,
+        });
+        expect(result).toMatchObject({ hits: [{ corpus_id: corpusId, selected_item: { provider_item_id: 'plan' } }] });
+      }
+    } finally { personal.close(); }
+  });
+
+  test('parent checks never read a skipped sibling or release a child through its parent there', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const parentId = 'contract-parent';
+    const childId = parentId + '-attachment';
+    const internal = await store(INTERNAL, 'internal', [
+      INTERNAL_FIXTURES[0]!,
+      { id: childId, parentId, name: 'orchard attachment', text: 'orchard', tier: 'S3' },
+      { id: parentId + '#child:unlinked', name: 'orchard enclosure', text: 'orchard', tier: 'S3' },
+    ], ledger);
+    const secure = await store(SECURE, 'secure_local', [
+      { id: parentId, name: 'contract', text: 'contract', tier: 'S3' },
+    ], ledger);
+    const stores = [secure, internal];
+    const lane = { stores: () => stores, ledger: () => ledger };
+    internal.useChildVisibility(lane);
+    secure.useChildVisibility(lane);
+    const searchable = new Set([INTERNAL, SECURE]);
+    const worker = createEmailSourceWorker({
+      connectorStores: stores, searchableCorpusIds: searchable,
+      sourceIndexVisibilityGate: createTierVisibilityGate(() => [{
+        stores: lane.stores, ledger, corpusIds: new Set([INTERNAL, SECURE]),
+      }]),
+    });
+    try {
+      const find = () => search(worker, { query: 'orchard', corpus_ids: [INTERNAL, SECURE] });
+      expect(JSON.stringify((await find()).results[0].hits)).toContain(childId);
+      searchable.delete(SECURE);
+      const reads = [
+        spyOn(secure, 'parentLinksOf'), spyOn(secure, 'parentLinksOfOffThread'),
+        spyOn(secure, 'parentStandings'), spyOn(secure, 'parentStandingsOffThread'),
+      ];
+      const result = await find();
+      expect(result.audit.skipped_corpora).toEqual([SECURE]);
+      expect(result.results[0].hits).toContainEqual(expect.objectContaining({
+        selected_item: expect.objectContaining({ provider_item_id: 'plan' }),
+      }));
+      expect(result.results[0].hits).toContainEqual(expect.objectContaining({
+        provenance: expect.objectContaining({ citation: expect.objectContaining({ title: 'orchard enclosure' }) }),
+      }));
+      expect(JSON.stringify(result)).not.toContain(parentId);
+      for (const read of reads) expect(read).not.toHaveBeenCalled();
     } finally {
       internal.close();
       secure.close();

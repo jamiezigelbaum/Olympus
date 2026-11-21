@@ -137,6 +137,8 @@ import { effectiveItemVerdicts } from './tier-visibility.ts';
 import { forgetSecretInSideStores, retireSecretRedactions } from './secrets-disposition.ts';
 import {
   hiddenChildKeys,
+  childVisibilityStores,
+  searchVisibilityScoped,
   memoVisibilityItems,
   memoVisibilityItemsHere,
   visibilityRead,
@@ -152,6 +154,7 @@ import {
   ledgerReadOffThread,
   type VisibilityRead,
   parentIdentityField,
+  parentIdentityOf,
   parentKey,
   parentVerdicts,
   type ChildProbe,
@@ -5197,6 +5200,8 @@ export class LocalConnectorStore {
 
   /** Rebuilds the counts' hidden set with a turn between lookups; a failed rebuild keeps the older set. */
   private refreshTierHiddenCountsInTurns(): Promise<void> {
+    // A request's subset of parents cannot populate the whole-store status cache.
+    if (searchVisibilityScoped()) return Promise.resolve();
     const prior = this.tierHiddenCountsMemo;
     this.tierHiddenCountsRefresh ??= (async () => {
       try {
@@ -6403,12 +6408,17 @@ export class LocalConnectorStore {
 
   /** A child's provider and local ids can incorporate the ids of its ancestors. */
   childrenWithWithheldSearchIdentifiers(identities: readonly ChildProbe[], includePrivateNames: boolean): Set<string> {
+    const links = this.parentLinksOf(identities);
     const withheld = new Set<string>();
-    let pending = [...this.parentLinksOf(identities)].map(([child, parent]) => ({ child, parent }));
+    for (const identity of identities) {
+      const key = tierLedgerIdentityKey(identity);
+      if (!links.has(key) && parentIdentityOf(identity)) withheld.add(key);
+    }
+    let pending = [...links].map(([child, parent]) => ({ child, parent }));
     if (pending.length === 0) return withheld;
     const lane = this.childVisibilityLane();
     const ledger = lane.ledger();
-    const stores = lane.stores();
+    const stores = childVisibilityStores(lane);
     const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map(store => store.corpusId)) }] : [];
     for (let depth = 0; pending.length > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
       const refs = [...new Map(pending.map(({ parent }) => [parentKey(parent), parent])).values()];
@@ -6710,7 +6720,7 @@ export class LocalConnectorStore {
     const storeChanges = new Map<LocalConnectorStore, { cursor: number; identities?: TierLedgerIdentity[] }>();
     try {
       ledger = lane.ledger();
-      const members = lane.stores();
+      const members = childVisibilityStores(lane);
       if (!ledger || this.visibilityLedger() !== ledger
         || !members.includes(this) || !members.every(store => store instanceof LocalConnectorStore && store.visibilityFeedPresent)) {
         this.hiddenChildMemo = undefined;
@@ -6795,7 +6805,7 @@ export class LocalConnectorStore {
     // again on the front's loop (11 s reads on Sparta rc.15, 14 Nov).
     let stable = false;
     try {
-      const current = lane.stores();
+      const current = childVisibilityStores(lane);
       stable = lane.ledger() === ledger && this.visibilityLedger() === ledger
         && current.length === stores.length && stores.every(store => current.includes(store)
           && store.visibilityFeedPresent);
@@ -6882,7 +6892,7 @@ export class LocalConnectorStore {
       }
       const refs = [...new Map(climbing.map(({ ref }) => [parentKey(ref), ref])).values()];
       const next = new Map<string, { ref: ParentRef; origin: string }>();
-      for (const store of lane.stores()) {
+      for (const store of childVisibilityStores(lane)) {
         const standings = yield* visibilityRead(() => store.parentStandings(refs),
           () => store.parentStandingsOffThread?.(refs) ?? Promise.resolve(store.parentStandings(refs)));
         for (const row of standings) for (const origin of origins.get(parentKey(row)) ?? []) {
@@ -8746,7 +8756,7 @@ export class LocalConnectorStore {
       this.visibilityStamp = undefined;
       return this.visibilityEpoch = randomUUID();
     }
-    const siblings = new Map(children ? lane.stores().filter(store => store !== this)
+    const siblings = new Map(children ? childVisibilityStores(lane).filter(store => store !== this)
       .map(store => {
         const marker = store.childVisibilityMarker?.() ?? randomUUID();
         return [store, store instanceof LocalConnectorStore && !store.visibilityFeedPresent
@@ -16062,7 +16072,8 @@ export class LocalConnectorStore {
     let children: number[];
     try {
       base = this.tierLedgerHiddenItemPks();
-      children = this.hiddenChildItemPks();
+      // Scoped searches check each winner live without rebuilding the whole-lane child cache.
+      children = searchVisibilityScoped() ? [] : this.hiddenChildItemPks();
     } catch { return undefined; }
     // The set's lists change in place as verdicts land. The copy is kept
     // between searches while every list is the same one at the same

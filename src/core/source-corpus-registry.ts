@@ -520,7 +520,9 @@ const V1_SEARCH_UPGRADES = new Map<string, readonly SourceCorpusCapability[]>([
   ['secure_local.readwise.library', ['answer', 'status']],
 ]);
 
-export function parseSourceCorpusRegistryConfig(rawConfig: unknown): SourceCorpusRegistryConfig {
+export function parseSourceCorpusRegistryConfig(
+  rawConfig: unknown, options: { migrateStoredV1?: boolean } = {},
+): SourceCorpusRegistryConfig {
   const root = asRecord(rawConfig);
   if (!root) {
     throw new OperationError('config_error', 'sourceIndex corpus registry must be an object.');
@@ -538,7 +540,7 @@ export function parseSourceCorpusRegistryConfig(rawConfig: unknown): SourceCorpu
       throw new OperationError('config_error', `Duplicate source-index corpus id "${corpus.corpusId}" in registry.`);
     }
     seen.add(corpus.corpusId);
-    const former = root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
+    const former = options.migrateStoredV1 && root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
     if (former && former.length === corpus.capabilities.length
       && former.every(capability => corpus.capabilities.includes(capability))
       && !narrowSourceCorpusToPublic(corpus).violation) {
