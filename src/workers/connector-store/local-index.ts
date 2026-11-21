@@ -5164,9 +5164,8 @@ export class LocalConnectorStore {
       : [...rows];
     // The Ask driver awaits parent links, standings and ledger states too;
     // pooling only the FTS statement still left these reads on its thread.
-    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf), planFor
-      ? (identities, links) => this.excludedAncestorKeys(identities, planFor, { kind: 'scope', links })
-      : undefined);
+    const lane = this.childVisibilityLane();
+    const hidden = yield* hiddenChildKeysSteps(lane, served.map(identityOf), LocalConnectorStore.ancestorScopeCheck(lane, planFor));
     return served.filter(row => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
   }
 
@@ -6423,7 +6422,9 @@ export class LocalConnectorStore {
     locationLane?: ChildVisibilityLane,
   ): ReadonlySet<ChildProbe> {
     try {
-      const keys = visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: 'names', includePrivateNames }, locationLane));
+      const keys = visibilityHere(LocalConnectorStore.excludedAncestorKeys(
+        locationLane ?? this.childVisibilityLane(), identities, planFor, { kind: 'names', includePrivateNames }, locationLane ? undefined : this,
+      ));
       return new Set(identities.filter(identity => keys.has(tierLedgerIdentityKey(identity))));
     } catch {
       // Unreadable ancestry cannot authorize an identifier or locator.
@@ -6434,13 +6435,21 @@ export class LocalConnectorStore {
   // A Secret location can lack a store row. Its index supplies the same lane
   // and owner plans as the ordinary candidate filter.
   childrenOutsideAncestorScope(identities: readonly ChildProbe[], planFor: SearchAncestorPlanFor, lane?: ChildVisibilityLane): Set<string> {
-    return visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: 'scope' }, lane));
+    return visibilityHere(LocalConnectorStore.excludedAncestorKeys(
+      lane ?? this.childVisibilityLane(), identities, planFor, { kind: 'scope' }, lane ? undefined : this,
+    ));
   }
 
-  private *excludedAncestorKeys(
-    identities: readonly ChildProbe[], planFor: SearchAncestorPlanFor,
+  static ancestorScopeCheck(lane: ChildVisibilityLane, planFor?: SearchAncestorPlanFor) {
+    if (!planFor) return undefined;
+    return (identities: readonly ChildProbe[], links: readonly ChildWithParent[]) =>
+      LocalConnectorStore.excludedAncestorKeys(lane, identities, planFor, { kind: 'scope', links });
+  }
+
+  private static *excludedAncestorKeys(
+    lane: ChildVisibilityLane, identities: readonly ChildProbe[], planFor: SearchAncestorPlanFor,
     check: { kind: 'scope'; links?: readonly ChildWithParent[] } | { kind: 'names'; includePrivateNames: boolean },
-    locationLane?: ChildVisibilityLane,
+    linkStore?: LocalConnectorStore,
   ): Generator<VisibilityRead, Set<string>, unknown> {
     const withheld = new Set<string>();
     // A local link and an encoded provider id are independent evidence of ancestry.
@@ -6456,25 +6465,25 @@ export class LocalConnectorStore {
       for (const child of children) entry.children.add(child);
       pending.set(key, entry);
     };
-    const lane = locationLane ?? this.childVisibilityLane();
-    const admittedPlans = () => (check.kind === 'scope' ? lane.stores() : childVisibilityStores(lane)).flatMap(store => {
+    let cachedPlans: SearchAncestorPlan[] | undefined;
+    const admittedPlans = () => cachedPlans ??= (check.kind === 'scope' ? lane.stores() : childVisibilityStores(lane)).flatMap(store => {
       const plan = planFor(store.corpusId);
       return plan?.store === store ? [plan] : [];
     });
     // A Secret location may have been written without a row in the secure store.
     // A local parent link in any admitted copy is still evidence of ancestry.
-    const locationPlans = locationLane ? admittedPlans() : undefined;
     if (check.kind === 'scope' && check.links) {
       for (const { key, parent } of check.links) queue(parent, [key]);
     } else {
-      for (const store of locationPlans?.map(plan => plan.store) ?? [this]) {
+      const linkStores = linkStore ? [linkStore] : admittedPlans().map(plan => plan.store);
+      for (const store of linkStores) {
         for (const [child, parent] of store.parentLinksOf(identities)) queue(parent, [child]);
       }
     }
     for (const identity of identities) queue(parentIdentityOf(identity), [tierLedgerIdentityKey(identity)]);
     if (!pending.size) return withheld;
     const ledger = lane.ledger();
-    const plans = locationPlans ?? admittedPlans();
+    const plans = admittedPlans();
     const scopes = ledger ? [{
       ledger, corpusIds: new Set(plans.map(plan => plan.store.corpusId)),
       preRoutingLedger: (id: string) => plans.find(plan => plan.store.corpusId === id)?.store.preRoutingReadLedgerFor(ledger),

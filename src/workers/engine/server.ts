@@ -5803,6 +5803,12 @@ export async function main(): Promise<void> {
     chunkReleaseOptions,
     pendingItemProtection,
   );
+  const remoteCollectionCheck = createReleaseTierCheck(
+    () => tierScopes().map(scope => ({ ...scope, ownerPlanFor: ownerAncestorPlan })),
+    () => secureDerivativeDefault ?? 'allow',
+    chunkReleaseOptions,
+    pendingItemProtection,
+  );
   // Private answers on this computer (design background-agents.md, section
   // B): Ask privately, and Answer on a question waiting here. Planning none,
   // retrieval through the same scoped adapters with only the built-in
@@ -6139,7 +6145,7 @@ export async function main(): Promise<void> {
       // The remote output boundary revalidates a collected answer's release
       // manifest against the tier ledgers and release rules as they are now
       // (core/remote-result.ts).
-      releaseCheck: remoteReleaseCheck,
+      releaseCheck: remoteCollectionCheck,
       // An agent outside this computer reads no Private store: an item
       // waiting for its judgment, and one judged lower whose move out of
       // Private is still queued, are both out of its reach until then.
@@ -6328,6 +6334,7 @@ export async function main(): Promise<void> {
           lanes: sourceAnswerLanes!,
           question: input.question,
           ...(input.limit ? { maxResults: input.limit } : {}),
+          collectionCheck: remoteCollectionCheck,
           releaseCheck: remoteReleaseCheck,
         })));
       }
@@ -6339,6 +6346,7 @@ export async function main(): Promise<void> {
         lanes: sourceAnswerLanes!,
         question: input.question,
         ...(input.limit ? { maxResults: input.limit } : {}),
+        collectionCheck: remoteCollectionCheck,
         releaseCheck: remoteReleaseCheck,
       })))
     : undefined;

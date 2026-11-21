@@ -67119,7 +67119,8 @@ function* effectiveItemVerdicts(scopes, inputs) {
     }
     const lane = childLane(scope);
     if (lane) {
-      const orphaned = yield* hiddenChildKeysSteps(lane, governed.filter(({ index }) => inputs[index].dependency !== "parent_label").map(({ identity }) => identity));
+      const children = governed.filter(({ index }) => inputs[index].dependency !== "parent_label").map(({ identity }) => identity);
+      const orphaned = yield* hiddenChildKeysSteps(lane, children, LocalConnectorStore.ancestorScopeCheck(lane, scope.ownerPlanFor));
       for (const { index, identity } of governed) {
         if (inputs[index].dependency !== "parent_label" && orphaned.has(tierLedgerIdentityKey(identity))) {
           verdicts[index] = { ...verdicts[index], gone: true, hiddenByParent: true };
@@ -67202,6 +67203,7 @@ function createPendingGovernance(lanes, newLane, log = () => {}) {
 }
 var init_tier_visibility = __esm(() => {
   init_chunk_release();
+  init_local_index();
   init_tier_classifier();
   init_tier_ledger();
   init_child_visibility();
@@ -73769,7 +73771,8 @@ var init_local_index = __esm(() => {
         const here = visibility.copies.get(key);
         return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
       }) : [...rows];
-      const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf), planFor ? (identities, links) => this.excludedAncestorKeys(identities, planFor, { kind: "scope", links }) : undefined);
+      const lane = this.childVisibilityLane();
+      const hidden = yield* hiddenChildKeysSteps(lane, served.map(identityOf), LocalConnectorStore.ancestorScopeCheck(lane, planFor));
       return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
     }
     tierHiddenItemPks(options = {}) {
@@ -74733,16 +74736,21 @@ var init_local_index = __esm(() => {
     }
     childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, planFor, locationLane) {
       try {
-        const keys = visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: "names", includePrivateNames }, locationLane));
+        const keys = visibilityHere(LocalConnectorStore.excludedAncestorKeys(locationLane ?? this.childVisibilityLane(), identities, planFor, { kind: "names", includePrivateNames }, locationLane ? undefined : this));
         return new Set(identities.filter((identity) => keys.has(tierLedgerIdentityKey(identity))));
       } catch {
         return new Set(identities);
       }
     }
     childrenOutsideAncestorScope(identities, planFor, lane) {
-      return visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: "scope" }, lane));
+      return visibilityHere(LocalConnectorStore.excludedAncestorKeys(lane ?? this.childVisibilityLane(), identities, planFor, { kind: "scope" }, lane ? undefined : this));
     }
-    *excludedAncestorKeys(identities, planFor, check, locationLane) {
+    static ancestorScopeCheck(lane, planFor) {
+      if (!planFor)
+        return;
+      return (identities, links) => LocalConnectorStore.excludedAncestorKeys(lane, identities, planFor, { kind: "scope", links });
+    }
+    static *excludedAncestorKeys(lane, identities, planFor, check, linkStore) {
       const withheld = new Set;
       const lookupKey = (parent) => ("parentLocalItemId" in parent) ? `local:${parentKey(parent)}` : `provider:${tierLedgerIdentityKey(parent)}`;
       let pending = new Map;
@@ -74755,17 +74763,17 @@ var init_local_index = __esm(() => {
           entry.children.add(child);
         pending.set(key, entry);
       };
-      const lane = locationLane ?? this.childVisibilityLane();
-      const admittedPlans = () => (check.kind === "scope" ? lane.stores() : childVisibilityStores(lane)).flatMap((store) => {
+      let cachedPlans;
+      const admittedPlans = () => cachedPlans ??= (check.kind === "scope" ? lane.stores() : childVisibilityStores(lane)).flatMap((store) => {
         const plan = planFor(store.corpusId);
         return plan?.store === store ? [plan] : [];
       });
-      const locationPlans = locationLane ? admittedPlans() : undefined;
       if (check.kind === "scope" && check.links) {
         for (const { key, parent } of check.links)
           queue(parent, [key]);
       } else {
-        for (const store of locationPlans?.map((plan) => plan.store) ?? [this]) {
+        const linkStores = linkStore ? [linkStore] : admittedPlans().map((plan) => plan.store);
+        for (const store of linkStores) {
           for (const [child, parent] of store.parentLinksOf(identities))
             queue(parent, [child]);
         }
@@ -74775,7 +74783,7 @@ var init_local_index = __esm(() => {
       if (!pending.size)
         return withheld;
       const ledger = lane.ledger();
-      const plans = locationPlans ?? admittedPlans();
+      const plans = admittedPlans();
       const scopes = ledger ? [{
         ledger,
         corpusIds: new Set(plans.map((plan) => plan.store.corpusId)),
@@ -115477,7 +115485,8 @@ async function searchReleasedEvidence(input) {
       ...fact.sourceInstructionFlags.length > 0 ? { source_instructions_flagged: true } : {}
     }));
   });
-  const released = input.releaseCheck ? await recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
+  const collectionCheck = input.collectionCheck ?? input.releaseCheck;
+  const released = collectionCheck ? await recheckReleasedEvidence(evidence, identities, collectionCheck) : { evidence, withheld: 0 };
   recordReleaseManifest({
     inputs: identities.filter((_, index) => released.evidence.includes(evidence[index])),
     constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: false }
@@ -229982,7 +229991,7 @@ function createEmailSourceWorker(options = {}) {
           const prepare = (corpusId, ids) => withSearchVisibilityStores(parentAllowed, async () => {
             const parentGrants = new Map;
             const ownerAncestorPlan = (id) => {
-              if (!canSearch(id) || planErrors.has(id))
+              if (options.searchableCorpusIds?.has(id) === false || planErrors.has(id))
                 return;
               const plan = plans.get(id) ?? ownerPlanFor(id);
               if (plan && !parentGrants.has(plan.store))
@@ -283855,6 +283864,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...openCitedFile ? { openFile: openCitedFile } : {}
   });
   const remoteReleaseCheck = createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions, pendingItemProtection);
+  const remoteCollectionCheck = createReleaseTierCheck(() => tierScopes().map((scope) => ({ ...scope, ownerPlanFor: ownerAncestorPlan })), () => secureDerivativeDefault ?? "allow", chunkReleaseOptions, pendingItemProtection);
   if (sourceAnswerLanes) {
     await Promise.resolve().then(() => init_deep_read_jobs());
     await Promise.resolve().then(() => init_analyst_delphi());
@@ -284154,7 +284164,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         signal,
         sourceAnswerJobs
       }),
-      releaseCheck: remoteReleaseCheck,
+      releaseCheck: remoteCollectionCheck,
       pendingPrivacyItems: () => {
         const backlog = tierSnifferBacklog?.();
         return backlog ? backlog.pendingItems + backlog.lowerMovesQueued : undefined;
@@ -284312,6 +284322,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       lanes: sourceAnswerLanes,
       question: input.question,
       ...input.limit ? { maxResults: input.limit } : {},
+      collectionCheck: remoteCollectionCheck,
       releaseCheck: remoteReleaseCheck
     })));
   } : undefined;
@@ -284319,6 +284330,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     lanes: sourceAnswerLanes,
     question: input.question,
     ...input.limit ? { maxResults: input.limit } : {},
+    collectionCheck: remoteCollectionCheck,
     releaseCheck: remoteReleaseCheck
   }))) : undefined;
   const chatgptPrivateMatchProbe = sourceAnswerLanes ? async (question, _ctx, originalMatches) => {

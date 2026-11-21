@@ -3267,6 +3267,8 @@ export async function searchReleasedEvidence(input: {
   maxCharsPerCandidate?: number;
   evidenceByteBudget?: number;
   laneTimeoutMs?: number;
+  // Remote collection also checks each ancestor against the current owner scope.
+  collectionCheck?: ReleaseCheck;
   /**
    * The current tiers, read once more after every item is read and right
    * before the result is returned: an item moved to Private or Secrets (or
@@ -3378,7 +3380,8 @@ export async function searchReleasedEvidence(input: {
       ...(fact.sourceInstructionFlags.length > 0 ? { source_instructions_flagged: true as const } : {}),
     }));
   });
-  const released = input.releaseCheck ? await recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
+  const collectionCheck = input.collectionCheck ?? input.releaseCheck;
+  const released = collectionCheck ? await recheckReleasedEvidence(evidence, identities, collectionCheck) : { evidence, withheld: 0 };
   recordReleaseManifest({
     inputs: identities.filter((_, index) => released.evidence.includes(evidence[index]!)),
     constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },

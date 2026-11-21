@@ -25255,7 +25255,8 @@ function* effectiveItemVerdicts(scopes, inputs) {
     }
     const lane = childLane(scope);
     if (lane) {
-      const orphaned = yield* hiddenChildKeysSteps(lane, governed.filter(({ index }) => inputs[index].dependency !== "parent_label").map(({ identity }) => identity));
+      const children = governed.filter(({ index }) => inputs[index].dependency !== "parent_label").map(({ identity }) => identity);
+      const orphaned = yield* hiddenChildKeysSteps(lane, children, LocalConnectorStore.ancestorScopeCheck(lane, scope.ownerPlanFor));
       for (const { index, identity } of governed) {
         if (inputs[index].dependency !== "parent_label" && orphaned.has(tierLedgerIdentityKey(identity))) {
           verdicts[index] = { ...verdicts[index], gone: true, hiddenByParent: true };
@@ -27479,7 +27480,8 @@ class LocalConnectorStore {
       const here = visibility.copies.get(key);
       return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
     }) : [...rows];
-    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf), planFor ? (identities, links) => this.excludedAncestorKeys(identities, planFor, { kind: "scope", links }) : undefined);
+    const lane = this.childVisibilityLane();
+    const hidden = yield* hiddenChildKeysSteps(lane, served.map(identityOf), LocalConnectorStore.ancestorScopeCheck(lane, planFor));
     return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
   }
   tierHiddenItemPks(options = {}) {
@@ -28443,16 +28445,21 @@ class LocalConnectorStore {
   }
   childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, planFor, locationLane) {
     try {
-      const keys = visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: "names", includePrivateNames }, locationLane));
+      const keys = visibilityHere(LocalConnectorStore.excludedAncestorKeys(locationLane ?? this.childVisibilityLane(), identities, planFor, { kind: "names", includePrivateNames }, locationLane ? undefined : this));
       return new Set(identities.filter((identity) => keys.has(tierLedgerIdentityKey(identity))));
     } catch {
       return new Set(identities);
     }
   }
   childrenOutsideAncestorScope(identities, planFor, lane) {
-    return visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: "scope" }, lane));
+    return visibilityHere(LocalConnectorStore.excludedAncestorKeys(lane ?? this.childVisibilityLane(), identities, planFor, { kind: "scope" }, lane ? undefined : this));
   }
-  *excludedAncestorKeys(identities, planFor, check, locationLane) {
+  static ancestorScopeCheck(lane, planFor) {
+    if (!planFor)
+      return;
+    return (identities, links) => LocalConnectorStore.excludedAncestorKeys(lane, identities, planFor, { kind: "scope", links });
+  }
+  static *excludedAncestorKeys(lane, identities, planFor, check, linkStore) {
     const withheld = new Set;
     const lookupKey = (parent) => ("parentLocalItemId" in parent) ? `local:${parentKey(parent)}` : `provider:${tierLedgerIdentityKey(parent)}`;
     let pending = new Map;
@@ -28465,17 +28472,17 @@ class LocalConnectorStore {
         entry.children.add(child);
       pending.set(key, entry);
     };
-    const lane = locationLane ?? this.childVisibilityLane();
-    const admittedPlans = () => (check.kind === "scope" ? lane.stores() : childVisibilityStores(lane)).flatMap((store) => {
+    let cachedPlans;
+    const admittedPlans = () => cachedPlans ??= (check.kind === "scope" ? lane.stores() : childVisibilityStores(lane)).flatMap((store) => {
       const plan = planFor(store.corpusId);
       return plan?.store === store ? [plan] : [];
     });
-    const locationPlans = locationLane ? admittedPlans() : undefined;
     if (check.kind === "scope" && check.links) {
       for (const { key, parent } of check.links)
         queue(parent, [key]);
     } else {
-      for (const store of locationPlans?.map((plan) => plan.store) ?? [this]) {
+      const linkStores = linkStore ? [linkStore] : admittedPlans().map((plan) => plan.store);
+      for (const store of linkStores) {
         for (const [child, parent] of store.parentLinksOf(identities))
           queue(parent, [child]);
       }
@@ -28485,7 +28492,7 @@ class LocalConnectorStore {
     if (!pending.size)
       return withheld;
     const ledger = lane.ledger();
-    const plans = locationPlans ?? admittedPlans();
+    const plans = admittedPlans();
     const scopes = ledger ? [{
       ledger,
       corpusIds: new Set(plans.map((plan) => plan.store.corpusId)),
