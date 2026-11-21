@@ -28430,8 +28430,15 @@ class LocalConnectorStore {
       stores: () => [this]
     };
   }
-  childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, plans) {
-    const links = this.parentLinksOf(identities);
+  childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, planFor, locationLane) {
+    try {
+      const keys = this.withheldSearchIdentifierKeys(identities, includePrivateNames, planFor, locationLane);
+      return new Set(identities.filter((identity) => keys.has(tierLedgerIdentityKey(identity))));
+    } catch {
+      return new Set(identities);
+    }
+  }
+  withheldSearchIdentifierKeys(identities, includePrivateNames, planFor, locationLane) {
     const withheld = new Set;
     const lookupKey = (parent) => ("parentLocalItemId" in parent) ? `local:${parentKey(parent)}` : `provider:${tierLedgerIdentityKey(parent)}`;
     let pending = new Map;
@@ -28444,17 +28451,27 @@ class LocalConnectorStore {
         entry.children.add(child);
       pending.set(key, entry);
     };
-    for (const identity of identities) {
-      const child = tierLedgerIdentityKey(identity);
-      queue(links.get(child), [child]);
-      queue(parentIdentityOf(identity), [child]);
+    const lane = locationLane ?? this.childVisibilityLane();
+    const admittedPlans = () => childVisibilityStores(lane).flatMap((store) => {
+      const plan = planFor(store.corpusId);
+      return plan?.store === store ? [plan] : [];
+    });
+    const locationPlans = locationLane ? admittedPlans() : undefined;
+    for (const store of locationPlans?.map((plan) => plan.store) ?? [this]) {
+      for (const [child, parent] of store.parentLinksOf(identities))
+        queue(parent, [child]);
     }
+    for (const identity of identities)
+      queue(parentIdentityOf(identity), [tierLedgerIdentityKey(identity)]);
     if (!pending.size)
       return withheld;
-    const lane = this.childVisibilityLane();
     const ledger = lane.ledger();
-    const stores = childVisibilityStores(lane);
-    const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }] : [];
+    const plans = locationPlans ?? admittedPlans();
+    const scopes = ledger ? [{
+      ledger,
+      corpusIds: new Set(plans.map((plan) => plan.store.corpusId)),
+      preRoutingLedger: (id) => plans.find((plan) => plan.store.corpusId === id)?.store.preRoutingReadLedgerFor(ledger)
+    }] : [];
     for (let depth = 0;pending.size > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
       const linked = [];
       const encoded = [];
@@ -28464,17 +28481,14 @@ class LocalConnectorStore {
         else
           encoded.push(parent);
       }
-      const rows = stores.flatMap((store) => {
-        const plan = plans.get(store.corpusId);
-        if (!plan || plan.store !== store)
-          return [];
+      const rows = plans.flatMap(({ store, ancestorScope }) => {
         const active = [
           ...store.parentStandings(linked).map((row) => ({ ...row, key: lookupKey(row) })),
           ...Array.from(store.itemStandings(encoded).values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
         ].filter((row) => row.active);
-        const account = normalizeOptionalAccountScope(plan.scope.accountScope);
-        const predicate = connectorStoreFilterSql(plan.scope.filters);
-        const matches = predicate.sql ? new Set(plan.store.itemRowsForIdentities(active.map((row) => row.identity), (id) => normalizeConversationId(id.providerConversationId), predicate).map((row) => row.idx)) : undefined;
+        const account = normalizeOptionalAccountScope(ancestorScope.accountScope);
+        const predicate = connectorStoreFilterSql(ancestorScope.filters);
+        const matches = predicate.sql ? new Set(store.itemRowsForIdentities(active.map((row) => row.identity), (id) => normalizeConversationId(id.providerConversationId), predicate).map((row) => row.idx)) : undefined;
         return active.map((row, index) => ({
           ...row,
           corpusId: store.corpusId,

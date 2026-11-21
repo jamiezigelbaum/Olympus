@@ -6408,11 +6408,21 @@ export class LocalConnectorStore {
 
   /** A child's provider and local ids can incorporate the ids of its ancestors. */
   childrenWithWithheldSearchIdentifiers(
-    identities: readonly ChildProbe[],
-    includePrivateNames: boolean,
-    plans: ReadonlyMap<string, { store: LocalConnectorStore; scope: Pick<ConnectorStoreCorpusAdapterOptions, 'accountScope' | 'filters'> }>,
+    identities: readonly ChildProbe[], includePrivateNames: boolean, planFor: SearchAncestorPlanFor,
+    locationLane?: ChildVisibilityLane,
+  ): ReadonlySet<ChildProbe> {
+    try {
+      const keys = this.withheldSearchIdentifierKeys(identities, includePrivateNames, planFor, locationLane);
+      return new Set(identities.filter(identity => keys.has(tierLedgerIdentityKey(identity))));
+    } catch {
+      // Unreadable ancestry cannot authorize an identifier or locator.
+      return new Set(identities);
+    }
+  }
+
+  private withheldSearchIdentifierKeys(
+    identities: readonly ChildProbe[], includePrivateNames: boolean, planFor: SearchAncestorPlanFor, locationLane?: ChildVisibilityLane,
   ): Set<string> {
-    const links = this.parentLinksOf(identities);
     const withheld = new Set<string>();
     // A local link and an encoded provider id are independent evidence of ancestry.
     // Check both, including on intermediate rows whose stored link is missing.
@@ -6427,16 +6437,25 @@ export class LocalConnectorStore {
       for (const child of children) entry.children.add(child);
       pending.set(key, entry);
     };
-    for (const identity of identities) {
-      const child = tierLedgerIdentityKey(identity);
-      queue(links.get(child), [child]);
-      queue(parentIdentityOf(identity), [child]);
+    const lane = locationLane ?? this.childVisibilityLane();
+    const admittedPlans = () => childVisibilityStores(lane).flatMap(store => {
+      const plan = planFor(store.corpusId);
+      return plan?.store === store ? [plan] : [];
+    });
+    // A Secret location may have been written without a row in the secure store.
+    // A local parent link in any admitted copy is still evidence of ancestry.
+    const locationPlans = locationLane ? admittedPlans() : undefined;
+    for (const store of locationPlans?.map(plan => plan.store) ?? [this]) {
+      for (const [child, parent] of store.parentLinksOf(identities)) queue(parent, [child]);
     }
+    for (const identity of identities) queue(parentIdentityOf(identity), [tierLedgerIdentityKey(identity)]);
     if (!pending.size) return withheld;
-    const lane = this.childVisibilityLane();
     const ledger = lane.ledger();
-    const stores = childVisibilityStores(lane);
-    const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map(store => store.corpusId)) }] : [];
+    const plans = locationPlans ?? admittedPlans();
+    const scopes = ledger ? [{
+      ledger, corpusIds: new Set(plans.map(plan => plan.store.corpusId)),
+      preRoutingLedger: (id: string) => plans.find(plan => plan.store.corpusId === id)?.store.preRoutingReadLedgerFor(ledger),
+    }] : [];
     for (let depth = 0; pending.size > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
       const linked: ParentRef[] = [];
       const encoded: ChildProbe[] = [];
@@ -6444,18 +6463,16 @@ export class LocalConnectorStore {
         if ('parentLocalItemId' in parent) linked.push(parent);
         else encoded.push(parent);
       }
-      const rows = stores.flatMap(store => {
-        const plan = plans.get(store.corpusId);
-        if (!plan || plan.store !== store) return [];
+      const rows = plans.flatMap(({ store, ancestorScope }) => {
         const active = [
           ...store.parentStandings(linked).map(row => ({ ...row, key: lookupKey(row) })),
           ...Array.from(store.itemStandings(encoded).values(), row => ({ ...row, key: lookupKey(row.identity) })),
         ].filter(row => row.active);
         // Check the exact identities together against their own store's current rows.
         // Keep excluded copies in the verdict so another copy cannot vouch for them.
-        const account = normalizeOptionalAccountScope(plan.scope.accountScope);
-        const predicate = connectorStoreFilterSql(plan.scope.filters);
-        const matches = predicate.sql ? new Set(plan.store.itemRowsForIdentities(
+        const account = normalizeOptionalAccountScope(ancestorScope.accountScope);
+        const predicate = connectorStoreFilterSql(ancestorScope.filters);
+        const matches = predicate.sql ? new Set(store.itemRowsForIdentities(
           active.map(row => row.identity), id => normalizeConversationId(id.providerConversationId), predicate,
         ).map(row => row.idx)) : undefined;
         return active.map((row, index) => ({
@@ -18846,6 +18863,20 @@ export function defineConnectorCorpus(options: ConnectorCorpusOptions): SourceIn
 
 // --- Routed search adapter ------------------------------------------------------
 
+export interface SearchAncestorPlan {
+  store: LocalConnectorStore;
+  ancestorScope: Pick<ConnectorStoreCorpusAdapterOptions, 'accountScope' | 'filters'>;
+}
+type SearchAncestorPlanFor = (corpusId: string) => SearchAncestorPlan | undefined;
+
+/** Query match predicates apply to the hit. Keep its account, path and trusted admission filters for the ancestors. */
+export function searchAncestorScope(
+  accountScope: string | undefined, filters: ConnectorStoreSearchFilters | undefined, owner?: ConnectorStoreSearchFilters,
+): SearchAncestorPlan['ancestorScope'] {
+  const { authoredAfter, authoredBefore, conversationId, senderId, senderLabel, senderIdentities, searchTextExactLines, ...admission } = filters ?? {};
+  return { ...(accountScope ? { accountScope } : {}), filters: { ...admission, ...owner } };
+}
+
 export interface ConnectorStoreCorpusAdapterOptions {
   store: LocalConnectorStore;
   embeddingProvider?: SourceEmbeddingProvider;
@@ -18859,6 +18890,8 @@ export interface ConnectorStoreCorpusAdapterOptions {
   /** Message/store metadata filters applied in SQL in every retrieval lane. */
   filters?: ConnectorStoreSearchFilters;
   searchEligibility?: ConnectorStoreSearchEligibility;
+  /** The per-store owner scopes a routed partial can use to prove cross-store ancestry. */
+  ancestorPlanFor?: SearchAncestorPlanFor;
   /** Optional declared projection applied only to final eligible hits. */
   resultProjector?: ConnectorStoreResultProjector;
   /** Time seams for waiting on a starting embedding model; tests pass a test clock. */
@@ -18876,7 +18909,10 @@ export interface ConnectorStoreCorpusAdapterOptions {
 // Otherwise the keyword lane serves alone (with an honest skip reason when a
 // provider was configured but could not run). secure_local stores never run
 // the vector lane with a non-local provider — fail closed to keyword.
-type GrantSearchRequest = SourceIndexCorpusSearchRequest & { startGrantEpoch?: number | undefined };
+type GrantSearchRequest = SourceIndexCorpusSearchRequest & {
+  startGrantEpoch?: number | undefined;
+  ancestorPlanFor?: SearchAncestorPlanFor;
+};
 
 function publishPartialRows<T extends ConnectorStoreSearchRow>(
   store: LocalConnectorStore, request: GrantSearchRequest, rows: readonly T[],
@@ -18887,7 +18923,15 @@ function publishPartialRows<T extends ConnectorStoreSearchRow>(
   if (!request.onPartialResponse) return;
   // Names can turn Private while a lane awaits (a metadata-fallback read): recheck right before a partial leaves.
   const eligible = searchEligibility?.(rows);
-  const prefix = (eligible ? rows.filter((_, index) => eligible[index]) : rows).slice(0, request.maxResults);
+  const admitted = eligible ? rows.filter((_, index) => eligible[index]) : rows;
+  const { allowedCorpusIds, allowedTrustDomains } = request.context;
+  const withheld = store.childrenWithWithheldSearchIdentifiers(
+    admitted.map(row => row.sourceItem), allowedTrustDomains.includes('secure_local'), id => {
+      if (allowedCorpusIds && !allowedCorpusIds.includes(id)) return undefined;
+      const plan = request.ancestorPlanFor?.(id);
+      return plan && allowedTrustDomains.includes(plan.store.trustDomain) ? plan : undefined;
+    });
+  const prefix = (withheld.size ? admitted.filter(row => !withheld.has(row.sourceItem)) : admitted).slice(0, request.maxResults);
   const hits = prefix.map(row => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
   const response = withSearchGrantDelivery(store, filters, request,
     { hits, latencyMs: 0, incomplete: true, rawExposed: false }, prefix);
@@ -18978,6 +19022,8 @@ export function createConnectorStoreCorpusAdapter(
 ): SourceIndexCorpusSearchAdapter {
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
+  // A standalone adapter only knows its own store's admission filters.
+  const ownAncestorPlan = { store, ancestorScope: searchAncestorScope(options.accountScope, filters) };
   // A composite search retains the grant receipt until its last store settles.
   // Standalone adapter calls release their results and prefixes to their own caller.
   const scopedSearch = (
@@ -18987,6 +19033,7 @@ export function createConnectorStoreCorpusAdapter(
     const publish = input.onPartialResponse;
     const request: GrantSearchRequest = {
       ...input,
+      ancestorPlanFor: options.ancestorPlanFor ?? (id => id === store.corpusId ? ownAncestorPlan : undefined),
       ...(usesSearchGrants(filters) ? { startGrantEpoch: store.onDemandGrantEpoch() } : {}),
       ...(publish && !input[DEFER_SEARCH_DELIVERY] ? {
         onPartialResponse: (response, lane) => publish(deliverCorpusSearch([response], input.maxResults), lane),

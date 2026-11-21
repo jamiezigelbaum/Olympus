@@ -12,9 +12,12 @@ import { findOperationByName } from '../src/core/operations.ts';
 import { createInProcessOperationContext } from '../src/workers/remote-mcp.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
+import { fixtureLanes } from './helpers/admission-fixture.ts';
 import { JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
+import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
+import { hiddenProbesByParentIdentity } from '../src/workers/connector-store/child-visibility.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
-import { LocalConnectorStore, type ConnectorStoreSyncOptions } from '../src/workers/connector-store/index.ts';
+import { defineConnectorCorpus, LocalConnectorStore, type ConnectorStoreSyncOptions } from '../src/workers/connector-store/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
@@ -30,6 +33,7 @@ interface Fixture {
   text: string;
   tier: SourceTrustTier;
   parentId?: string;
+  authoredAt?: string;
 }
 
 function connector(fixtures: readonly Fixture[]): SourceConnector {
@@ -50,7 +54,7 @@ function connector(fixtures: readonly Fixture[]): SourceConnector {
     },
     mimeType: 'text/markdown',
     content: { kind: 'text', text: fixture.text },
-    metadata: Object.freeze({ name: fixture.name }),
+    metadata: Object.freeze({ name: fixture.name, ...(fixture.authoredAt ? { authoredAt: fixture.authoredAt } : {}) }),
     fetchedAt: '2026-10-05T00:00:00.000Z',
   }));
   return {
@@ -461,6 +465,107 @@ describe('source_index_search and rows Private by their own tier', () => {
     } finally {
       internal.close();
       sibling.close();
+      ledger.close();
+    }
+  });
+
+  test('a date-filtered child keeps its selected item when its approved parent is older', async () => {
+    const parentId = 'garden-plan';
+    const childId = `${parentId}#child:notes`;
+    const internal = await store(INTERNAL, 'internal', [
+      { id: parentId, name: 'orchard plan', text: 'orchard', tier: 'S3', authoredAt: '2025-01-01T00:00:00Z' },
+      { id: childId, parentId, name: 'orchard notes', text: 'orchard', tier: 'S3', authoredAt: '2026-01-01T00:00:00Z' },
+    ]);
+    try {
+      const worker = createEmailSourceWorker({ connectorStores: [internal] });
+      const page = await search(worker, { query: 'orchard', corpus_id: INTERNAL, after: '2025-12-01T00:00:00Z' });
+      expect(page.hits).toMatchObject([{ selected_item: { provider_item_id: childId } }]);
+    } finally { internal.close(); }
+  });
+
+  test('partial results use the current owner scope of the store holding the parent', async () => {
+    const parentId = 'message';
+    const childId = `${parentId}#child:notes`;
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const parent = await store(INTERNAL, 'internal', [{ id: parentId, name: 'plan', text: 'plan', tier: 'S3' }], ledger);
+    const child = await store(SECURE, 'secure_local', [{ id: childId, name: 'notes', text: 'orchard', tier: 'S3' }], ledger);
+    const stores = [parent, child];
+    for (const holder of stores) holder.useChildVisibility({ stores: () => stores, ledger: () => ledger });
+    let parentAccount = ACCOUNT;
+    try {
+      const lanes = fixtureLanes(stores, holder => ({
+        allowed: true, contentAllowed: true, accountScope: holder === parent ? parentAccount : ACCOUNT,
+      }), () => ({ provider: 'fixture', accountScope: ACCOUNT }))({ question: 'orchard' });
+      const partialIds = async (allowedCorpusIds: string[]) => {
+        const ids: string[] = [];
+        await lanes.adapters[SECURE]!({
+          corpus: defineConnectorCorpus(child), query: 'orchard', maxResults: 5,
+          context: { allowedCorpusIds, allowedTrustDomains: ['internal', 'secure_local'] },
+          onPartialResponse: page => { ids.push(...page.hits.map(hit => hit.sourceItem.providerItemId)); },
+        });
+        return ids;
+      };
+      expect(await partialIds([INTERNAL, SECURE])).toContain(childId);
+      expect(await partialIds([SECURE])).not.toContain(childId);
+      parentAccount = 'other';
+      expect(await partialIds([INTERNAL, SECURE])).not.toContain(childId);
+    } finally {
+      parent.close();
+      child.close();
+      ledger.close();
+    }
+  });
+
+  test.each(['account', 'folder', 'approval'] as const)('a Secret attachment withholds its locator outside its parent’s %s scope', async exclusion => {
+    const parentId = 'parentmarker';
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const secrets = new SecretLocationsIndex({ dbPath: ':memory:' });
+    const internal = await store(INTERNAL, 'internal', [
+      { id: parentId, name: 'message', text: 'message', tier: 'S3' },
+    ], ledger, () => ({
+      accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000001', folderKeys: ['inbox'],
+    }));
+    const secure = await store(SECURE, 'secure_local', [], ledger);
+    const stores = [internal, secure];
+    const lane = { stores: () => stores, ledger: () => ledger };
+    // Retained stores may be mounted without a live sync tier set after restart.
+    const locator = `https://mail.google.com/mail/u/0/#all/${parentId}`;
+    secrets.record({
+      identity: { provider: 'fixture', accountScope: ACCOUNT, providerItemId: `${parentId}#child:part1` },
+      namesReleasable: true, locator, title: 'attachment', findingKinds: ['credential_assignment'],
+    });
+    let restricted = false;
+    try {
+      const worker = createEmailSourceWorker({
+        connectorStores: stores,
+        connectorStoreTierSiblings: () => [SECURE],
+        connectorStoreReadScope: holder => restricted && holder === internal
+          ? { allowed: true, accountScope: exclusion === 'account' ? 'other' : ACCOUNT, filters: {
+              ...(exclusion === 'folder' ? { sourceScopeFolderNoneKeys: ['inbox'] } : {}),
+              ...(exclusion === 'approval' ? { sourceScopeGeneration: 'b'.repeat(64) } : {}),
+            } }
+          : { allowed: true, accountScope: ACCOUNT },
+        secretLocationSearch: (query, searched, withholdLocators) => secrets.search(query,
+          searched.find(scope => scope.corpusId === SECURE)!, {
+            hide: ids => hiddenProbesByParentIdentity(lane, ids),
+            withholdLocators: ids => withholdLocators(SECURE, ids, lane),
+          }),
+      });
+      const find = (query: string) => search(worker, { query, corpus_id: INTERNAL });
+      const [allowed] = (await find('attachment')).secret_locations;
+      expect(allowed.ref).toMatch(/^secret:/);
+      expect(allowed).toMatchObject({ locator, title: 'attachment' });
+      restricted = true;
+      const page = await find('attachment');
+      expect(page.secret_locations).toEqual([{
+        source: 'fixture', ref: allowed.ref, title: 'attachment', finding_kinds: ['credential_assignment'],
+      }]);
+      expect(JSON.stringify(page)).not.toContain(parentId);
+      expect((await find(parentId)).secret_locations).toBeUndefined();
+    } finally {
+      secrets.close();
+      internal.close();
+      secure.close();
       ledger.close();
     }
   });

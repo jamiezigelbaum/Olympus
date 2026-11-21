@@ -300,6 +300,8 @@ export class SecretLocationsIndex {
     scope: SecretLocationScope,
     options: {
       limit?: number;
+      /** Neither match nor release these items' parent-derived locators. */
+      withholdLocators?: (identities: readonly SecretLocationIdentity[]) => ReadonlySet<SecretLocationIdentity>;
       /**
        * Told the identities of the matches before the best are taken, and
        * names those that must not be shown (a child item whose parent is not
@@ -317,10 +319,7 @@ export class SecretLocationsIndex {
       ${scope.accountScope ? 'WHERE account_scope = ?' : ''}
       ORDER BY detected_at DESC
     `).all(...(scope.accountScope ? [scope.accountScope] : [])) as SecretLocationRow[];
-    const scored: Array<{ location: SecretLocation; score: number }> = [];
-    for (const row of rows) {
-      const location = locationFromRow(row);
-      if (!secretLocationWithinScope(location, scope)) continue;
+    const scoreLocation = (location: SecretLocation): number => {
       const words = secretLocationWords(location);
       // Either reading of the hyphens may match; the better one scores.
       let best = 0;
@@ -328,7 +327,14 @@ export class SecretLocationsIndex {
         const score = terms.filter((term) => words.has(term)).length;
         if (score >= Math.min(3, terms.length)) best = Math.max(best, score);
       }
-      if (best > 0) scored.push({ location, score: best });
+      return best;
+    };
+    const scored: Array<{ location: SecretLocation; score: number }> = [];
+    for (const row of rows) {
+      const location = locationFromRow(row);
+      if (!secretLocationWithinScope(location, scope)) continue;
+      const score = scoreLocation(location);
+      if (score > 0) scored.push({ location, score });
     }
     const identities = scored.map(({ location }): SecretLocationIdentity => ({
       provider: location.source,
@@ -337,15 +343,24 @@ export class SecretLocationsIndex {
       ...(location.conversationKey ? { providerConversationId: location.conversationKey } : {}),
     }));
     let hidden: ReadonlySet<SecretLocationIdentity> = new Set();
-    if (options.hide && scored.length > 0) {
+    if (scored.length > 0) {
       try {
-        hidden = options.hide(identities);
+        if (options.hide) hidden = options.hide(identities);
+        if (options.withholdLocators) {
+          const withheld = options.withholdLocators(identities);
+          scored.forEach((match, index) => {
+            if (match.location.locator && withheld.has(identities[index]!)) {
+              match.location.locator = null;
+              match.score = scoreLocation(match.location);
+            }
+          });
+        }
       } catch {
         return [];
       }
     }
     return scored
-      .filter((_, index) => !hidden.has(identities[index]!))
+      .filter((match, index) => match.score > 0 && !hidden.has(identities[index]!))
       .sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt))
       .slice(0, limit)
       .map(({ location }) => ({

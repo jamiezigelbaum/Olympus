@@ -7,7 +7,7 @@ import { listFileScopeSources } from '../../core/file-scope-sources.ts';
 import { deliverCorpusSearch, DEFER_SEARCH_DELIVERY, SEARCH_GRANT_MATCH } from '../../core/source-index/router.ts';
 import { scopedEmbeddingOptions } from '../connector-store/embedding-plan.ts';
 import { effectiveItemVerdicts, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
-import { visibilityHere, withSearchVisibilityStores, type ChildVisibilityStore } from '../connector-store/child-visibility.ts';
+import { visibilityHere, withSearchVisibilityStores, type ChildProbe, type ChildVisibilityLane, type ChildVisibilityStore } from '../connector-store/child-visibility.ts';
 import { tierLedgerIdentityKey } from '../classification/tier-ledger.ts';
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { sourceItemReadSelectedItem, sourceItemReadPage } from '../../core/source-index/selected-items.ts';
@@ -177,7 +177,7 @@ import {
 import {
   LocalConnectorStore,
   STATUS_COUNTS_MAX_AGE_MS,
-  normalizeConnectorStoreSearchFilters,
+  normalizeConnectorStoreSearchFilters, searchAncestorScope,
   createConnectorStoreCorpusAdapter,
   defineConnectorCorpus,
 } from '../connector-store/index.ts';
@@ -3623,7 +3623,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ...(accountScope ? { accountScope } : {}),
               ...(filters ? { filters } : {}),
             };
-            return { store, scope, readScopeSignature, searchRequest };
+            const ancestorScope = searchAncestorScope(accountScope, searchRequest.filters, mandatoryScope?.filters);
+            return { store, scope, ancestorScope, readScopeSignature, searchRequest };
           };
           type SearchPlan = NonNullable<ReturnType<typeof planStore>>;
           const plans = new Map<string, SearchPlan>();
@@ -3641,6 +3642,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }
           };
           const parentAllowed = (candidate: ChildVisibilityStore) => plans.get(candidate.corpusId)?.store === candidate;
+          const planFor = (id: string) => plans.get(id);
+          const withheldIdentifiers = (corpusId: string, identities: readonly ChildProbe[], lane?: ChildVisibilityLane) =>
+            plans.get(corpusId)?.store.childrenWithWithheldSearchIdentifiers(identities, !personalNamesOnly, planFor, lane)
+              ?? new Set(identities);
           const prepare = (corpusId: string, ids: readonly string[]) => withSearchVisibilityStores(parentAllowed, async () => {
             const searchConnectorStore = async ({ store, scope, readScopeSignature, searchRequest }: SearchPlan) => {
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId)
@@ -3780,7 +3785,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               }
               const searchedSecureLocal = runs.some((run) => run.store.trustDomain === 'secure_local');
               const secretLocations = tiered
-                ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? []
+                ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope), withheldIdentifiers) ?? []
                 : [];
               const pendingPrivacy = readPendingPrivacyItems(options);
               const released = runs.map(run => deliverCorpusSearch([run.result]));
@@ -3808,14 +3813,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               for (const { store } of runs) {
                 const governed = hits.filter(hit => hit.corpusId === store.corpusId);
                 if (governed.length === 0) continue;
-                try {
-                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map(hit => hit.sourceItem), !personalNamesOnly, plans);
-                  for (const hit of governed) {
-                    if (children.has(tierLedgerIdentityKey(hit.sourceItem))) withheldChildIdentifiers.add(hit);
-                  }
-                } catch {
-                  // If parent names cannot be checked, only release the hit's own title.
-                  for (const hit of governed) withheldChildIdentifiers.add(hit);
+                const hidden = withheldIdentifiers(store.corpusId, governed.map(hit => hit.sourceItem));
+                for (const hit of governed) {
+                  if (hidden.has(hit.sourceItem)) withheldChildIdentifiers.add(hit);
                 }
               }
               const releasedHits = hits.map((rankedHit) => {

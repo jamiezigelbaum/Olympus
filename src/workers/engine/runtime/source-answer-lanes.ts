@@ -28,6 +28,7 @@ import {
 import {
   createConnectorStoreContentProvider,
   createConnectorStoreCorpusAdapter,
+  searchAncestorScope, type SearchAncestorPlan,
   type ConnectorStoreSearchFilters,
   type LocalConnectorStore,
 } from '../../connector-store/index.ts';
@@ -148,6 +149,11 @@ export function createSourceAnswerLanes(
     deps.ownerQuestions?.retrieving();
     // The scope each corpus is searched under in THIS request, so the
     // Secret locations released beside the answer are confined to it.
+    const ancestorPlans = new Map<string, SearchAncestorPlan & { readScopeSignature: string }>();
+    const ancestorPlanFor = (id: string) => {
+      const plan = ancestorPlans.get(id);
+      return plan && JSON.stringify(deps.readScope(plan.store)) === plan.readScopeSignature ? plan : undefined;
+    };
     const searchScopes = new Map<string, { accountScope?: string; filters?: ConnectorStoreSearchFilters }>();
     // Each store's embedding provider for THIS request, memoized so the
     // vector lane and passage ranking embed the query once between them.
@@ -210,9 +216,13 @@ export function createSourceAnswerLanes(
         ...(connectorStoreAccount ? { accountScope: connectorStoreAccount } : {}),
         ...(filters ? { filters } : {}),
       });
+      ancestorPlans.set(store.corpusId, {
+        store, ancestorScope: searchAncestorScope(mandatoryScope.accountScope ?? connectorStoreAccount, scope.filters, mandatoryScope.filters),
+        readScopeSignature: JSON.stringify(mandatoryScope),
+      });
       const semanticRelevanceBar = deps.semanticRelevanceBar?.(store);
       return createConnectorStoreCorpusAdapter({
-        store,
+        store, ancestorPlanFor,
         retrievalMode: request.retrieval_mode ?? 'keyword',
         // Trusted local/private consumers only; never a tool/HTTP request field.
         localKeywordFallback: mode === 'built_in_only' ? true : (mode === 'private_search' && store.trustDomain === 'secure_local' ? 'private_search' : false),

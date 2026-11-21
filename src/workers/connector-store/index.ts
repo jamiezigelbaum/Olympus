@@ -40,6 +40,8 @@ export {
   type ConnectorStoreCoverageGap,
   type ConnectorStoreContentProviderOptions,
   type ConnectorStoreCorpusAdapterOptions,
+  type SearchAncestorPlan,
+  searchAncestorScope,
   type ConnectorStoreExclusionCounts,
   type ConnectorStorePurgeSummary,
   type ConnectorStoreMetadataOnlyStripSummary,
