@@ -22,7 +22,7 @@
 
 import type { ReleaseCheck, ReleaseInput, ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import { releaseChunks, type ChunkReleaseOptions } from '../classification/chunk-release.ts';
-import type { LocalConnectorStore } from './local-index.ts';
+import { LocalConnectorStore, type SearchAncestorPlanFor } from './local-index.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate, SourceIndexVisibilityGateReport } from '../../core/source-index/router.ts';
 import { contentHeldForJudgment } from '../classification/tier-classifier.ts';
 import { itemNamesHeldForJudgment, tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type TierLedgerItemState, type TierVisibilityReads } from '../classification/tier-ledger.ts';
@@ -44,6 +44,8 @@ export interface TierVisibilityScope {
    * them for every scope it builds.
    */
   stores?: () => readonly (ChildVisibilityStore & Partial<Pick<LocalConnectorStore, 'releaseItemChunks' | 'preRoutingReadLedgerFor'>>)[];
+  /** Look up the current owner grant when rechecking a remote release. */
+  ownerPlanFor?: SearchAncestorPlanFor;
   /** Direct store exits can supply the historical ledger without resolving child visibility a second time. */
   preRoutingLedger?: (corpusId: string) => TierLedger | undefined;
 }
@@ -352,7 +354,8 @@ export function* effectiveItemVerdicts(
     // copies say, and the answer that drew on it is withheld whole.
     const lane = childLane(scope);
     if (lane) {
-      const orphaned = yield* hiddenChildKeysSteps(lane, governed.filter(({ index }) => inputs[index]!.dependency !== 'parent_label').map(({ identity }) => identity));
+      const children = governed.filter(({ index }) => inputs[index]!.dependency !== 'parent_label').map(({ identity }) => identity);
+      const orphaned = yield* hiddenChildKeysSteps(lane, children, LocalConnectorStore.ancestorScopeCheck(lane, scope.ownerPlanFor));
       for (const { index, identity } of governed) {
         if (inputs[index]!.dependency !== 'parent_label' && orphaned.has(tierLedgerIdentityKey(identity))) {
           verdicts[index] = { ...verdicts[index]!, gone: true, hiddenByParent: true };

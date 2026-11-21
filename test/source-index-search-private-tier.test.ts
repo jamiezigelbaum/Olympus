@@ -19,11 +19,14 @@ import { SecretLocationsIndex, secretLocationFingerprint } from '../src/workers/
 import { createParentLabelResolver } from '../src/workers/connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../src/workers/connector-store/unreadable-locators.ts';
 import { createTierSecretLocations } from '../src/workers/engine/runtime/tier-secret-locations.ts';
-import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
+import { provedChunks, provedReleaseCheck } from './helpers/scripted-search-release.ts';
+import { createReleaseManifestSink, runWithReleaseManifestSink } from '../src/core/release-manifest.ts';
+import { remoteOperationOutputOffThread } from '../src/core/remote-result.ts';
+import { createAnalystSourceIndexAnswerHandler, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { defineConnectorCorpus, LocalConnectorStore, type ConnectorStoreSyncOptions } from '../src/workers/connector-store/index.ts';
-import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
@@ -412,6 +415,78 @@ describe('source_index_search and rows Private by their own tier', () => {
       expect(result.hits[0]).not.toHaveProperty('selected_item');
       expect(JSON.stringify(result)).not.toContain(grandparentId);
     } finally { internal.close(); }
+  });
+
+  test('a single-tier search checks an encoded parent in its own tier without releasing its names', async () => {
+    const parentId = 'private-parent-marker';
+    const internal = await store('internal.drive.docs', 'internal', [
+      { id: `${parentId}#child:notes`, name: 'pruning notes', text: 'orchard', tier: 'S3' },
+    ]);
+    const parent = await store('secure_local.drive.docs', 'secure_local', [
+      { id: parentId, name: 'private orchard plan', text: 'orchard', tier: 'S4' },
+    ]);
+    const stores = [internal, parent];
+    let approved = true;
+    try {
+      internal.useChildVisibility({ stores: () => stores, ledger: () => undefined });
+      const worker = createEmailSourceWorker({
+        connectorStores: stores, connectorStoreReadScope: holder => ({ allowed: holder !== parent || approved }),
+      });
+      const config = defaultConfig();
+      config.email.enabled = true;
+      config.sourceIndex.enabled = true;
+      const client = new EmailClient(config, new DirectHttpEmailTransport(async (input, init) =>
+        worker.fetch(new Request(String(input).replace(config.email.baseUrl, 'http://worker.test/v1'), init))));
+      const find = () => client.sourceIndexSearch({ corpusId: internal.corpusId, query: 'orchard', allTiers: false });
+      const result = await find();
+      expect(result.hits).toMatchObject([{ provenance: { citation: { title: 'pruning notes' } } }]);
+      expect(result.audit.queries_attempted).toBe(1);
+      expect(JSON.stringify(result)).not.toContain(parentId);
+      expect(JSON.stringify(result)).not.toContain('private orchard plan');
+      approved = false;
+      expect((await find()).hits).toEqual([]);
+    } finally {
+      internal.close();
+      parent.close();
+    }
+  });
+
+  test('remote collection rechecks the parent folder of a previously admitted child', async () => {
+    const parentId = 'garden-message';
+    const childId = `${parentId}#child:notes`;
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const internal = await store(INTERNAL, 'internal', [
+      { id: parentId, name: 'garden plan', text: 'garden', tier: 'S3' },
+      { id: childId, parentId, name: 'pruning notes', text: 'orchard', tier: 'S3' },
+    ], ledger, item => ({
+      accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000001',
+      folderKeys: [item.identity.providerItemId === parentId ? 'plans' : 'notes'],
+    }));
+    try {
+      let excluded: string[] = [];
+      const ownerPlanFor = (id: string) => id === INTERNAL ? {
+        store: internal, ancestorScope: { accountScope: ACCOUNT, filters: { sourceScopeFolderNoneKeys: excluded } },
+      } : undefined;
+      const releaseCheck = { ...createReleaseTierCheck(() => [{
+        ledger, corpusIds: new Set([INTERNAL]), stores: () => [internal], ownerPlanFor,
+      }], () => 'allow'), chunks: provedChunks };
+      // Retrieval supplies the previously admitted candidate. Only the release check sees the changed grant.
+      const lanes = fixtureLanes([internal], () => ({ allowed: true, contentAllowed: true }), () => ({ provider: FILE_SOURCE.provider, accountScope: ACCOUNT }));
+      const evidence = () => searchReleasedEvidence({ lanes, question: 'orchard', releaseCheck: provedReleaseCheck, collectionCheck: releaseCheck });
+      const sink = createReleaseManifestSink();
+      const before = await runWithReleaseManifestSink(sink, evidence);
+      expect(before.evidence).toMatchObject([{ provider_item_id: childId }]);
+      const answer = { answer: 'Prune the orchard.', evidence: before.evidence };
+      const collect = () => remoteOperationOutputOffThread('source_answer_result', answer, { releaseCheck, releaseManifests: sink.manifests });
+      expect((await collect()).status).toBe('answered');
+      excluded = ['plans'];
+      const [saved, search] = await Promise.all([collect(), evidence()]);
+      expect({ status: saved.status, citations: saved.citations, evidence: search.evidence, withheld: search.withheld })
+        .toEqual({ status: 'withheld', citations: [], evidence: [], withheld: 1 });
+    } finally {
+      internal.close();
+      ledger.close();
+    }
   });
 
   test('an unlinked child keeps its identifiers when its encoded parent has Personal names', async () => {

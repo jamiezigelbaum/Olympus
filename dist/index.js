@@ -13147,6 +13147,7 @@ var init_chunk_release = __esm(() => {
 // src/workers/connector-store/tier-visibility.ts
 var init_tier_visibility = __esm(() => {
   init_chunk_release();
+  init_local_index();
   init_tier_classifier();
   init_tier_ledger();
   init_child_visibility();

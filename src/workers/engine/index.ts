@@ -3655,7 +3655,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const prepare = (corpusId: string, ids: readonly string[]) => withSearchVisibilityStores(parentAllowed, async () => {
             const parentGrants = new Map<LocalConnectorStore, string | undefined>();
             const ownerAncestorPlan = (id: string) => {
-              if (!canSearch(id) || planErrors.has(id)) return undefined;
+              // The request selects which tiers supply hits and names. An eligible
+              // sibling can still establish the owner's scope for an encoded parent.
+              if (options.searchableCorpusIds?.has(id) === false || planErrors.has(id)) return undefined;
               const plan = plans.get(id) ?? ownerPlanFor(id);
               if (plan && !parentGrants.has(plan.store)) parentGrants.set(plan.store, plan.readScopeSignature);
               return plan;
