@@ -1,7 +1,7 @@
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import { readConnectedHandleRegistry, type ConnectedCredentialHandle } from '../credential-broker/connected-handles.ts';
 import { gmailCursorConnectorIds } from '../google-connectors/index.ts';
-import { GMAIL_IMPORTED_FILTERS } from '../google-connectors/gmail-archive-target.ts';
+import { GMAIL_IMPORTED_FILTERS, GMAIL_IMPORT_CONNECTOR_PREFIX } from '../google-connectors/gmail-archive-target.ts';
 import { readSourceAccountBindings, sourceAccountBindingsPath, type SourceAccountBinding } from '../../core/source-account-binding.ts';
 import { compareProviderAccounts, namesAccountByAddressOnly } from '../../core/provider-account-identity.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
@@ -57,30 +57,35 @@ function gmailEmbeddingPopulation(input: {
   provider?: SourceEmbeddingProvider | undefined;
   accountScope: string;
   ref: MailSourceScopePolicyRef | undefined;
+  privateStore: boolean;
 }) {
   const { provider, accountScope, ref } = input;
   if (provider?.provider === 'built-in' && provider.backend === 'local' && embedsOnThisComputer(provider)) {
     return { accountScope, filters: { provider: 'gmail' }, excludeAllEmbeddingHolds: true as const };
   }
   if (!ref) return { accountScope, filters: GMAIL_IMPORTED_FILTERS };
+  if (!input.privateStore) return { accountScope };
   const ids = gmailCursorConnectorIds(accountScope, { generation: ref.accountGeneration, revision: ref.revision });
   return { accountScope, filters: {
-    ...GMAIL_IMPORTED_FILTERS,
+    provider: 'gmail',
     observedConnectorId: ids.connectorId,
     previousObservedConnectorId: ids.previousId,
+    observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX,
   } };
 }
 
 /** Item visibility and the names-only window apply to reading and extraction as well as status. */
 export function gmailReadCountScope(
-  population: NonNullable<ConnectorStoreStatusScope['embedding']>, ref: MailSourceScopePolicyRef | undefined,
+  domain: string, population: NonNullable<ConnectorStoreStatusScope['embedding']>, ref: MailSourceScopePolicyRef | undefined,
   authority: FileSourceScopeAuthority | undefined,
 ): ConnectorStoreStatusScope {
-  if (population.contentAllowed === false) return { itemsAllowed: false, contentAllowed: false, countFileSelection: false };
+  if (domain === 'public_safe') return {};
   const contentAfter = ref && authority?.assertCurrentMail(ref).mailScope.contentAfter;
+  const window = contentAfter ? { contentNotBefore: contentAfter } : {};
+  if (domain !== 'secure_local') return window;
+  if (population.contentAllowed === false) return { itemsAllowed: false, contentAllowed: false };
   return {
-    countFileSelection: false, contentAllowed: true,
-    ...(contentAfter ? { contentNotBefore: contentAfter } : {}),
+    ...window, contentAllowed: true,
     ...(population.accountScope ? { accountScope: population.accountScope } : {}),
     ...(population.contentFilters ? { itemFilters: population.contentFilters, contentFilters: population.contentFilters } : {}),
     ...(ref ? { scopeRevision: ref.revision } : {}),
@@ -93,13 +98,13 @@ export function gmailStoreEmbeddingScope(deps: {
   gmailLiveProcessorVerified?: () => boolean;
 }): SourceEmbeddingScopePolicy {
   return (input) => {
-    const { scopeRef: ref, authority } = input;
+    const { store, scopeRef: ref, authority } = input;
     const account = deps.gmailRetainedAccountScope;
     const accountScope = account?.();
     if (!account || !accountScope) return { allowed: false, skipQueue: true };
     if (ref && (!isMailSourceScopePolicyRef(ref) || !authority)) return { allowed: false, skipQueue: true };
     const population = gmailEmbeddingPopulation({
-      provider: input.provider, accountScope, ref,
+      provider: input.provider, accountScope, ref, privateStore: store.trustDomain === 'secure_local',
     });
     return {
       ...population, allowed: true,

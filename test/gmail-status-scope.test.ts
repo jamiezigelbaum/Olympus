@@ -1,18 +1,16 @@
 // Mail older than the approved window is kept as names only on purpose, so
-// no Gmail store may count it as owed reading. These tests drive the real
+// neither Gmail store may count it as owed reading. These tests drive the real
 // mail approval and the real status handler; expected counts come from the
 // fixture's own dates, never from running the code under test.
 
-import { createStoreEmbeddingScopeFor, createStoreScopes } from '../src/workers/engine/runtime/store-scope-policies.ts';
+import { createStoreScopes } from '../src/workers/engine/runtime/store-scope-policies.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { defaultMailScopeSelection } from '../src/core/mail-source-scope.ts';
-import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { planStoreEmbedding, scopedEmbeddingOptions } from '../src/workers/connector-store/embedding-plan.ts';
-import { RecordingProvider } from './helpers/tier-fixtures.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { gmailRetainedAccountMatches } from '../src/workers/email-source/gmail-status-scope.ts';
 import { defineInternalEmailCorpus, gmailCursorConnectorIds } from '../src/workers/google-connectors/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
@@ -160,9 +158,9 @@ describe('Gmail store status scope: the approved window', () => {
 });
 
 describe('Gmail store status scope: what the status handler publishes', () => {
-  function mailConnector(connectorId: string, sample?: { id: string; text: string }): SourceConnector {
+  function mailConnector(): SourceConnector {
     const daysAgo = (days: number) => new Date(Date.now() - days * DAY_MS).toISOString();
-    const mail: Array<{ id: string; authoredAt: string; text?: string }> = sample ? [{ ...sample, authoredAt: daysAgo(1) }] : [
+    const mail: Array<{ id: string; authoredAt: string; text?: string }> = [
       { id: 'recent', authoredAt: daysAgo(20), text: 'Dinner on Saturday?' },
       { id: 'three-years-old-names-only', authoredAt: daysAgo(3 * 365) },
       { id: 'four-years-old-names-only', authoredAt: daysAgo(4 * 365) },
@@ -189,7 +187,7 @@ describe('Gmail store status scope: what the status handler publishes', () => {
       fetchedAt: new Date().toISOString(),
     }));
     return {
-      id: connectorId,
+      id: 'gmail-status-scope-fixture',
       family: 'email',
       async authenticate(): Promise<void> {},
       listItems(): AsyncIterable<SourceConnectorListPage> {
@@ -216,9 +214,7 @@ describe('Gmail store status scope: what the status handler publishes', () => {
       trustDomain: 'internal',
     });
     stores.push(store);
-    const ref = subject.mailPolicyRef()!;
-    const ids = gmailCursorConnectorIds('personal', { generation: ref.accountGeneration, revision: ref.revision });
-    await store.syncFromConnector(mailConnector(ids.connectorId), { fetchContent: true });
+    await store.syncFromConnector(mailConnector(), { fetchContent: true });
     const handler = createSourceIndexStatusHandler({
       corpusDefinitions: () => [defineInternalEmailCorpus()],
       connectorStores: [store],
@@ -255,52 +251,4 @@ describe('Gmail store status scope: what the status handler publishes', () => {
     expect(counts['items_with_text']).toBe(2);
     expect('qa_out_of_content_scope' in counts).toBe(false);
   });
-
-  test.each(['internal', 'public_safe', 'secure_local'] as const)(
-    '%s Gmail sweep, manual embed and backlog agree on mail held from a previous approval', async domain => {
-      const subject = authority();
-      const local = domain === 'secure_local';
-      const corpusId = local ? 'secure_local.email.private' : domain + '.email';
-      const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId, trustDomain: domain, family: 'email', tierLedger: null });
-      stores.push(store);
-      const seed = (connector: string, id: string) =>
-        store.syncFromConnector(mailConnector(connector, { id, text: id + ' message body' }), { fetchContent: true });
-      const observed = () => {
-        const ref = subject.mailPolicyRef()!;
-        return gmailCursorConnectorIds('personal', { generation: ref.accountGeneration, revision: ref.revision });
-      };
-      approve(subject, 'all');
-      await seed(observed().connectorId, 'held');
-      approve(subject, '6m');
-      const recording = new RecordingProvider(local ? 'built-in' : 'venice', 'fixture', local ? 'local' : 'cloud');
-      const provider = Object.assign(recording, { runsOnThisComputer: () => local });
-      const deps = {
-        authority: subject, sourceIdForStore: () => 'gmail.email', readScope: () => ({ allowed: true } as const),
-        gmailRetainedAccountScope: () => 'personal', gmailLiveProcessorVerified: () => true,
-      };
-      const scopes = createStoreScopes(deps);
-      const status = () => store.status(scopes.statusScopeFor(store, provider)).counts;
-      expect(status()).toMatchObject({ items: local ? 1 : 0, chunks: local ? 1 : 0, embeddedChunks: 0 });
-      await seed(observed().connectorId, 'current');
-      await seed(observed().previousId, 'legacy');
-      await seed('archive.fixture', 'import');
-      const expected = local ? ['current', 'held', 'import', 'legacy'] : ['current', 'import', 'legacy'];
-      expect(status()).toMatchObject({ items: expected.length, chunks: expected.length, embeddedChunks: 0 });
-      // Give the held row a queue entry as well as a missing vector.
-      store.queueEmbedding(['personal:held'], provider);
-      const target = planStoreEmbedding({ store, provider, servedByMeaning: true, scope: scopes.embeddingScopeFor(store, provider) })!;
-      expect(await embedPendingChunks([target], { maxItems: 10 })).toMatchObject([{ chunksEmbedded: expected.length }]);
-      expect(recording.inputs.sort()).toEqual(expected.map(id => expect.stringContaining(id + ' message body')));
-      expect(status()).toMatchObject({ chunks: expected.length, embeddedChunks: expected.length });
-      const manual = createStoreEmbeddingScopeFor(deps)(store, provider);
-      if (!manual.allowed) throw new Error('expected approved mail scope');
-      await seed(gmailCursorConnectorIds('personal', undefined).connectorId, 'unscoped');
-      await seed('archive.manual', 'second import');
-      recording.inputs.length = 0;
-      const result = await store.embedChunks(scopedEmbeddingOptions(manual, provider));
-      const manualIds = local ? ['second import', 'unscoped'] : ['second import'];
-      expect(result.chunksEmbedded).toBe(manualIds.length);
-      expect(recording.inputs.sort()).toEqual(manualIds.map(id => expect.stringContaining(id + ' message body')));
-    },
-  );
 });

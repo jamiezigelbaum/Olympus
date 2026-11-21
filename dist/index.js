@@ -34233,7 +34233,7 @@ function compareAdmissionScopes(input, log = (event) => console.warn(JSON.string
   const { corpus, definition, read, status } = input;
   const facts = mountedStoreFacts(corpus, definition, input.ready);
   function compare(stage, layer, serving) {
-    const processing = stage !== "search" && stage !== "answer" && stage !== "extract";
+    const processing = stage !== "search" && stage !== "extract";
     const verdict = evaluate({
       caller: "owner",
       account: input.account,
@@ -34268,7 +34268,6 @@ function compareAdmissionScopes(input, log = (event) => console.warn(JSON.string
       filters: layer === "names" ? read.filters : read.contentFilters
     } : { admitted: false };
     compare("search", layer, actual);
-    compare("answer", layer, actual);
     compare("count", layer, {
       admitted: status.itemsAllowed !== false && (layer === "names" || status.contentAllowed !== false),
       accountScope: status.accountScope,
@@ -34299,6 +34298,28 @@ function compareAdmissionScopes(input, log = (event) => console.warn(JSON.string
     filters: backlog?.contentFilters,
     held: backlog?.includeHeldForJudgment
   });
+  for (const read of input.reads ?? [])
+    compareAdmissionRead({ ...read, corpusId: corpus.corpusId }, log);
+}
+function compareAdmissionRead(input, log) {
+  const { corpusId, stage, layer, serving, shadow, reason } = input;
+  const keys = (rows) => rows.map((row) => row.identity).sort();
+  const values = (rows) => rows.map((row) => JSON.stringify([row.identity, row.value])).sort();
+  const differingConstraints = [];
+  if (!isDeepStrictEqual2(keys(serving), keys(shadow)))
+    differingConstraints.push("identity");
+  if (!isDeepStrictEqual2(values(serving), values(shadow)))
+    differingConstraints.push(layer === "names" ? "name" : "text");
+  if (differingConstraints.length)
+    log({
+      corpusId,
+      stage,
+      layer,
+      reason,
+      serving: serving.length > 0,
+      shadow: shadow.length > 0,
+      differingConstraints
+    });
 }
 // src/core/source-admission-definitions.ts
 init_archive_formats();

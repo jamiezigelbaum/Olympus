@@ -2042,8 +2042,6 @@ export interface ConnectorStoreStatus {
 }
 
 export interface ConnectorStoreStatusScope {
-  /** An observation scope counts matching items without publishing file-selection progress. */
-  countFileSelection?: false;
   /** The sweep's population. Item visibility and extraction keep their own read scope. */
   embedding?: Pick<ConnectorStoreStatusScope, 'accountScope' | 'contentAllowed' | 'contentFilters'> & {
     includeHeldForJudgment?: boolean;
@@ -18319,7 +18317,7 @@ export class LocalConnectorStore {
     // files: a scope carrying only that counts as no scope at all.
     const ownScope = Object.entries(scope ?? {}).filter(([key]) => key !== 'embedding');
     const embeddingOnly = scope?.embedding !== undefined && ownScope.every(([, value]) => value === undefined);
-    const fileScoped = policyHolds.size > 0 || (scope !== undefined && scope.countFileSelection !== false && !embeddingOnly && !(scope.contentNotBefore !== undefined
+    const fileScoped = policyHolds.size > 0 || (scope !== undefined && !embeddingOnly && !(scope.contentNotBefore !== undefined
       && ownScope.every(([key, value]) => key === 'contentNotBefore' || value === undefined)));
     // Rows dated before the window that hold no text. julianday reads any ISO
     // form (Z, fractional seconds, offsets), and COALESCE keeps an unparseable
@@ -21978,7 +21976,7 @@ function observedOwnerPredicate(exact?: string, prefix?: string, previous?: stri
     AND o.ownership_kind = 'observed' AND (${keys.join(' OR ')}))`, params };
 }
 
-function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefined): {
+export function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefined): {
   sql: string;
   params: Array<string>;
 } {

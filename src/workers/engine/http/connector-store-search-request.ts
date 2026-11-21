@@ -1,4 +1,5 @@
-import { DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS } from '../../../core/source-index/types.ts';
+import { DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS, isSecureSensitivity, type SourceTrustTier } from '../../../core/source-index/types.ts';
+import type { ReleaseInputVerdict } from '../../../core/release-manifest.ts';
 import { X_BOOKMARKS_FOLDER_FILTER_CODEC } from '../../x-bookmarks/index.ts';
 import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../../local-files/approved-scope-filter.ts';
 import { LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC } from '../../local-files/locator-result-projector.ts';
@@ -39,6 +40,12 @@ export interface ConnectorStoreDeclaredPrincipal {
 }
 
 export type ConnectorStoreChatPrincipal = ConnectorStoreDeclaredPrincipal;
+
+export function searchNamesVisibility(store: LocalConnectorStore, trustTier: SourceTrustTier, tier: ReleaseInputVerdict['tier'] | undefined) {
+  if (!tier || tier === 'secret' || tier === 'unknown' || trustTier === 'S5') return 'hidden';
+  if (tier === 'public_or_personal' || (tier === 'legacy' && !isSecureSensitivity({ trustDomain: store.trustDomain, trustTier }))) return 'personal';
+  return 'private';
+}
 
 export function assertSourceIndexSearchQuery(value: unknown): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) {

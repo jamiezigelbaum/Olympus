@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { cutoverChecks, dashboardAvailabilityCheck, startupAskCheck, hiddenCopyBuilds, samplePage, summarizeCutover, summarizePages } from '../scripts/release-check/cutover.ts';
+import { cutoverChecks, dashboardAvailabilityCheck, startupAskCheck, hiddenCopyBuilds, samplePage, selfRestarts, summarizeCutover, summarizePages } from '../scripts/release-check/cutover.ts';
 
 test('startup uses the first complete receipt per role and records the background wait and warnings', () => {
   const partial = [
@@ -103,4 +103,23 @@ test('a restart the leg asked for is left out of the window after READY; a slow 
   expect(dashboardAvailabilityCheck(summarizeCutover(slow).qualification).status).toBe('fail');
   const unmarked = log.replace(/.*plannedRestart.*\n/, '');
   expect(dashboardAvailabilityCheck(summarizeCutover(unmarked).qualification).status).toBe('fail');
+});
+
+test("the worker's own restart (credentials reload after an unpair) counts as planned, not a freeze after READY (linux 44862072978)", () => {
+  const log = [
+    '2026-11-21T04:37:19.000Z olympus-worker: an ordinary line',
+    '2026-11-21T04:37:20.056Z olympus-worker: Olympus worker is restarting, as it asked to.',
+    '2026-11-21T04:37:21.364Z olympus-worker-background: Olympus background engine is restarting, as it asked to.',
+    '2026-11-21T04:37:23.693Z olympus-worker: Olympus worker is ready.',
+    '2026-11-21T04:40:00.000Z olympus-worker: Olympus worker is ready.',
+  ].join('\n');
+  const at = Date.parse('2026-11-21T04:37:20.056Z');
+  expect(selfRestarts(log)).toEqual([{ start: at, end: Date.parse('2026-11-21T04:37:23.693Z') }]);
+  const watch = (ms: number) => [
+    { qualifyStarted: at - 5_000 },
+    { pageSample: { page: 'Home', at: at - 400, ms, answered: true } },
+    { watchEnded: at + 5_000, stopped: true },
+  ].map(entry => JSON.stringify(entry)).join('\n') + '\n';
+  expect(summarizeCutover(watch(1_316)).qualification?.pages.Home.over1s).toBe(1);
+  expect(summarizeCutover(watch(1_316), selfRestarts(log)).qualification?.pages.Home.over1s).toBe(0);
 });

@@ -66,7 +66,8 @@ import type { OperationCallerWire } from '../../core/operation-caller.ts';
 import { dropboxContentExtractionStallHours } from '../../core/ingestion-throughput.ts';
 import type { SecretStore } from '../../core/secret-store.ts';
 import { workerRouteAllowed } from './http/write-routes.ts';
-import type { OwnerItemChoice } from '../classification/tier-owner-items.ts';
+import { connectorStoreFilterSql } from '../connector-store/local-index.ts';
+import type { OwnerItemChoice, OwnerItemNamesScope } from '../classification/tier-owner-items.ts';
 import { JudgeCheckError } from '../classification/judge-check.ts';
 import { ArchiveUploadError } from '../archive-import/staging.ts';
 import { NativeMessagingCaptureOwnerError } from '../../core/messaging-capture.ts';
@@ -216,6 +217,7 @@ import {
   CONNECTOR_STORE_FILTER_CAPABILITIES,
   assertSourceIndexSearchQuery,
   parseConnectorStoreIndexSearchRequestRecord,
+  searchNamesVisibility,
 } from './http/connector-store-search-request.ts';
 import {
   type DashboardOAuthAttempt,
@@ -651,12 +653,49 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const query = asOptionalString(record.query);
             const recent = asOptionalBoolean(record.recent);
             const limit = asOptionalNumber(record.limit, 'limit');
-            return json(ownerTierItems.find({
+            options.refreshConnectorStores?.();
+            const scopes = new Map<string, OwnerItemNamesScope>();
+            const releaseChecks = new Set<() => boolean>();
+            const namesScope = (store: LocalConnectorStore) => {
+              const read = connectorStoreReadScope?.(store);
+              if (read?.allowed === false) return undefined;
+              return { account: read?.accountScope ?? connectorStoreAccountScopes.get(store.corpusId), filters: read?.filters };
+            };
+            for (const store of connectorStores) {
+              const scope = namesScope(store);
+              if (!scope || store.fileReplacedOrRemoved()) continue;
+              // The background may replace names or change a tier while find reads another store.
+              const stamp = JSON.stringify([scope, store.changeMarker(), store.visibilityMarker()]);
+              const stillCurrent = () => !store.fileReplacedOrRemoved()
+                && stamp === JSON.stringify([namesScope(store), store.changeMarker(), store.visibilityMarker()]);
+              const { sql, params } = connectorStoreFilterSql(scope.filters);
+              scopes.set(store.dbPath, {
+                sql: scope.account ? sql + ' AND i.account_scope = ?' : sql,
+                params: scope.account ? [...params, scope.account] : params,
+                visible(sourceItem, trustTier) {
+                  if (!store.selectedItemServable(sourceItem, scope.account, scope.filters, 'metadata')) return false;
+                  const [tier] = store.effectiveItemTiers([sourceItem], 'names');
+                  if (searchNamesVisibility(store, trustTier, tier) !== 'personal') return false;
+                  // The opaque raise id encodes the provider identity, including any parent ids.
+                  if (store.childrenWithWithheldSearchIdentifiers([sourceItem], false).size) return false;
+                  const hit = { sourceItem, trustTier, corpusId: store.corpusId, trustDomain: store.trustDomain,
+                    servingLayer: 'metadata' as const, rawExposed: false as const };
+                  if (options.sourceIndexVisibilityGate && !options.sourceIndexVisibilityGate([hit]).includes(hit)) return false;
+                  releaseChecks.add(stillCurrent);
+                  return true;
+                },
+              });
+            }
+            const result = ownerTierItems.find({
               ...(query !== undefined ? { query } : {}),
               ...(recent !== undefined ? { recent } : {}),
               ...(limit !== undefined ? { limit } : {}),
               personalNamesOnly: true,
-            }));
+            }, scopes);
+            if ([...releaseChecks].some(stillCurrent => !stillCurrent())) {
+              throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'Source visibility changed during the lookup. Retry under the current scope.');
+            }
+            return json(result);
           }
           if (action === 'raise') {
             const itemId = asOptionalString(record.item_id);
@@ -3686,12 +3725,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   searchEligibility(rows) {
                     const tiers = store.effectiveItemTiers(rows.map(row => row.sourceItem), 'names');
                     return rows.map((row, index) => {
-                      const tier = tiers[index];
-                      if (tier === 'secret' || tier === 'unknown' || row.trustTier === 'S5') return false;
-                      if (tier === 'public_or_personal'
-                        || (tier === 'legacy' && !isSecureSensitivity({ trustDomain: store.trustDomain, trustTier: row.trustTier }))) return true;
-                      privateMatches.add(tierLedgerIdentityKey(row.sourceItem));
-                      return false;
+                      const visibility = searchNamesVisibility(store, row.trustTier, tiers[index]);
+                      if (visibility === 'private') privateMatches.add(tierLedgerIdentityKey(row.sourceItem));
+                      return visibility === 'personal';
                     });
                   },
                 } : {}),
