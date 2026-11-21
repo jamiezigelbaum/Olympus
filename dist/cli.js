@@ -283,7 +283,7 @@ function privateAnswerOptions(totalMemoryBytes) {
   const gb = Math.round(totalMemoryBytes / 1024 ** 3);
   return PRIVATE_ANSWER_OPTIONS.map((option) => option.id === "private-cloud-only" ? { ...option, recommended: true, reason: `This computer has ${gb} GB of memory; the local private model needs about 3.5 GB on top of Olympus.` } : { ...option, recommended: false });
 }
-var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS, LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES;
+var SENSITIVITY_TIER_LABELS, AGENT_ITEM_PRIVACY_UNAVAILABLE = "Changing one item's privacy from an AI app is not available in this version. Open the Olympus dashboard, Privacy, to find the item and make it Private.", PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS, LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES;
 var init_privacy_language = __esm(() => {
   SENSITIVITY_TIER_LABELS = {
     public: "Public",
@@ -66525,7 +66525,7 @@ var init_commands = __esm(() => {
   ENGINE_FORWARDED_ROUTES = {
     archive_remove: ["/dashboard/archive-import/remove"],
     delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
-    tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
+    tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/dashboard/privacy/judge-check"],
     people: ["/dashboard/people"],
     source_sync: ["/v1/source/index/sync", "/v1/source/index/x-bookmarks/content/recover"],
     storage_registry: ["/v1/cli/pairing-placement", "/v1/cli/pairing-account"],
@@ -74684,7 +74684,7 @@ var init_local_index = __esm(() => {
         stores: () => [this]
       };
     }
-    childrenWithWithheldSearchIdentifiers(identities, includePrivateNames) {
+    childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, plans) {
       const links = this.parentLinksOf(identities);
       const withheld = new Set;
       const lookupKey = (parent) => ("parentLocalItemId" in parent) ? `local:${parentKey(parent)}` : `provider:${tierLedgerIdentityKey(parent)}`;
@@ -74718,10 +74718,23 @@ var init_local_index = __esm(() => {
           else
             encoded.push(parent);
         }
-        const rows = stores.flatMap((store) => [
-          ...store.parentStandings(linked).map((row) => ({ ...row, key: lookupKey(row) })),
-          ...Array.from(store.itemStandings(encoded).values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
-        ].filter((row) => row.active).map((row) => ({ ...row, corpusId: store.corpusId })));
+        const rows = stores.flatMap((store) => {
+          const plan = plans.get(store.corpusId);
+          if (!plan || plan.store !== store)
+            return [];
+          const active = [
+            ...store.parentStandings(linked).map((row) => ({ ...row, key: lookupKey(row) })),
+            ...Array.from(store.itemStandings(encoded).values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
+          ].filter((row) => row.active);
+          const account = normalizeOptionalAccountScope(plan.scope.accountScope);
+          const predicate = connectorStoreFilterSql(plan.scope.filters);
+          const matches = predicate.sql ? new Set(plan.store.itemRowsForIdentities(active.map((row) => row.identity), (id) => normalizeConversationId(id.providerConversationId), predicate).map((row) => row.idx)) : undefined;
+          return active.map((row, index) => ({
+            ...row,
+            corpusId: store.corpusId,
+            inScope: (!account || row.accountScope === account) && (!matches || matches.has(index))
+          }));
+        });
         const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map((row) => ({
           ...row.identity,
           corpusId: row.corpusId,
@@ -74733,7 +74746,7 @@ var init_local_index = __esm(() => {
         rows.forEach((row, index) => {
           const key = row.key;
           const verdict = verdicts[index];
-          const canRelease = !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
+          const canRelease = row.inScope && !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
           const previous = allowed.get(key);
           if (!canRelease || previous && (previous.grandparentLocalItemId !== row.grandparentLocalItemId || tierLedgerIdentityKey(previous.identity) !== tierLedgerIdentityKey(row.identity))) {
             denied.add(key);
@@ -108025,7 +108038,7 @@ class TieredStoreSet {
   static CHILD_SWEEP_PAGE = 200;
   childLane = {
     ledger: () => this.ledger,
-    stores: () => searchVisibilityScoped() ? [...this.legs.values()].flatMap((leg) => leg.store ? [leg.store] : []) : this.openStores()
+    stores: () => this.openStores()
   };
   syncsRunning = 0;
   syncsIdle = [];
@@ -150983,7 +150996,7 @@ class EmailClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       ...options.signal ? { signal: options.signal } : {},
-      body: JSON.stringify({ ...body, corpus_ids: this.searchCorpora().map((corpus) => corpus.corpusId) })
+      body: JSON.stringify(body)
     });
   }
   async sourceAnswer(options) {
@@ -151251,11 +151264,8 @@ class EmailClient {
       includeLocators: options.includeLocators === true
     });
   }
-  searchCorpora() {
-    return createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
-  }
   async sourceIndexSearchMany(options) {
-    const searchCorpora = this.searchCorpora();
+    const searchCorpora = createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
     if (!searchCorpora.length)
       throw new OperationError("invalid_params", "No source is configured for search.");
     const response = await this.requestSourceIndexSearch({
@@ -168228,6 +168238,7 @@ async function revalidateStdioSourceAnswer(ctx, result) {
 }
 var ARGUS_PROFILE_ENUM, SOURCE_INDEX_SEARCH_PARAMS, SOURCE_ANSWER_PARAMS, SOURCE_ANSWER_RESULT_PARAMS, ASK_ANONYMOUSLY_PARAMS, ARCHIVE_IMPORT_PARAMS, PRIVACY_ITEM_FIND_PARAMS, PRIVACY_ITEM_SET_PARAMS, operations, SOURCE_SPECIFIC_SEARCH_PARAMS;
 var init_operations = __esm(() => {
+  init_privacy_language();
   init_release_manifest();
   init_app_release_agent();
   init_doctor();
@@ -168922,12 +168933,7 @@ var init_operations = __esm(() => {
     },
     {
       name: "privacy_item_find",
-      description: [
-        "Find one of the user's items (an email, file or message) to check its privacy label, by words from its title, sender or file name, or list the items Olympus sorted most recently (recent: true).",
-        "Each item has item_id, source, title, sender, location, tier (Personal or Private: its label), decided_by (override = the user set it by hand; sniffer or move = the privacy judge), owner_set, and judge_reason (the judge's category and confidence) where the judge decided it.",
-        "Items whose names are Private, and Secret items, are never listed here.",
-        "Use it when the user says an item should be private, then call privacy_item_set."
-      ].join(" "),
+      description: AGENT_ITEM_PRIVACY_UNAVAILABLE,
       params: PRIVACY_ITEM_FIND_PARAMS,
       mutating: false,
       nativeExposure: "sourceIndexEnabledOnly",
@@ -168951,12 +168957,7 @@ var init_operations = __esm(() => {
     },
     {
       name: "privacy_item_set",
-      description: [
-        'Make one item Private when the user says it should be ("that email should be private"). Only raising is possible here: it adds protection, and the item is hidden from Personal search at once.',
-        "It is the user's decision on that one item, never a rule for its sender, chat or folder.",
-        "Making an item Personal, or putting it back to the judge's label, is done only by the user on the Olympus dashboard on their computer (Privacy): tell them so, and never retry another way.",
-        "Returns {ok: true, item, applies} or {ok: false, code, message}: tell the user the message in those words."
-      ].join(" "),
+      description: AGENT_ITEM_PRIVACY_UNAVAILABLE,
       params: PRIVACY_ITEM_SET_PARAMS,
       mutating: true,
       nativeExposure: "sourceIndexEnabledOnly",
@@ -191645,17 +191646,10 @@ var init_memory2 = __esm(() => {
 });
 
 // src/workers/classification/tier-owner-items.ts
-function admittedContext(context, scopes) {
-  const { extractionOutcome, contentAllowed, ...paths } = context;
-  return { ...paths, storePaths: knownStorePaths(context).filter((path) => scopes.has(path)) };
-}
 function createOwnerTierItems(context = {}) {
-  function find(input, admission) {
-    return admission ? findAdmittedItems(input, context, admission) : findOwnerTierItems(input, context);
-  }
   return {
-    find,
-    set: (input, admission) => setOwnerTierItem(input, context, admission),
+    find: (input) => findOwnerTierItems(input, context),
+    set: (input) => setOwnerTierItem(input, context),
     counts: () => countOwnerTierItems(context)
   };
 }
@@ -191686,26 +191680,7 @@ function namesAbovePersonal(state) {
     return true;
   return [record.metadataTier, record.targetMetadataTier, state.ownerTier].some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank("private"));
 }
-function findOwnerTierItems(input, context = {}, scopes) {
-  return { items: [...findRows(input, context, scopes)].filter((item) => !!item) };
-}
-async function findAdmittedItems(input, context, admission) {
-  const items = [];
-  for (const item of findRows(input, context, admission.scopes)) {
-    if (item)
-      items.push(item);
-    const turn = ingestionTurn();
-    if (turn) {
-      await turn;
-      if (!admission.current())
-        throw new OperationError("source_index_policy_violation", "Source visibility changed during the lookup. Retry under the current scope.");
-    }
-  }
-  return { items };
-}
-function* findRows(input, context, scopes) {
-  if (scopes)
-    context = admittedContext(context, scopes);
+function findOwnerTierItems(input, context = {}) {
   const limit = clampLimit(input.limit);
   const query = input.query?.trim() ?? "";
   if (query.length > OWNER_ITEM_QUERY_MAX)
@@ -191724,13 +191699,11 @@ function* findRows(input, context, scopes) {
     throw new OperationError("invalid_params", "beforeItem goes with before.");
   }
   const beforeItem = input.beforeItem === undefined ? undefined : parseOwnerTierItemId(input.beforeItem);
-  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before, beforeItem, scopes) : searchRows(query, limit * 3, context, scopes);
-  let remaining = limit;
+  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before, beforeItem) : searchRows(query, limit * 3, context);
+  const items = [];
   for (const row of rows) {
-    if (!row) {
-      yield undefined;
-      continue;
-    }
+    if (items.length >= limit)
+      break;
     const identity = identityOfRow2(row);
     const state = readItemState(identity, context);
     if (state.secret)
@@ -191748,10 +191721,9 @@ function* findRows(input, context, scopes) {
       if (input.withPreview && !state.reviewHeld && !state.overrideFindingKinds?.length)
         item.preview = previewOf(identity, context);
     }
-    yield item;
-    if (--remaining === 0)
-      break;
+    items.push(item);
   }
+  return { items };
 }
 function clampLimit(limit) {
   if (limit === undefined)
@@ -191763,45 +191735,34 @@ function clampLimit(limit) {
 function likePattern(words) {
   return `%${words.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
 }
-function selectColumns(columns, scope) {
+function selectColumns(columns) {
   const sender = columns.has("sender_label") ? "sender_label, sender_id" : "NULL AS sender_label, NULL AS sender_id";
-  return `local_item_id, provider, family, account_scope, provider_item_id, provider_conversation_id, title, ${sender}, locator_uri${scope ? ", trust_tier" : ""}`;
+  return `local_item_id, provider, family, account_scope, provider_item_id, provider_conversation_id, title, ${sender}, locator_uri`;
 }
-function namesVisible(row, scope) {
-  if (!scope)
-    return true;
-  if (!row.local_item_id || !row.trust_tier || row.family === "unknown")
-    return false;
-  return scope.visible({ ...identityOfRow2(row), family: row.family, localItemId: row.local_item_id }, row.trust_tier);
-}
-function searchRows(query, limit, context, scopes) {
+function searchRows(query, limit, context) {
   const pattern = likePattern(query);
   const found = new Map;
   for (const dbPath of knownStorePaths(context)) {
-    const scope = scopes?.get(dbPath);
-    if (scopes && !scope)
-      continue;
     const rows = withStore(dbPath, [], (db, columns) => {
       const fields = ["title", "locator_uri", ...columns.has("sender_label") ? ["sender_label", "sender_id"] : []];
       return db.query(`
-        SELECT ${selectColumns(columns, scope)}, COALESCE(authored_at, indexed_at, '') AS at FROM items i
+        SELECT ${selectColumns(columns)}, COALESCE(authored_at, indexed_at, '') AS at FROM items
         WHERE tombstoned = 0 AND (${fields.map((field) => `${field} LIKE ? ESCAPE '\\'`).join(" OR ")})
-        ${scope?.sql ?? ""}
         ORDER BY at DESC
         LIMIT ?
-      `).all(...fields.map(() => pattern), ...scope?.params ?? [], limit);
+      `).all(...fields.map(() => pattern), limit);
     });
     for (const row of rows) {
       const key = tierLedgerIdentityKey(identityOfRow2(row));
-      if (!found.has(key) && namesVisible(row, scope))
+      if (!found.has(key))
         found.set(key, row);
     }
   }
   return [...found.values()].sort((left, right) => right.at.localeCompare(left.at)).slice(0, limit);
 }
-function recentDecisionPage(ledgers, limit, context, ledgerCursorOrder, filter, before, beforeItem) {
+function recentRows(limit, context, filter, before, beforeItem) {
   const decided = new Map;
-  for (const ledger of ledgers) {
+  for (const ledger of knownTierLedgers(context)) {
     let records = [];
     try {
       records = withLedgerAt(ledger.path, context.now, (opened) => filter === "changed" || filter === "override_review" ? opened.listRoutedOverrides().filter(({ record, override }) => override.kind === "tier" && (filter === "changed" || opened.ownerOverrideReview(identityOfRecord2(record), record, override))).map(({ record }) => record).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before, beforeItem), ledger.boundLedgerId, "read-only-on-front");
@@ -191813,44 +191774,20 @@ function recentDecisionPage(ledgers, limit, context, ledgerCursorOrder, filter, 
         decided.set(key, record);
     }
   }
-  return [...decided.values()].sort((a, b) => recentOrder(a, b, ledgerCursorOrder)).slice(0, limit);
-}
-function visibleStoredRow(identity, stores, scopes) {
-  for (const dbPath of stores) {
-    const scope = scopes?.get(dbPath);
-    if (scopes && !scope)
-      continue;
-    const row = readStoredRow(dbPath, identity, scope);
-    if (row && namesVisible(row, scope))
-      return row;
-  }
-  return;
-}
-function* recentRows(limit, context, filter, before, beforeItem, scopes) {
-  const ledgers = knownTierLedgers(context);
+  const ordered = [...decided.values()].sort(recentOrder).slice(0, limit);
   const stores = knownStorePaths(context);
-  const yielded = new Set;
-  while (true) {
-    const page = recentDecisionPage(ledgers, limit, context, !!scopes, filter, before, beforeItem);
-    for (const record of page) {
-      const identity = identityOfRecord2(record);
-      const key = tierLedgerIdentityKey(identity);
-      if (yielded.has(key))
-        continue;
-      const row = visibleStoredRow(identity, stores, scopes);
+  const rows = [];
+  for (const record of ordered) {
+    const identity = identityOfRecord2(record);
+    for (const dbPath of stores) {
+      const row = readStoredRow(dbPath, identity);
       if (row) {
-        yielded.add(key);
-        yield row;
-      } else if (scopes)
-        yield undefined;
+        rows.push(row);
+        break;
+      }
     }
-    if (!scopes || page.length < limit || filter === "changed" || filter === "override_review")
-      return;
-    const last = page[page.length - 1];
-    before = last.decidedAt;
-    beforeItem = identityOfRecord2(last);
-    yield undefined;
   }
+  return rows;
 }
 function previewOf(identity, context) {
   for (const dbPath of knownStorePaths(context)) {
@@ -191891,17 +191828,14 @@ function identityOfRow2(row) {
     ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
   };
 }
-function recentOrder(left, right, ledgerCursorOrder) {
+function recentOrder(left, right) {
   if (left.decidedAt !== right.decidedAt)
     return left.decidedAt < right.decidedAt ? 1 : -1;
   const keys = (record) => [record.provider, record.accountScope, record.conversationKey, record.providerItemId];
   const [a, b] = [keys(left), keys(right)];
   for (let index = 0;index < a.length; index += 1) {
-    if (a[index] !== b[index]) {
-      if (ledgerCursorOrder)
-        return Buffer.compare(Buffer.from(a[index]), Buffer.from(b[index]));
+    if (a[index] !== b[index])
       return a[index] < b[index] ? -1 : 1;
-    }
   }
   return 0;
 }
@@ -192010,7 +191944,7 @@ function getOwnerTierItem(itemId, context = {}, options = {}) {
     item.preview = previewOf(identity, context);
   return item;
 }
-function setOwnerTierItem(input, context = {}, admission) {
+function setOwnerTierItem(input, context = {}) {
   const { choice } = input;
   if (choice !== "personal" && choice !== "private" && choice !== "judge") {
     throw new OperationError("invalid_params", 'tier must be "personal", "private" or "judge".');
@@ -192023,28 +191957,16 @@ function setOwnerTierItem(input, context = {}, admission) {
       message: "An AI app can only make an item Private. To make it Personal, or put it back to the judge's label, use Privacy on the Olympus dashboard on this computer."
     };
   }
-  const notFound = { ok: false, code: "not_found", message: "Olympus no longer holds that item." };
-  let admittedRow;
-  if (!input.allowLower) {
-    if (!admission)
-      return notFound;
-    context = admittedContext(context, admission.scopes);
-    admittedRow = visibleStoredRow(identity, knownStorePaths(context), admission.scopes);
-    if (!admittedRow)
-      return notFound;
-  }
   let located;
-  let before;
   try {
     located = locateTierItemByIdentity(identity, context);
-    before = readLocatedState(located, context);
   } catch (error) {
-    if (!input.allowLower || error instanceof OperationError && error.code === "invalid_params")
-      return notFound;
+    if (error instanceof OperationError && error.code === "invalid_params") {
+      return { ok: false, code: "not_found", message: "Olympus no longer holds that item." };
+    }
     throw error;
   }
-  if (!input.allowLower && (before.secret || namesAbovePersonal(before) || !admission?.current()))
-    return notFound;
+  const before = readLocatedState(located, context);
   if (before.secret) {
     return { ok: false, code: "secret_item", message: "This item is Secret. Secret items are not changed from here." };
   }
@@ -192074,7 +191996,7 @@ function setOwnerTierItem(input, context = {}, admission) {
   const after = readLocatedState(located, context);
   const target = choice === "personal" ? "private" : choice === "private" ? "secure" : undefined;
   const applies = target !== undefined && after.record?.state === "current" && after.record.contentTier === target && after.record.metadataTier === target ? "now" : "next_pass";
-  const row = admittedRow ?? storedRowFor(identity, located, context);
+  const row = storedRowFor(identity, located, context);
   const item = view3(row, after, context);
   if (!input.allowLower && (namesAbovePersonal(before) || namesAbovePersonal(after))) {
     item.title = null;
@@ -192101,14 +192023,14 @@ function storedRowFor(identity, located, context) {
     locator_uri: null
   };
 }
-function readStoredRow(dbPath, identity, scope) {
+function readStoredRow(dbPath, identity) {
   return withStore(dbPath, undefined, (db, columns) => {
     const predicate = storeItemIdentityPredicate(identity, columns);
     return db.query(`
-      SELECT ${selectColumns(columns, scope)} FROM items i
-      WHERE ${predicate.sql} ${scope?.sql ?? ""}
+      SELECT ${selectColumns(columns)} FROM items
+      WHERE ${predicate.sql}
       LIMIT 1
-    `).get(...predicate.params, ...scope?.params ?? []) ?? undefined;
+    `).get(...predicate.params) ?? undefined;
   });
 }
 var OWNER_ITEM_DEFAULT_LIMIT = 20, OWNER_ITEM_MAX_LIMIT = 50, OWNER_ITEM_QUERY_MAX = 200, OWNER_ITEM_PREVIEW_MAX = 600, ITEM_ID_PREFIX = "oti_";
@@ -192117,7 +192039,6 @@ var init_tier_owner_items = __esm(() => {
   init_tier_cli();
   init_tier_classifier();
   init_tier_ledger();
-  init_control_path_headroom();
   init_unreadable_files();
   init_tier_rules();
   init_secret_locations();
@@ -221077,45 +220998,6 @@ var init_source_index_requests = __esm(() => {
 });
 
 // src/workers/engine/http/connector-store-search-request.ts
-function searchStoreAdmission(options, requested) {
-  const canSearch = (id) => (options.searchableCorpusIds?.has(id) ?? true) && (requested?.has(id) ?? true);
-  function mounted(ids) {
-    const eligible = new Set([...ids].filter(canSearch));
-    options.refreshConnectorStores?.(eligible);
-    return new Map((options.connectorStores ?? []).filter((store) => eligible.has(store.corpusId)).map((store) => [store.corpusId, store]));
-  }
-  function admit(store) {
-    if (!canSearch(store.corpusId))
-      return;
-    const read = options.connectorStoreReadScope?.(store);
-    if (read?.allowed === false)
-      return;
-    const account = options.connectorStoreAccountScopes?.get(store.corpusId)?.trim() || undefined;
-    const signature = JSON.stringify(read);
-    return {
-      store,
-      current: () => canSearch(store.corpusId) && (options.connectorStores ?? []).includes(store) && signature === JSON.stringify(options.connectorStoreReadScope?.(store)) && account === (options.connectorStoreAccountScopes?.get(store.corpusId)?.trim() || undefined),
-      scope(accountScope = account, filters) {
-        return {
-          accountScope: read?.accountScope || accountScope,
-          filters: filters || read?.filters ? normalizeConnectorStoreSearchFilters({ ...filters, ...read?.filters }) : undefined
-        };
-      }
-    };
-  }
-  return { canSearch, mounted, admit };
-}
-function admittedSearchParent(plans, candidate) {
-  const plan = plans.get(candidate.corpusId);
-  return plan?.store === candidate ? plan : undefined;
-}
-function searchNamesVisibility(store, trustTier, tier) {
-  if (!tier || tier === "secret" || tier === "unknown" || trustTier === "S5")
-    return "hidden";
-  if (tier === "public_or_personal" || tier === "legacy" && !isSecureSensitivity({ trustDomain: store.trustDomain, trustTier }))
-    return "personal";
-  return "private";
-}
 function assertSourceIndexSearchQuery(value) {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", "query must be a non-empty string.");
@@ -227724,88 +227606,12 @@ function createEmailSourceWorker(options = {}) {
           throw new EmailSourceWorkerError(404, "not_found", "No such archive route.");
         }
         if (request.method === "POST" && url.pathname.startsWith(`${basePath}/privacy-item/`)) {
-          if (!ownerTierItems) {
-            throw new EmailSourceWorkerError(501, "privacy_items_not_supported", "Changing one item's privacy is not set up in this engine.");
-          }
-          const record = await parseObjectBody(request);
           const action = url.pathname.slice(`${basePath}/privacy-item/`.length);
-          if (action === "find" || action === "raise") {
-            const ids = record.corpus_ids;
-            if (ids !== undefined && (!Array.isArray(ids) || !ids.every((id) => typeof id === "string" && id.trim()))) {
-              throw new EmailSourceWorkerError(400, "invalid_request", "corpus_ids must be an array of corpus ids.");
-            }
-            const admission = searchStoreAdmission(options);
-            const mounted = admission.mounted(ids ?? options.searchableCorpusIds ?? connectorStores.map((store) => store.corpusId));
-            const scopes = new Map;
-            const plans = new Map;
-            for (const store of mounted.values()) {
-              const grant = admission.admit(store);
-              if (grant && !store.fileReplacedOrRemoved())
-                plans.set(store.corpusId, grant);
-            }
-            const contributing = new Set;
-            return await withSearchVisibilityStores((candidate) => {
-              const plan = admittedSearchParent(plans, candidate);
-              if (plan)
-                contributing.add(plan.store);
-              return !!plan;
-            }, async () => {
-              const checks = new Map;
-              const current = () => [...plans.values()].every((grant) => grant.current() && !grant.store.fileReplacedOrRemoved()) && [...contributing].every((store) => checks.get(store)());
-              for (const grant of plans.values()) {
-                const { store } = grant;
-                const { accountScope, filters } = grant.scope();
-                const change = store.changeMarker();
-                const visibility = store.visibilityMarker();
-                const stillCurrent = () => change === store.changeMarker() && visibility === store.visibilityMarker();
-                checks.set(store, stillCurrent);
-                const { sql, params } = connectorStoreFilterSql(filters);
-                scopes.set(store.dbPath, {
-                  sql: accountScope ? sql + " AND i.account_scope = ?" : sql,
-                  params: accountScope ? [...params, accountScope] : params,
-                  visible(sourceItem, trustTier) {
-                    if (!store.selectedItemServable(sourceItem, accountScope, filters, "metadata"))
-                      return false;
-                    const [tier] = store.effectiveItemTiers([sourceItem], "names");
-                    if (searchNamesVisibility(store, trustTier, tier) !== "personal")
-                      return false;
-                    if (store.childrenWithWithheldSearchIdentifiers([sourceItem], false).size)
-                      return false;
-                    const hit = {
-                      sourceItem,
-                      trustTier,
-                      corpusId: store.corpusId,
-                      trustDomain: store.trustDomain,
-                      servingLayer: "metadata",
-                      rawExposed: false
-                    };
-                    if (options.sourceIndexVisibilityGate && !options.sourceIndexVisibilityGate([hit]).includes(hit))
-                      return false;
-                    contributing.add(store);
-                    return true;
-                  }
-                });
-              }
-              if (action === "raise") {
-                const itemId = asOptionalString(record.item_id);
-                if (!itemId)
-                  throw new EmailSourceWorkerError(400, "invalid_request", "item_id is required.");
-                return json(ownerTierItems.set({ itemId, choice: "private", allowLower: false }, { scopes, current }));
-              }
-              const query = asOptionalString(record.query);
-              const recent = asOptionalBoolean(record.recent);
-              const limit = asOptionalNumber(record.limit, "limit");
-              const result = await ownerTierItems.find({
-                ...query !== undefined ? { query } : {},
-                ...recent !== undefined ? { recent } : {},
-                ...limit !== undefined ? { limit } : {},
-                personalNamesOnly: true
-              }, { scopes, current });
-              if (!current()) {
-                throw new EmailSourceWorkerError(403, "source_index_policy_violation", "Source visibility changed during the lookup. Retry under the current scope.");
-              }
-              return json(result);
-            });
+          const unavailable = { unavailable: true, message: AGENT_ITEM_PRIVACY_UNAVAILABLE };
+          if (action === "find")
+            return json(unavailable);
+          if (action === "raise") {
+            return json(unavailable);
           }
           throw new EmailSourceWorkerError(404, "not_found", "No such privacy item route.");
         }
@@ -230015,8 +229821,7 @@ function createEmailSourceWorker(options = {}) {
             throw new EmailSourceWorkerError(400, "invalid_request", "tier_corpus_ids must be an array of corpus ids.");
           }
           const requestedTiers = tierCorpusIds === undefined ? undefined : new Set(tierCorpusIds);
-          const admission = searchStoreAdmission(options, requestedTiers);
-          const { canSearch } = admission;
+          const canSearch = (id) => (options.searchableCorpusIds?.has(id) ?? true) && (requestedTiers?.has(id) ?? true);
           assertSourceIndexSearchQuery(record.query);
           if (record.personal_names_only !== undefined && record.personal_names_only !== true) {
             throw new EmailSourceWorkerError(400, "invalid_request", "personal_names_only must be true when provided.");
@@ -230026,16 +229831,26 @@ function createEmailSourceWorker(options = {}) {
           }
           const personalNamesOnly = record.include_private_names !== true;
           const planStore = (store) => {
-            const grant = admission.admit(store);
-            if (!grant)
+            const mandatoryScope = connectorStoreReadScope?.(store);
+            if (mandatoryScope?.allowed === false)
               return;
+            const readScopeSignature = JSON.stringify(mandatoryScope);
             const searchRequest = parseConnectorStoreIndexSearchRequestRecord({ ...record, corpus_id: store.corpusId }, store, connectorStoreAccountScopes.get(store.corpusId), store.family === "chat" ? connectorStorePrincipals.get(store.corpusId) : undefined, connectorStorePrincipals.get(store.corpusId), connectorStoreFilterCapabilities);
-            return { ...grant, scope: grant.scope(searchRequest.accountScope, searchRequest.filters), searchRequest };
+            const accountScope = mandatoryScope?.accountScope || searchRequest.accountScope;
+            const filters = normalizeConnectorStoreSearchFilters({ ...searchRequest.filters, ...mandatoryScope?.filters });
+            const scope = {
+              ...accountScope ? { accountScope } : {},
+              ...filters ? { filters } : {}
+            };
+            return { store, scope, readScopeSignature, searchRequest };
           };
           const plans = new Map;
           const planErrors = new Map;
-          const planStores = (mounted) => {
-            for (const [id, store] of mounted) {
+          const planStores = (ids, mounted = connectorStoresByCorpusId) => {
+            for (const id of ids) {
+              const store = mounted.get(id);
+              if (!store)
+                continue;
               try {
                 const plan = planStore(store);
                 if (plan)
@@ -230045,13 +229860,12 @@ function createEmailSourceWorker(options = {}) {
               }
             }
           };
-          const parentAllowed = (candidate) => !!admittedSearchParent(plans, candidate);
+          const parentAllowed = (candidate) => plans.get(candidate.corpusId)?.store === candidate;
           const prepare = (corpusId, ids) => withSearchVisibilityStores(parentAllowed, async () => {
-            const searchConnectorStore = async ({ store, current, scope, searchRequest }) => {
+            const searchConnectorStore = async ({ store, scope, readScopeSignature, searchRequest }) => {
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
               const searchEmbeddingProvider = connectorStoreEmbeddingProvider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? connectorStoreEmbeddingProvider : undefined;
               const retrievalMode = searchRequest.retrievalMode ?? (searchEmbeddingProvider && store.vectorLaneServable(searchEmbeddingProvider.modelId) ? "hybrid" : "keyword");
-              const { accountScope, filters: combinedFilters } = scope;
               const privateMatches = new Set;
               const adapter = createConnectorStoreCorpusAdapter({
                 store,
@@ -230060,15 +229874,17 @@ function createEmailSourceWorker(options = {}) {
                   searchEligibility(rows) {
                     const tiers = store.effectiveItemTiers(rows.map((row) => row.sourceItem), "names");
                     return rows.map((row, index) => {
-                      const visibility = searchNamesVisibility(store, row.trustTier, tiers[index]);
-                      if (visibility === "private")
-                        privateMatches.add(tierLedgerIdentityKey(row.sourceItem));
-                      return visibility === "personal";
+                      const tier = tiers[index];
+                      if (tier === "secret" || tier === "unknown" || row.trustTier === "S5")
+                        return false;
+                      if (tier === "public_or_personal" || tier === "legacy" && !isSecureSensitivity({ trustDomain: store.trustDomain, trustTier: row.trustTier }))
+                        return true;
+                      privateMatches.add(tierLedgerIdentityKey(row.sourceItem));
+                      return false;
                     });
                   }
                 } : {},
-                ...accountScope ? { accountScope } : {},
-                ...combinedFilters ? { filters: combinedFilters } : {},
+                ...scope,
                 ...searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {},
                 ...searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}
               });
@@ -230091,12 +229907,8 @@ function createEmailSourceWorker(options = {}) {
                 searchRequest,
                 result,
                 privateMatches,
-                current,
-                scope: {
-                  corpusId: store.corpusId,
-                  ...accountScope ? { accountScope } : {},
-                  ...combinedFilters ? { filters: combinedFilters } : {}
-                }
+                readScopeSignature,
+                scope: { corpusId: store.corpusId, ...scope }
               };
             };
             const runs = [];
@@ -230125,7 +229937,8 @@ function createEmailSourceWorker(options = {}) {
             })));
             const tagged = [...taggedByHit.values()];
             return () => withSearchVisibilityStores((candidate) => {
-              return admittedSearchParent(plans, candidate)?.current() ?? false;
+              const plan = plans.get(candidate.corpusId);
+              return plan?.store === candidate && JSON.stringify(connectorStoreReadScope?.(plan.store)) === plan.readScopeSignature;
             }, () => {
               const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
               const verdictScopes = new Map;
@@ -230199,7 +230012,7 @@ function createEmailSourceWorker(options = {}) {
                 if (governed.length === 0)
                   continue;
                 try {
-                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map((hit) => hit.sourceItem), !personalNamesOnly);
+                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map((hit) => hit.sourceItem), !personalNamesOnly, plans);
                   for (const hit of governed) {
                     if (children.has(tierLedgerIdentityKey(hit.sourceItem)))
                       withheldChildIdentifiers.add(hit);
@@ -230264,7 +230077,7 @@ function createEmailSourceWorker(options = {}) {
                 }
               };
               assertNoRawEmailFields(safeResult);
-              if (runs.some((run) => !run.current())) {
+              if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
                 throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The source read scope changed during search. Retry under the current scope.");
               }
               return safeResult;
@@ -230275,29 +230088,30 @@ function createEmailSourceWorker(options = {}) {
             if (!corpusId) {
               throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
             }
+            const connectorStore = connectorStoresByCorpusId.get(corpusId);
             const siblingIds = record.all_tiers === false || record.trust_domain !== undefined ? [] : options.connectorStoreTierSiblings?.(corpusId) ?? [];
             const searchableIds = [...new Set([corpusId, ...siblingIds])].filter(canSearch);
             if (!searchableIds.length) {
               throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This corpus is not enabled for search.");
             }
-            const mounted = admission.mounted(searchableIds);
-            const connectorStore = mounted.get(corpusId);
             if (canSearch(corpusId) && !connectorStore)
               throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
             if (!personalNamesOnly && connectorStore?.trustDomain !== "secure_local") {
               throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names requires a Private corpus.");
             }
-            planStores(mounted);
+            planStores(searchableIds);
             return json((await prepare(corpusId, searchableIds))());
           }
           if (record.corpus_id !== undefined || !Array.isArray(corpusIds) || !corpusIds.length || !corpusIds.every((id) => typeof id === "string" && id.trim()) || new Set(corpusIds).size !== corpusIds.length) {
             throw new EmailSourceWorkerError(400, "invalid_request", "Supply distinct corpus_ids for a multi-source search.");
           }
-          const mounted = admission.mounted(corpusIds);
-          planStores(mounted);
+          const eligible = new Set(corpusIds.filter(canSearch));
+          options.refreshConnectorStores?.(eligible);
+          const mounted = new Map(connectorStores.map((store) => [store.corpusId, store]));
+          planStores(eligible, mounted);
           const skipped = [];
           const prepared = await Promise.allSettled(corpusIds.map((id) => {
-            if (mounted.has(id))
+            if (eligible.has(id) && mounted.has(id))
               return prepare(id, [id]);
             skipped.push(id);
             return null;
@@ -230705,7 +230519,6 @@ var init_engine2 = __esm(() => {
   init_operation_error();
   init_ingestion_throughput();
   init_write_routes();
-  init_local_index();
   init_judge_check();
   init_staging();
   init_messaging_capture();

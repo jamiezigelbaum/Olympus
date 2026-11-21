@@ -1,7 +1,4 @@
-import type { EmailSourceWorkerOptions } from './worker-options.ts';
-import type { ChildVisibilityStore } from '../../connector-store/child-visibility.ts';
-import { DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS, isSecureSensitivity, type SourceTrustTier } from '../../../core/source-index/types.ts';
-import type { ReleaseInputVerdict } from '../../../core/release-manifest.ts';
+import { DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS } from '../../../core/source-index/types.ts';
 import { X_BOOKMARKS_FOLDER_FILTER_CODEC } from '../../x-bookmarks/index.ts';
 import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../../local-files/approved-scope-filter.ts';
 import { LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC } from '../../local-files/locator-result-projector.ts';
@@ -15,7 +12,6 @@ import {
   normalizeConnectorStoreSearchFilters,
   type ConnectorStoreFilterCapabilityRegistry,
   type ConnectorStoreResultProjector,
-  type ConnectorStoreSearchFilters,
   undeclaredConnectorStoreSearchRequestFields,
   unsupportedConnectorStoreFilterFields,
 } from '../../connector-store/index.ts';
@@ -43,50 +39,6 @@ export interface ConnectorStoreDeclaredPrincipal {
 }
 
 export type ConnectorStoreChatPrincipal = ConnectorStoreDeclaredPrincipal;
-
-/** The caller and worker must both admit a corpus, before refresh or any store read. */
-export function searchStoreAdmission(options: EmailSourceWorkerOptions, requested?: ReadonlySet<string>) {
-  const canSearch = (id: string) => (options.searchableCorpusIds?.has(id) ?? true) && (requested?.has(id) ?? true);
-  function mounted(ids: Iterable<string>) {
-    const eligible = new Set([...ids].filter(canSearch));
-    options.refreshConnectorStores?.(eligible);
-    return new Map((options.connectorStores ?? []).filter(store => eligible.has(store.corpusId)).map(store => [store.corpusId, store]));
-  }
-  function admit(store: LocalConnectorStore) {
-    if (!canSearch(store.corpusId)) return undefined;
-    const read = options.connectorStoreReadScope?.(store);
-    if (read?.allowed === false) return undefined;
-    const account = options.connectorStoreAccountScopes?.get(store.corpusId)?.trim() || undefined;
-    const signature = JSON.stringify(read);
-    return {
-      store,
-      current: () => canSearch(store.corpusId)
-        && (options.connectorStores ?? []).includes(store)
-        && signature === JSON.stringify(options.connectorStoreReadScope?.(store))
-        && account === (options.connectorStoreAccountScopes?.get(store.corpusId)?.trim() || undefined),
-      scope(accountScope = account, filters?: ConnectorStoreSearchFilters) {
-        return {
-          accountScope: read?.accountScope || accountScope,
-          filters: filters || read?.filters ? normalizeConnectorStoreSearchFilters({ ...filters, ...read?.filters }) : undefined,
-        };
-      },
-    };
-  }
-  return { canSearch, mounted, admit };
-}
-
-export function admittedSearchParent<T extends { store: LocalConnectorStore }>(
-  plans: ReadonlyMap<string, T>, candidate: ChildVisibilityStore,
-): T | undefined {
-  const plan = plans.get(candidate.corpusId);
-  return plan?.store === candidate ? plan : undefined;
-}
-
-export function searchNamesVisibility(store: LocalConnectorStore, trustTier: SourceTrustTier, tier: ReleaseInputVerdict['tier'] | undefined) {
-  if (!tier || tier === 'secret' || tier === 'unknown' || trustTier === 'S5') return 'hidden';
-  if (tier === 'public_or_personal' || (tier === 'legacy' && !isSecureSensitivity({ trustDomain: store.trustDomain, trustTier }))) return 'personal';
-  return 'private';
-}
 
 export function assertSourceIndexSearchQuery(value: unknown): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) {

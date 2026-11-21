@@ -124,7 +124,6 @@ import {
   CHILD_PARENT_CHAIN_LIMIT,
   goneParents,
   parentKey,
-  searchVisibilityScoped,
   type ChildVisibilityLane,
   type ParentRef,
 } from './child-visibility.ts';
@@ -391,11 +390,7 @@ export class TieredStoreSet {
   /** The part of the lane the child check and the sweep read: this set's ledger and stores. */
   private readonly childLane: ChildVisibilityLane = {
     ledger: () => this.ledger,
-    // Search has already mounted its admitted corpora. Enumerating other legs
-    // here would open them before childVisibilityStores can apply that grant.
-    stores: () => searchVisibilityScoped()
-      ? [...this.legs.values()].flatMap(leg => leg.store ? [leg.store] : [])
-      : this.openStores(),
+    stores: () => this.openStores(),
   };
 
   /** Syncs in flight: the sweep never works while one is. */

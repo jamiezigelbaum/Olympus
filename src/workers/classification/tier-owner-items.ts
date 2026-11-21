@@ -16,7 +16,6 @@
 // for the owner's own dashboard, or, for an agent, only when the item's names
 // are Personal or less, the tier its names would be cited at anyway.
 
-import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import {
   applyTierSet,
@@ -34,7 +33,6 @@ import {
   contentSecretFindingKinds, tierRank, type TierKey,
 } from './tier-classifier.ts';
 import { isFailSafeMissingContentQuestion, itemNamesHeldForJudgment, tierLedgerIdentityKey, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
-import { ingestionTurn } from '../control-path-headroom.ts';
 import type { ItemExtractionOutcome } from '../file-extraction/job-store.ts';
 import { unreadHoldDisposition, type UnreadableFileReason } from '../file-extraction/unreadable-files.ts';
 import { tierDisplayName } from './tier-rules.ts';
@@ -151,32 +149,10 @@ export type OwnerTierItemSetResult =
   | { ok: true; item: OwnerTierItem; changed: 'set' | 'cleared' | 'unchanged'; applies: 'now' | 'next_pass'; results: Array<Record<string, unknown>> }
   | { ok: false; code: 'not_found' | 'secret_item' | 'dashboard_only' | 'not_owner_set' | 'override_review_changed'; message: string };
 
-/** Agent finds apply the mounted store's metadata predicate to the row supplying the names. */
-export interface OwnerItemNamesScope {
-  sql: string;
-  params: string[];
-  visible(identity: SourceItemIdentity, trustTier: SourceTrustTier): boolean;
-}
-type OwnerItemList = { items: OwnerTierItem[] };
-type OwnerFindScopes = ReadonlyMap<string, OwnerItemNamesScope>;
-
-interface AgentItemAdmission {
-  scopes: OwnerFindScopes;
-  current(): boolean;
-}
-
-// Ledger discovery and identity resolution must also stay inside the admitted stores.
-// Dashboard-only extraction and content-policy callbacks can inspect other mounts.
-function admittedContext(context: OwnerTierItemsContext, scopes: OwnerFindScopes): OwnerTierItemsContext {
-  const { extractionOutcome, contentAllowed, ...paths } = context;
-  return { ...paths, storePaths: knownStorePaths(context).filter(path => scopes.has(path)) };
-}
-
 /** The bound engine the worker serves (engine/index.ts). */
 export interface OwnerTierItems {
-  find(input: OwnerTierItemFindInput): OwnerItemList;
-  find(input: OwnerTierItemFindInput, admission: AgentItemAdmission): OwnerItemList | Promise<OwnerItemList>;
-  set(input: OwnerTierItemSetInput, admission?: AgentItemAdmission): OwnerTierItemSetResult;
+  find(input: OwnerTierItemFindInput): { items: OwnerTierItem[] };
+  set(input: OwnerTierItemSetInput): OwnerTierItemSetResult;
   /** The dashboard's filter counts. Optional so a narrow engine can leave the counts off. */
   counts?(): OwnerTierItemCounts;
 }
@@ -187,14 +163,9 @@ export interface OwnerTierItemsContext extends TierCliContext {
 }
 
 export function createOwnerTierItems(context: OwnerTierItemsContext = {}): OwnerTierItems {
-  function find(input: OwnerTierItemFindInput): OwnerItemList;
-  function find(input: OwnerTierItemFindInput, admission: AgentItemAdmission): OwnerItemList | Promise<OwnerItemList>;
-  function find(input: OwnerTierItemFindInput, admission?: AgentItemAdmission) {
-    return admission ? findAdmittedItems(input, context, admission) : findOwnerTierItems(input, context);
-  }
   return {
-    find,
-    set: (input, admission) => setOwnerTierItem(input, context, admission),
+    find: (input) => findOwnerTierItems(input, context),
+    set: (input) => setOwnerTierItem(input, context),
     counts: () => countOwnerTierItems(context),
   };
 }
@@ -225,9 +196,8 @@ export function parseOwnerTierItemId(itemId: unknown): TierLedgerIdentity {
 
 interface StoredItemRow {
   local_item_id?: string;
-  trust_tier?: SourceTrustTier;
   provider: string;
-  family: SourceItemIdentity['family'] | 'unknown';
+  family: string;
   account_scope: string;
   provider_item_id: string;
   provider_conversation_id: string | null;
@@ -261,26 +231,7 @@ function namesAbovePersonal(state: ItemState): boolean {
     .some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank('private'));
 }
 
-export function findOwnerTierItems(input: OwnerTierItemFindInput, context: OwnerTierItemsContext = {}, scopes?: OwnerFindScopes): OwnerItemList {
-  return { items: [...findRows(input, context, scopes)].filter((item): item is OwnerTierItem => !!item) };
-}
-
-async function findAdmittedItems(input: OwnerTierItemFindInput, context: OwnerTierItemsContext, admission: AgentItemAdmission): Promise<OwnerItemList> {
-  const items: OwnerTierItem[] = [];
-  for (const item of findRows(input, context, admission.scopes)) {
-    if (item) items.push(item);
-    // A page can contain only excluded rows. Give other requests time even then.
-    const turn = ingestionTurn();
-    if (turn) {
-      await turn;
-      if (!admission.current()) throw new OperationError('source_index_policy_violation', 'Source visibility changed during the lookup. Retry under the current scope.');
-    }
-  }
-  return { items };
-}
-
-function* findRows(input: OwnerTierItemFindInput, context: OwnerTierItemsContext, scopes?: OwnerFindScopes): Generator<OwnerTierItem | undefined> {
-  if (scopes) context = admittedContext(context, scopes);
+export function findOwnerTierItems(input: OwnerTierItemFindInput, context: OwnerTierItemsContext = {}): { items: OwnerTierItem[] } {
   const limit = clampLimit(input.limit);
   const query = input.query?.trim() ?? '';
   if (query.length > OWNER_ITEM_QUERY_MAX) throw new OperationError('invalid_params', `query is at most ${OWNER_ITEM_QUERY_MAX} characters.`);
@@ -297,13 +248,10 @@ function* findRows(input: OwnerTierItemFindInput, context: OwnerTierItemsContext
     throw new OperationError('invalid_params', 'beforeItem goes with before.');
   }
   const beforeItem = input.beforeItem === undefined ? undefined : parseOwnerTierItemId(input.beforeItem);
-  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before, beforeItem, scopes) : searchRows(query, limit * 3, context, scopes);
-  let remaining = limit;
+  const rows = input.recent ? recentRows(limit * 3, context, input.filter, input.before, beforeItem) : searchRows(query, limit * 3, context);
+  const items: OwnerTierItem[] = [];
   for (const row of rows) {
-    if (!row) {
-      yield undefined;
-      continue;
-    }
+    if (items.length >= limit) break;
     const identity = identityOfRow(row);
     const state = readItemState(identity, context);
     if (state.secret) continue;
@@ -315,9 +263,9 @@ function* findRows(input: OwnerTierItemFindInput, context: OwnerTierItemsContext
       if (state.overrideFindingKinds?.length) item.override_finding_kinds = state.overrideFindingKinds;
       if (input.withPreview && !state.reviewHeld && !state.overrideFindingKinds?.length) item.preview = previewOf(identity, context);
     }
-    yield item;
-    if (--remaining === 0) break;
+    items.push(item);
   }
+  return { items };
 }
 
 function clampLimit(limit: number | undefined): number {
@@ -331,47 +279,37 @@ function likePattern(words: string): string {
 }
 
 
-function selectColumns(columns: Set<string>, scope?: OwnerItemNamesScope): string {
+function selectColumns(columns: Set<string>): string {
   const sender = columns.has('sender_label') ? 'sender_label, sender_id' : 'NULL AS sender_label, NULL AS sender_id';
-  return `local_item_id, provider, family, account_scope, provider_item_id, provider_conversation_id, title, ${sender}, locator_uri${scope ? ', trust_tier' : ''}`;
-}
-
-function namesVisible(row: StoredItemRow, scope: OwnerItemNamesScope | undefined): boolean {
-  if (!scope) return true;
-  if (!row.local_item_id || !row.trust_tier || row.family === 'unknown') return false;
-  return scope.visible({ ...identityOfRow(row), family: row.family, localItemId: row.local_item_id }, row.trust_tier);
+  return `local_item_id, provider, family, account_scope, provider_item_id, provider_conversation_id, title, ${sender}, locator_uri`;
 }
 
 /** Stored items whose title, sender or file name holds the words, newest first; one row per item across twin stores. */
-function searchRows(query: string, limit: number, context: TierCliContext, scopes?: OwnerFindScopes): StoredItemRow[] {
+function searchRows(query: string, limit: number, context: TierCliContext): StoredItemRow[] {
   const pattern = likePattern(query);
   const found = new Map<string, StoredItemRow & { at: string }>();
   for (const dbPath of knownStorePaths(context)) {
-    const scope = scopes?.get(dbPath);
-    if (scopes && !scope) continue;
     const rows = withStore<Array<StoredItemRow & { at: string }>>(dbPath, [], (db, columns) => {
       const fields = ['title', 'locator_uri', ...(columns.has('sender_label') ? ['sender_label', 'sender_id'] : [])];
       return db.query(`
-        SELECT ${selectColumns(columns, scope)}, COALESCE(authored_at, indexed_at, '') AS at FROM items i
+        SELECT ${selectColumns(columns)}, COALESCE(authored_at, indexed_at, '') AS at FROM items
         WHERE tombstoned = 0 AND (${fields.map((field) => `${field} LIKE ? ESCAPE '\\'`).join(' OR ')})
-        ${scope?.sql ?? ''}
         ORDER BY at DESC
         LIMIT ?
-      `).all(...fields.map(() => pattern), ...(scope?.params ?? []), limit) as Array<StoredItemRow & { at: string }>;
+      `).all(...fields.map(() => pattern), limit) as Array<StoredItemRow & { at: string }>;
     });
     for (const row of rows) {
       const key = tierLedgerIdentityKey(identityOfRow(row));
-      if (!found.has(key) && namesVisible(row, scope)) found.set(key, row);
+      if (!found.has(key)) found.set(key, row);
     }
   }
   return [...found.values()].sort((left, right) => right.at.localeCompare(left.at)).slice(0, limit);
 }
 
 /** The items the ledgers decided most recently, newest first, as their stores keep them; with a filter, only those. */
-function recentDecisionPage(ledgers: ReturnType<typeof knownTierLedgers>, limit: number, context: TierCliContext, ledgerCursorOrder: boolean,
-  filter?: OwnerTierItemFilter, before?: string, beforeItem?: TierLedgerIdentity) {
+function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierItemFilter, before?: string, beforeItem?: TierLedgerIdentity): StoredItemRow[] {
   const decided = new Map<string, TierLedgerRecord>();
-  for (const ledger of ledgers) {
+  for (const ledger of knownTierLedgers(context)) {
     let records: TierLedgerRecord[] = [];
     try {
       records = withLedgerAt(ledger.path, context.now, (opened) => filter === 'changed' || filter === 'override_review'
@@ -389,42 +327,20 @@ function recentDecisionPage(ledgers: ReturnType<typeof knownTierLedgers>, limit:
     }
   }
   // Newest first, then the ledger's own tie order, so paging by the last item resumes where a page ended.
-  return [...decided.values()].sort((a, b) => recentOrder(a, b, ledgerCursorOrder)).slice(0, limit);
-}
-
-function visibleStoredRow(identity: TierLedgerIdentity, stores: readonly string[], scopes?: OwnerFindScopes): StoredItemRow | undefined {
-  for (const dbPath of stores) {
-    const scope = scopes?.get(dbPath);
-    if (scopes && !scope) continue;
-    const row = readStoredRow(dbPath, identity, scope);
-    if (row && namesVisible(row, scope)) return row;
-  }
-  return undefined;
-}
-
-function* recentRows(limit: number, context: TierCliContext, filter?: OwnerTierItemFilter, before?: string,
-  beforeItem?: TierLedgerIdentity, scopes?: OwnerFindScopes): Generator<StoredItemRow | undefined> {
-  const ledgers = knownTierLedgers(context);
+  const ordered = [...decided.values()].sort(recentOrder).slice(0, limit);
   const stores = knownStorePaths(context);
-  const yielded = new Set<string>();
-  while (true) {
-    const page = recentDecisionPage(ledgers, limit, context, !!scopes, filter, before, beforeItem);
-    for (const record of page) {
-      const identity = identityOfRecord(record);
-      const key = tierLedgerIdentityKey(identity);
-      if (yielded.has(key)) continue;
-      const row = visibleStoredRow(identity, stores, scopes);
+  const rows: StoredItemRow[] = [];
+  for (const record of ordered) {
+    const identity = identityOfRecord(record);
+    for (const dbPath of stores) {
+      const row = readStoredRow(dbPath, identity);
       if (row) {
-        yielded.add(key);
-        yield row;
-      } else if (scopes) yield undefined;
+        rows.push(row);
+        break;
+      }
     }
-    if (!scopes || page.length < limit || filter === 'changed' || filter === 'override_review') return;
-    const last = page[page.length - 1]!;
-    before = last.decidedAt;
-    beforeItem = identityOfRecord(last);
-    yield undefined;
   }
+  return rows;
 }
 
 /** The start of the item's stored text (its first chunk), from the first store that holds it; null when none does. */
@@ -473,16 +389,12 @@ function identityOfRow(row: StoredItemRow): TierLedgerIdentity {
 }
 
 /** The ledgers' recently-sorted order: newest first, then provider, account, chat and item (recentDecisions). */
-function recentOrder(left: TierLedgerRecord, right: TierLedgerRecord, ledgerCursorOrder: boolean): number {
+function recentOrder(left: TierLedgerRecord, right: TierLedgerRecord): number {
   if (left.decidedAt !== right.decidedAt) return left.decidedAt < right.decidedAt ? 1 : -1;
   const keys = (record: TierLedgerRecord) => [record.provider, record.accountScope, record.conversationKey, record.providerItemId];
   const [a, b] = [keys(left), keys(right)];
   for (let index = 0; index < a.length; index += 1) {
-    if (a[index] !== b[index]) {
-      // A continuing scan must compare identities in the SQLite cursor's binary order.
-      if (ledgerCursorOrder) return Buffer.compare(Buffer.from(a[index]!), Buffer.from(b[index]!));
-      return a[index]! < b[index]! ? -1 : 1;
-    }
+    if (a[index] !== b[index]) return a[index]! < b[index]! ? -1 : 1;
   }
   return 0;
 }
@@ -610,7 +522,7 @@ export function getOwnerTierItem(itemId: string, context: OwnerTierItemsContext 
 
 // --- Set -----------------------------------------------------------------------
 
-export function setOwnerTierItem(input: OwnerTierItemSetInput, context: OwnerTierItemsContext = {}, admission?: AgentItemAdmission): OwnerTierItemSetResult {
+export function setOwnerTierItem(input: OwnerTierItemSetInput, context: OwnerTierItemsContext = {}): OwnerTierItemSetResult {
   const { choice } = input;
   if (choice !== 'personal' && choice !== 'private' && choice !== 'judge') {
     throw new OperationError('invalid_params', 'tier must be "personal", "private" or "judge".');
@@ -625,25 +537,16 @@ export function setOwnerTierItem(input: OwnerTierItemSetInput, context: OwnerTie
       message: 'An AI app can only make an item Private. To make it Personal, or put it back to the judge\'s label, use Privacy on the Olympus dashboard on this computer.',
     };
   }
-  const notFound = { ok: false, code: 'not_found', message: 'Olympus no longer holds that item.' } as const;
-  let admittedRow: StoredItemRow | undefined;
-  if (!input.allowLower) {
-    if (!admission) return notFound;
-    context = admittedContext(context, admission.scopes);
-    admittedRow = visibleStoredRow(identity, knownStorePaths(context), admission.scopes);
-    if (!admittedRow) return notFound;
-  }
   let located: LocatedItem[];
-  let before: ItemState;
   try {
     located = locateTierItemByIdentity(identity, context);
-    before = readLocatedState(located, context);
   } catch (error) {
-    // Find suppresses an item whose current decision cannot be established.
-    if (!input.allowLower || (error instanceof OperationError && error.code === 'invalid_params')) return notFound;
+    if (error instanceof OperationError && error.code === 'invalid_params') {
+      return { ok: false, code: 'not_found', message: 'Olympus no longer holds that item.' };
+    }
     throw error;
   }
-  if (!input.allowLower && (before.secret || namesAbovePersonal(before) || !admission?.current())) return notFound;
+  const before = readLocatedState(located, context);
   if (before.secret) {
     return { ok: false, code: 'secret_item', message: 'This item is Secret. Secret items are not changed from here.' };
   }
@@ -673,7 +576,7 @@ export function setOwnerTierItem(input: OwnerTierItemSetInput, context: OwnerTie
   const target: TierKey | undefined = choice === 'personal' ? 'private' : choice === 'private' ? 'secure' : undefined;
   const applies = target !== undefined && after.record?.state === 'current'
     && after.record.contentTier === target && after.record.metadataTier === target ? 'now' : 'next_pass';
-  const row = admittedRow ?? storedRowFor(identity, located, context);
+  const row = storedRowFor(identity, located, context);
   const item = view(row, after, context);
   // An agent never reads back names that are now Private.
   if (!input.allowLower && (namesAbovePersonal(before) || namesAbovePersonal(after))) {
@@ -703,13 +606,13 @@ function storedRowFor(identity: TierLedgerIdentity, located: readonly LocatedIte
   };
 }
 
-function readStoredRow(dbPath: string, identity: TierLedgerIdentity, scope?: OwnerItemNamesScope): StoredItemRow | undefined {
+function readStoredRow(dbPath: string, identity: TierLedgerIdentity): StoredItemRow | undefined {
   return withStore(dbPath, undefined, (db, columns) => {
     const predicate = storeItemIdentityPredicate(identity, columns);
     return db.query<StoredItemRow, string[]>(`
-      SELECT ${selectColumns(columns, scope)} FROM items i
-      WHERE ${predicate.sql} ${scope?.sql ?? ''}
+      SELECT ${selectColumns(columns)} FROM items
+      WHERE ${predicate.sql}
       LIMIT 1
-    `).get(...predicate.params, ...(scope?.params ?? [])) ?? undefined;
+    `).get(...predicate.params) ?? undefined;
   });
 }

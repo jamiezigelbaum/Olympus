@@ -28430,7 +28430,7 @@ class LocalConnectorStore {
       stores: () => [this]
     };
   }
-  childrenWithWithheldSearchIdentifiers(identities, includePrivateNames) {
+  childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, plans) {
     const links = this.parentLinksOf(identities);
     const withheld = new Set;
     const lookupKey = (parent) => ("parentLocalItemId" in parent) ? `local:${parentKey(parent)}` : `provider:${tierLedgerIdentityKey(parent)}`;
@@ -28464,10 +28464,23 @@ class LocalConnectorStore {
         else
           encoded.push(parent);
       }
-      const rows = stores.flatMap((store) => [
-        ...store.parentStandings(linked).map((row) => ({ ...row, key: lookupKey(row) })),
-        ...Array.from(store.itemStandings(encoded).values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
-      ].filter((row) => row.active).map((row) => ({ ...row, corpusId: store.corpusId })));
+      const rows = stores.flatMap((store) => {
+        const plan = plans.get(store.corpusId);
+        if (!plan || plan.store !== store)
+          return [];
+        const active = [
+          ...store.parentStandings(linked).map((row) => ({ ...row, key: lookupKey(row) })),
+          ...Array.from(store.itemStandings(encoded).values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
+        ].filter((row) => row.active);
+        const account = normalizeOptionalAccountScope(plan.scope.accountScope);
+        const predicate = connectorStoreFilterSql(plan.scope.filters);
+        const matches = predicate.sql ? new Set(plan.store.itemRowsForIdentities(active.map((row) => row.identity), (id) => normalizeConversationId(id.providerConversationId), predicate).map((row) => row.idx)) : undefined;
+        return active.map((row, index) => ({
+          ...row,
+          corpusId: store.corpusId,
+          inScope: (!account || row.accountScope === account) && (!matches || matches.has(index))
+        }));
+      });
       const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map((row) => ({
         ...row.identity,
         corpusId: row.corpusId,
@@ -28479,7 +28492,7 @@ class LocalConnectorStore {
       rows.forEach((row, index) => {
         const key = row.key;
         const verdict = verdicts[index];
-        const canRelease = !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
+        const canRelease = row.inScope && !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
         const previous = allowed.get(key);
         if (!canRelease || previous && (previous.grandparentLocalItemId !== row.grandparentLocalItemId || tierLedgerIdentityKey(previous.identity) !== tierLedgerIdentityKey(row.identity))) {
           denied.add(key);

@@ -9336,6 +9336,30 @@ var init_http = __esm(() => {
   REMOTE_ACCESS_TOGGLE_WINDOW_MS = 10 * 60000;
 });
 
+// src/core/privacy-language.ts
+var SENSITIVITY_TIER_LABELS, AGENT_ITEM_PRIVACY_UNAVAILABLE = "Changing one item's privacy from an AI app is not available in this version. Open the Olympus dashboard, Privacy, to find the item and make it Private.", PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS, LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES;
+var init_privacy_language = __esm(() => {
+  SENSITIVITY_TIER_LABELS = {
+    public: "Public",
+    private: "Personal",
+    secure: "Private",
+    secrets: "Secrets"
+  };
+  PRIVACY_PRESET_LABELS = {
+    "local-first": "Local models with Venice fallback",
+    "local-only": "Local models",
+    "private-cloud-only": "Venice",
+    "no-sensitive": "Private answers only in Olympus"
+  };
+  PRIVATE_ANSWER_OPTIONS = [
+    { id: "local-first", label: PRIVACY_PRESET_LABELS["local-first"], description: "The built-in model answers on this computer. Venice can help only after you add a Venice key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: true },
+    { id: "local-only", label: PRIVACY_PRESET_LABELS["local-only"], description: "The built-in model answers on this computer. You can connect your own local models; Private items stay on this computer.", recommended: false },
+    { id: "private-cloud-only", label: PRIVACY_PRESET_LABELS["private-cloud-only"], description: "Use Venice for Private answers after you add its key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: false },
+    { id: "no-sensitive", label: PRIVACY_PRESET_LABELS["no-sensitive"], description: "Search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.", recommended: false }
+  ];
+  LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES = 12 * 1024 ** 3;
+});
+
 // src/core/app-release-capture.ts
 import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
@@ -19772,30 +19796,6 @@ var init_source_account_binding = __esm(() => {
   ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email", "x.bookmarks"];
 });
 
-// src/core/privacy-language.ts
-var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS, LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES;
-var init_privacy_language = __esm(() => {
-  SENSITIVITY_TIER_LABELS = {
-    public: "Public",
-    private: "Personal",
-    secure: "Private",
-    secrets: "Secrets"
-  };
-  PRIVACY_PRESET_LABELS = {
-    "local-first": "Local models with Venice fallback",
-    "local-only": "Local models",
-    "private-cloud-only": "Venice",
-    "no-sensitive": "Private answers only in Olympus"
-  };
-  PRIVATE_ANSWER_OPTIONS = [
-    { id: "local-first", label: PRIVACY_PRESET_LABELS["local-first"], description: "The built-in model answers on this computer. Venice can help only after you add a Venice key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: true },
-    { id: "local-only", label: PRIVACY_PRESET_LABELS["local-only"], description: "The built-in model answers on this computer. You can connect your own local models; Private items stay on this computer.", recommended: false },
-    { id: "private-cloud-only", label: PRIVACY_PRESET_LABELS["private-cloud-only"], description: "Use Venice for Private answers after you add its key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: false },
-    { id: "no-sensitive", label: PRIVACY_PRESET_LABELS["no-sensitive"], description: "Search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.", recommended: false }
-  ];
-  LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES = 12 * 1024 ** 3;
-});
-
 // src/core/ingestion-throughput.ts
 function dropboxContentExtractionStallHours(env = process.env) {
   const raw = env[DROPBOX_CONTENT_EXTRACTION_STALL_HOURS_ENV];
@@ -24960,7 +24960,7 @@ class EmailClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       ...options.signal ? { signal: options.signal } : {},
-      body: JSON.stringify({ ...body, corpus_ids: this.searchCorpora().map((corpus) => corpus.corpusId) })
+      body: JSON.stringify(body)
     });
   }
   async sourceAnswer(options) {
@@ -25228,11 +25228,8 @@ class EmailClient {
       includeLocators: options.includeLocators === true
     });
   }
-  searchCorpora() {
-    return createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
-  }
   async sourceIndexSearchMany(options) {
-    const searchCorpora = this.searchCorpora();
+    const searchCorpora = createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
     if (!searchCorpora.length)
       throw new OperationError("invalid_params", "No source is configured for search.");
     const response = await this.requestSourceIndexSearch({
@@ -27775,6 +27772,7 @@ init_source_watch();
 init_http();
 
 // src/core/operations.ts
+init_privacy_language();
 init_release_manifest();
 
 // src/core/app-release-agent.ts
@@ -33075,12 +33073,7 @@ var operations = [
   },
   {
     name: "privacy_item_find",
-    description: [
-      "Find one of the user's items (an email, file or message) to check its privacy label, by words from its title, sender or file name, or list the items Olympus sorted most recently (recent: true).",
-      "Each item has item_id, source, title, sender, location, tier (Personal or Private: its label), decided_by (override = the user set it by hand; sniffer or move = the privacy judge), owner_set, and judge_reason (the judge's category and confidence) where the judge decided it.",
-      "Items whose names are Private, and Secret items, are never listed here.",
-      "Use it when the user says an item should be private, then call privacy_item_set."
-    ].join(" "),
+    description: AGENT_ITEM_PRIVACY_UNAVAILABLE,
     params: PRIVACY_ITEM_FIND_PARAMS,
     mutating: false,
     nativeExposure: "sourceIndexEnabledOnly",
@@ -33104,12 +33097,7 @@ var operations = [
   },
   {
     name: "privacy_item_set",
-    description: [
-      'Make one item Private when the user says it should be ("that email should be private"). Only raising is possible here: it adds protection, and the item is hidden from Personal search at once.',
-      "It is the user's decision on that one item, never a rule for its sender, chat or folder.",
-      "Making an item Personal, or putting it back to the judge's label, is done only by the user on the Olympus dashboard on their computer (Privacy): tell them so, and never retry another way.",
-      "Returns {ok: true, item, applies} or {ok: false, code, message}: tell the user the message in those words."
-    ].join(" "),
+    description: AGENT_ITEM_PRIVACY_UNAVAILABLE,
     params: PRIVACY_ITEM_SET_PARAMS,
     mutating: true,
     nativeExposure: "sourceIndexEnabledOnly",

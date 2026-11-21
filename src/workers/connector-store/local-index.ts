@@ -6407,7 +6407,11 @@ export class LocalConnectorStore {
   }
 
   /** A child's provider and local ids can incorporate the ids of its ancestors. */
-  childrenWithWithheldSearchIdentifiers(identities: readonly ChildProbe[], includePrivateNames: boolean): Set<string> {
+  childrenWithWithheldSearchIdentifiers(
+    identities: readonly ChildProbe[],
+    includePrivateNames: boolean,
+    plans: ReadonlyMap<string, { store: LocalConnectorStore; scope: Pick<ConnectorStoreCorpusAdapterOptions, 'accountScope' | 'filters'> }>,
+  ): Set<string> {
     const links = this.parentLinksOf(identities);
     const withheld = new Set<string>();
     // A local link and an encoded provider id are independent evidence of ancestry.
@@ -6440,10 +6444,25 @@ export class LocalConnectorStore {
         if ('parentLocalItemId' in parent) linked.push(parent);
         else encoded.push(parent);
       }
-      const rows = stores.flatMap(store => [
-        ...store.parentStandings(linked).map(row => ({ ...row, key: lookupKey(row) })),
-        ...Array.from(store.itemStandings(encoded).values(), row => ({ ...row, key: lookupKey(row.identity) })),
-      ].filter(row => row.active).map(row => ({ ...row, corpusId: store.corpusId })));
+      const rows = stores.flatMap(store => {
+        const plan = plans.get(store.corpusId);
+        if (!plan || plan.store !== store) return [];
+        const active = [
+          ...store.parentStandings(linked).map(row => ({ ...row, key: lookupKey(row) })),
+          ...Array.from(store.itemStandings(encoded).values(), row => ({ ...row, key: lookupKey(row.identity) })),
+        ].filter(row => row.active);
+        // Check the exact identities together against their own store's current rows.
+        // Keep excluded copies in the verdict so another copy cannot vouch for them.
+        const account = normalizeOptionalAccountScope(plan.scope.accountScope);
+        const predicate = connectorStoreFilterSql(plan.scope.filters);
+        const matches = predicate.sql ? new Set(plan.store.itemRowsForIdentities(
+          active.map(row => row.identity), id => normalizeConversationId(id.providerConversationId), predicate,
+        ).map(row => row.idx)) : undefined;
+        return active.map((row, index) => ({
+          ...row, corpusId: store.corpusId,
+          inScope: (!account || row.accountScope === account) && (!matches || matches.has(index)),
+        }));
+      });
       const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map(row => ({
         ...row.identity, corpusId: row.corpusId, privateAtAnswer: false, layer: 'names' as const,
       }))));
@@ -6452,7 +6471,7 @@ export class LocalConnectorStore {
       rows.forEach((row, index) => {
         const key = row.key;
         const verdict = verdicts[index]!;
-        const canRelease = !row.secret && !verdict.gone && !verdict.pendingDeletion
+        const canRelease = row.inScope && !row.secret && !verdict.gone && !verdict.pendingDeletion
           && (verdict.tier === 'public_or_personal'
           || (verdict.tier === 'private' && includePrivateNames)
           || (verdict.tier === 'legacy' && (row.legacyPrivateNames === false || includePrivateNames)));
@@ -21976,7 +21995,7 @@ function observedOwnerPredicate(exact?: string, prefix?: string, previous?: stri
     AND o.ownership_kind = 'observed' AND (${keys.join(' OR ')}))`, params };
 }
 
-export function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefined): {
+function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefined): {
   sql: string;
   params: Array<string>;
 } {

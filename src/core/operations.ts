@@ -1,3 +1,4 @@
+import { AGENT_ITEM_PRIVACY_UNAVAILABLE } from './privacy-language.ts';
 import { ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from './release-manifest.ts';
 import { DelphiClient } from './delphi.ts';
 import { noteLocalAgentAnswer } from './app-release-agent.ts';
@@ -847,12 +848,7 @@ export const operations: Operation[] = [
   },
   {
     name: 'privacy_item_find',
-    description: [
-      'Find one of the user\'s items (an email, file or message) to check its privacy label, by words from its title, sender or file name, or list the items Olympus sorted most recently (recent: true).',
-      'Each item has item_id, source, title, sender, location, tier (Personal or Private: its label), decided_by (override = the user set it by hand; sniffer or move = the privacy judge), owner_set, and judge_reason (the judge\'s category and confidence) where the judge decided it.',
-      'Items whose names are Private, and Secret items, are never listed here.',
-      'Use it when the user says an item should be private, then call privacy_item_set.',
-    ].join(' '),
+    description: AGENT_ITEM_PRIVACY_UNAVAILABLE,
     params: PRIVACY_ITEM_FIND_PARAMS,
     mutating: false,
     nativeExposure: 'sourceIndexEnabledOnly',
@@ -876,12 +872,7 @@ export const operations: Operation[] = [
   },
   {
     name: 'privacy_item_set',
-    description: [
-      'Make one item Private when the user says it should be ("that email should be private"). Only raising is possible here: it adds protection, and the item is hidden from Personal search at once.',
-      'It is the user\'s decision on that one item, never a rule for its sender, chat or folder.',
-      'Making an item Personal, or putting it back to the judge\'s label, is done only by the user on the Olympus dashboard on their computer (Privacy): tell them so, and never retry another way.',
-      'Returns {ok: true, item, applies} or {ok: false, code, message}: tell the user the message in those words.',
-    ].join(' '),
+    description: AGENT_ITEM_PRIVACY_UNAVAILABLE,
     params: PRIVACY_ITEM_SET_PARAMS,
     mutating: true,
     nativeExposure: 'sourceIndexEnabledOnly',

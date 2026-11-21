@@ -442,11 +442,8 @@ describe('owner actions the background runs, forwarded from the front', () => {
       expect(await response!.json(), path).toEqual({ ran: kind });
     }
     expect(sent.map((command) => command.kind)).toEqual(['tier_override', 'storage_registry', 'capture', 'embed_chunks']);
-    // The one-item privacy change (dashboard and agent) is a tier write too; a CLI-shaped body does not make it a read.
-    for (const path of ['/dashboard/privacy/items/set', '/v1/privacy-item/raise']) {
-      const response = await routes(post(path, { args: ['explain', 'm7'] }));
-      expect(await response!.json(), path).toEqual({ ran: 'tier_override' });
-    }
+    const dashboardSet = await routes(post('/dashboard/privacy/items/set', { args: ['explain', 'm7'] }));
+    expect(await dashboardSet!.json()).toEqual({ ran: 'tier_override' });
     // Check the judge's correction and People's corrections write background-owned data too (#1224).
     for (const [path, kind] of [
       ['/dashboard/privacy/judge-check', 'tier_override'], ['/dashboard/people', 'people'],
@@ -458,6 +455,7 @@ describe('owner actions the background runs, forwarded from the front', () => {
     }
     expect(routes(post('/dashboard/privacy/items/find', {}))).toBeUndefined();
     expect(routes(post('/v1/privacy-item/find', {}))).toBeUndefined();
+    expect(routes(post('/v1/privacy-item/raise', {}))).toBeUndefined();
     // Not a forwarded route, or not a POST: the front's own handler serves it.
     expect(routes(new Request('http://127.0.0.1/v1/cli/tier'))).toBeUndefined();
     expect(routes(post('/dashboard/connect', {}))).toBeUndefined();
@@ -774,7 +772,7 @@ describe('a configured store whose ledger appears later is governed then', () =>
 describe('in-process callers go through the forwarding layer', () => {
   test('remote agents, the ChatGPT surface and the panel tools reach routes as the listener does', () => {
     const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
-    // No in-process caller is handed the bare worker: privacy_item_set over MCP would hit the front's write guard.
+    // No in-process caller is handed the bare worker.
     expect(server).not.toMatch(/workerFetch: worker\.fetch\b/);
     expect(server.match(/workerFetch: workerFetchInProcess,/g)?.length).toBe(3);
     expect(server).toMatch(/const frontWorkerFetch = frontRoutes[\s\S]{0,200}?\n  inProcessFetch = frontWorkerFetch;/);

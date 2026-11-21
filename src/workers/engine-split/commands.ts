@@ -65,7 +65,7 @@ export const ENGINE_FORWARDED_ROUTES = {
   // from the dashboard and from an agent (tier-owner-items.ts). Finding items stays a read.
   // Check the judge (judge-check.ts) records the owner's answer and, where it
   // differs, the same per-item override, so it runs with the ledgers (#1224).
-  tier_override: ['/v1/cli/tier', '/dashboard/privacy/items/set', '/v1/privacy-item/raise', '/dashboard/privacy/judge-check'],
+  tier_override: ['/v1/cli/tier', '/dashboard/privacy/items/set', '/dashboard/privacy/judge-check'],
   // People's corrections write the people index the background rebuilds (#1224).
   people: ['/dashboard/people'],
   // A sync asked for by path (an agent, the CLI) and X's content recovery run
@@ -172,7 +172,8 @@ export const ENGINE_FRONT_ONLY_ROUTES: Readonly<Record<string, string>> = {
   '/v1/archive-import/status': 'An agent\'s archive request (request files); archive_changed hands it to the background.',
   '/v1/archive-import/remove': 'An agent\'s archive request (request files); archive_changed hands it to the background.',
   '/v1/consult/ask': 'Asks an outside consultant; writes nothing the background owns.',
-  '/v1/privacy-item/find': 'Reads the tier ledgers read-only; raise is forwarded (tier_override).',
+  '/v1/privacy-item/find': 'Returns the fixed dashboard instruction.',
+  '/v1/privacy-item/raise': 'Returns the fixed dashboard instruction.',
   '/v1/source/answer': 'Answers from read-only stores.',
   '/v1/source/answer/received': 'An answer receipt, recorded where the front released it.',
   '/v1/source/answer/release': 'Checks a release ticket the front holds.',

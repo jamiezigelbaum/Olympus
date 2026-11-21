@@ -122,7 +122,7 @@ async function fixture(options: { namesOnly?: boolean; busyDuringRefresh?: boole
     }),
     editOtherRule: () => post('/dashboard/dispositions', { source: 'local.files', edits: [{ path: '/Other', state: 'exclude' }] }),
     excludeFolder: () => post('/dashboard/dispositions', { source: 'local.files', edits: [{ path: '/Files', state: 'metadata_only' }] }),
-    makePrivate: () => post('/v1/privacy-item/raise', { item_id: ownerTierItemId(item.identity) }),
+    makePrivate: () => postAsLocalOwner(worker, '/dashboard/privacy/items/set', { item_id: ownerTierItemId(item.identity), tier: 'private' }),
     disconnect: () => post('/dashboard/disconnect', { source_id: 'local.files', acknowledge: true }) };
 }
 
