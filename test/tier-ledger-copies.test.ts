@@ -10,8 +10,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { classifyItemTiers, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, contentDigestReason, hasContentJudgeVerdict, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
 import {
+  LEGACY_PERSONAL_BODY_PROGRESS_SQL,
   TierLedger,
   TierLedgerGenerationConflictError,
   TierLedgerRaiseAbandonRefusedError,
@@ -40,6 +41,71 @@ function whole(target: { corpusId: string; trustDomain: 'public_safe' | 'interna
 }
 
 describe('tier ledger copies (P1b)', () => {
+  test('earlier-build holds count once and a cached verdict counts only for the held body', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-legacy-hold-count-'));
+    const path = join(root, 'ledger.sqlite');
+    const store = new TierLedger({ dbPath: path });
+    const text = 'The orchard picnic starts at noon on Saturday.';
+    const digest = contentDigestReason(text);
+    const held = decision({ contentRead: true, contentPending: true, state: 'pending' });
+    const cached = (body: string) => classifyItemTiers({ signals: { title: 'Picnic notes' }, text: body, holdUntilJudged: true }, {
+      sniffer: { id: 'fixture', judge: () => ({ verdict: 'decided', tier: 'private', code: 'rule:duplicate_model:ordinary', origin: 'rule', rule: 'duplicate_model' }) },
+    });
+    const progress = () => {
+      const db = new Database(path, { readonly: true });
+      try { return db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get(); }
+      finally { db.close(); }
+    };
+    try {
+      expect(progress()).toEqual({ held: 0, judged: 0, waiting: 0 });
+      const placed = store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL)).record;
+      const moving = store.recordLegacyPersonalHold(ITEM, held, whole(SECURE, true), digest, { generation: placed.generation, override: undefined });
+      expect(moving).toMatchObject({ outcome: 'queued_move', raise: true });
+      store.recordLegacyPersonalHold(ITEM, held, whole(SECURE, true), digest, { generation: moving.record.generation, override: undefined });
+      expect(progress()).toEqual({ held: 1, judged: 0, waiting: 0 });
+      const queued = store.getCurrent(ITEM)!;
+      const expectedGeneration = queued.generation;
+      const destination = whole(SECURE, true).copies;
+      store.stageMove(ITEM, { expectedGeneration, target: { metadataTier: held.metadataTier, contentTier: held.contentTier }, destination, hideSource: true });
+      store.completeMove(ITEM, { expectedGeneration, destination, embedHold: true });
+
+      // Simulate a verdict settled directly by the classifier's cache, which
+      // does not run the asynchronous question callback.
+      store.recordRoutedPlacement(ITEM, cached('The picnic starts at noon on Sunday.'), whole(SECURE));
+      expect(progress()).toEqual({ held: 1, judged: 0, waiting: 0 });
+      const judged = cached(text);
+      expect(hasContentJudgeVerdict(judged.reasons, 'private', digest)).toBe(true);
+      store.recordRoutedPlacement(ITEM, judged, whole(SECURE));
+      store.recordRoutedPlacement(ITEM, judged, whole(SECURE));
+      expect(progress()).toEqual({ held: 1, judged: 1, waiting: 0 });
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('an earlier-build hold hides duplicate Personal text even when Private is the first copy', () => {
+    const store = ledger();
+    const secureFirst = { ...SECURE, corpusId: 'earlier.private' };
+    try {
+      const placed = store.recordRoutedPlacement(ITEM, decision(), {
+        copies: [...whole(secureFirst).copies, ...whole(INTERNAL).copies], embedHold: false,
+      }).record;
+      const copies = store.copies(ITEM);
+      expect(copies.map(copy => copy.corpusId)).toEqual([secureFirst.corpusId, INTERNAL.corpusId]);
+      expect(placementIsRaise(copies, whole(secureFirst).copies)).toBe(false);
+      const held = store.recordLegacyPersonalHold(ITEM, decision({ state: 'pending', contentPending: true }),
+        whole(secureFirst, true), contentDigestReason('weekly notes'), { generation: placed.generation, override: undefined });
+      expect(held).toMatchObject({ outcome: 'queued_move', raise: true });
+      expect(store.copies(ITEM)).toMatchObject([
+        { corpusId: secureFirst.corpusId, state: 'current' },
+        { corpusId: INTERNAL.corpusId, state: 'superseded', supersededByGeneration: held.record.generation + 1 },
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   test('over-private counts use moving targets, respect layers, and count each item once', () => {
     const store = ledger();
     try {

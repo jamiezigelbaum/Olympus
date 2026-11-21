@@ -109,7 +109,7 @@ test.each(['resume', 'remove', 'backoff_remove', 'backoff_removing', 'uploading'
       expect(reader.upload.cancel(uploadId)).toEqual({ cancelled: true });
       expect(existsSync(join(archiveStateSiblingPath(runtime.state.path, 'archive-staging'), uploadId))).toBe(false);
     }
-    if (action === 'remove' || action === 'backoff_remove') expect(reader.remove(id)).toEqual({ ok: true });
+    if (action === 'remove' || action === 'backoff_remove') expect(await reader.remove(id)).toEqual({ ok: true });
     const drain = async (finished: () => boolean) => {
       for (let pass = 0; pass < 20; pass++) {
         await clock.advance(60_000);

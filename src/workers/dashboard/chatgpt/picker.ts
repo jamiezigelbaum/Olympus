@@ -2078,6 +2078,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     add(footer, summary);
     add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders,
       p.whole && !p.wholeConfirmed ? wholeWord('needConfirm') : !anyChosen() && !p.edited ? Q.needChoice : ''));
+    add(footer, el('p', 'reason', 'Searches already started may still send evidence to their configured model and return an answer.'));
     return footer;
   }
 

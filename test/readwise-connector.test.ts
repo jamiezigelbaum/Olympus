@@ -80,6 +80,8 @@ describe('Readwise thin connector and canonical store', () => {
         text: 'Reader one private marker',
       },
     });
+    expect(connector.classificationSignals(items[0]!).labels).toEqual(['Garden plans', 'spring']);
+    expect(connector.classificationSignals(items[1]!).labels).toEqual(['orchard', 'Garden plans']);
     const highlight = items.find((item) => item.identity.providerItemId === 'highlight-7');
     expect(highlight).toMatchObject({
       identity: {
@@ -105,6 +107,23 @@ describe('Readwise thin connector and canonical store', () => {
       requests: 4,
       dailyRequestBudget: 10,
     });
+  });
+
+  test('a live highlight label read includes current book and highlight tags for the exact identity', async () => {
+    const connector = createReadwiseSourceConnector({
+      account: ACCOUNT, credentialBroker: readwiseBroker(),
+      requestBudget: new ReadwiseDailyRequestBudget({ dailyRequestBudget: 10 }),
+      fetch: async url => {
+        expect(new URL(url).searchParams.get('ids')).toBe('book-42');
+        return jsonResponse({ results: [{ user_book_id: 'book-42', book_tags: [{ name: 'Protected' }],
+          highlights: [{ id: 'highlight-7', tags: [{ name: 'Field' }] }] }] });
+      },
+    });
+    const id = { family: 'readwise' as const, provider: 'readwise', accountScope: ACCOUNT,
+      providerItemId: 'highlight-7', providerConversationId: 'document:book-42', localItemId: `${ACCOUNT}:highlight:highlight-7` };
+    expect(await connector.readCurrentLabels(id)).toEqual(['Protected', 'Field']);
+    expect(await connector.readCurrentLabels({ ...id, providerItemId: 'missing', localItemId: `${ACCOUNT}:highlight:missing` })).toBeUndefined();
+    expect(await connector.readCurrentLabels({ ...id, accountScope: 'other' })).toBeUndefined();
   });
 
   test('a bounded run never reports a truncated export page as done, and resumes inside it', async () => {
@@ -449,8 +468,10 @@ function paginatedReadwiseFetch(
         count: 2,
         nextPageCursor: 'reader-cursor-2',
         results: [
-          { id: 'reader-1', title: 'Reader one', summary: 'Reader one private marker' },
-          { id: 'reader-2', title: 'Reader two', summary: 'Reader two private marker' },
+          { id: 'reader-1', title: 'Reader one', summary: 'Reader one private marker',
+            tags: { 'garden-plans': { name: 'Garden plans', type: 'manual', created: 1760000000000 }, spring: {} } },
+          { id: 'reader-2', title: 'Reader two', summary: 'Reader two private marker',
+            tags: ['orchard', { name: 'Garden plans' }, 'orchard'] },
         ],
       });
     }

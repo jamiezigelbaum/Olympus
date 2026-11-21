@@ -120,6 +120,8 @@ function rewindToV14(dbPath: string): void {
     // close, so a snapshot can still hold the file for a moment.
     db.exec('PRAGMA busy_timeout = 10000');
     db.exec(`
+      DROP TRIGGER connector_store_invalidate_label_observation;
+      ALTER TABLE items DROP COLUMN classification_labels_json;
       DROP INDEX IF EXISTS idx_connector_store_items_parent;
       ALTER TABLE items DROP COLUMN parent_local_item_id;
       ALTER TABLE items DROP COLUMN deferred_locator;
@@ -180,7 +182,7 @@ describe('child items: the v15 migration changes nothing that exists', () => {
 
     const db = new Database(dbPath, { readonly: true });
     try {
-      expect(db.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get()).toEqual({ version: 17 });
+      expect(db.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get()).toEqual({ version: 18 });
       expect(db.query(`
         SELECT COUNT(*) AS rows,
           SUM(parent_local_item_id IS NULL) AS no_parent, SUM(deferred_locator IS NULL) AS no_locator,

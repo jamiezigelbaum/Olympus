@@ -24,6 +24,7 @@ import type { LocalConnectorStore } from '../connector-store/local-index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { AUTO_MOVE_WHY, automaticTierMoveOptions, automaticTierMovesAllowed, setEmbedsWithBuiltInOnly } from '../connector-store/tier-auto-move.ts';
 import { BUILT_IN_SNIFFER_LANE } from './built-in-sniffer.ts';
+import { LEGACY_PERSONAL_BODY_REASON } from './tier-classifier.ts';
 import type { InstalledTierClassification } from './installed-tier-classification.ts';
 import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions, type SnifferLaneKind } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
@@ -54,8 +55,11 @@ import {
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItemsOffThread } from '../connector-store/tier-names-only-settle.ts';
+import { recoverStoredLabelPage } from '../connector-store/tier-label-observations.ts';
+import { settleLegacyPersonalBodiesOffThread, settleRecordedPersonalBodiesOffThread } from '../connector-store/legacy-personal-bodies.ts';
 import { settlePersonalFirstItemsOffThread } from '../connector-store/tier-held-settle.ts';
-import { sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
+import { applicableProviderLabelRules, currentTierRulePolicy, mutableItemLabels, tierMoveRuleAuthorization, withCurrentMoveLabels, withTierRuleFence } from '../connector-store/tier-move-rule-policy.ts';
+import { ownerRuleSweepsComplete, sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverridesOffThread } from '../connector-store/tier-override-settle.ts';
 import { retireSecretRedactions, retrySecretSideStoreDebtsOffThread } from '../connector-store/secrets-disposition.ts';
 import { ledgerReadOffThread, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
@@ -67,10 +71,12 @@ import {
   TierLedgerRaiseAbandonRefusedError,
   TIER_LEDGER_UNREAD_RELABEL_DONE,
   RETIRED_EMBEDDING_CLEARANCE_REASON,
+  LEGACY_PERSONAL_BODY_PROGRESS_SQL,
   copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
   tierMovingDirectionClause,
+  type LegacyPersonalBodyProgress,
   type TierLedgerIdentity,
   type TierLedgerRecord,
 } from './tier-ledger.ts';
@@ -126,10 +132,8 @@ function unrefTimer(timer: unknown): void {
   (timer as { unref?: () => void } | undefined)?.unref?.();
 }
 
-export interface TierSnifferServiceOptions {
+interface TierSnifferServiceBaseOptions {
   installed: InstalledTierClassification;
-  lane: SnifferLane;
-  model: AnalystModel;
   stores: () => readonly TierSnifferServiceStore[];
   classificationLedgerPath: string;
   /** Test seam: ledger and queue rows at or below which the backlog is counted on every read. */
@@ -248,6 +252,7 @@ export interface TierSnifferServiceOptions {
    * every configured embedding is the built-in local model AND every store of
    * the item's set embeds with it (free, nothing leaves the Mac). Otherwise
    * the move stays queued for the owner-approved `olympus tier migrate` path.
+   * A legacy hold may still raise its text to Private without copying vectors.
    */
   autoMoves?: AutomaticTierMoveContext & {
     maxPerPass?: number;
@@ -271,6 +276,10 @@ export interface TierSnifferServiceOptions {
     staleAfterMs?: number;
   };
 }
+
+/** Without a judge, the service only settles and moves already decided legacy items. */
+export type TierSnifferServiceOptions = TierSnifferServiceBaseOptions
+  & ({ lane: SnifferLane; model: AnalystModel } | { lane?: never; model?: never });
 
 /** Each tick has at most two recovery phases; each yields after this much work. */
 export const MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
@@ -326,10 +335,19 @@ export interface TierAutoMoveReport {
   failedBy?: Record<string, number>;
 }
 
-type BacklogCounts = Pick<TierClassificationBacklog, 'checkingItems' | 'remainingQuestions' | 'pendingItems' | 'pendingWithoutQuestion' | 'oldestPendingAgeMs'>;
+type BacklogCounts = Pick<TierClassificationBacklog, 'checkingItems' | 'remainingQuestions' | 'pendingItems'
+  | 'pendingWithoutQuestion' | 'oldestPendingAgeMs' | 'legacyPersonalBodies'>;
 
 function emptyBacklogCounts(): BacklogCounts {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+}
+
+function addLegacyPersonalProgress(counts: BacklogCounts, progress: LegacyPersonalBodyProgress): void {
+  if (!progress.held && !progress.waiting) return;
+  const total = counts.legacyPersonalBodies ??= { held: 0, judged: 0 };
+  total.held += progress.held;
+  total.judged += progress.judged;
+  if (progress.waiting) total.waiting = (total.waiting ?? 0) + progress.waiting;
 }
 
 /**
@@ -347,7 +365,7 @@ const BACKLOG_REFRESH_MS = 60_000;
 const BACKLOG_SLICE_ROWS = 5_000;
 const STORED_WALK_BACKSTOP_MS = 60 * 60_000;
 
-type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'rejudge' | 'staleEmbedHolds';
+type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'labelObservations' | 'legacyRecordedDecisions' | 'legacyPersonalBodies' | 'rejudge' | 'staleEmbedHolds' | 'personalLowerings';
 type StoredWalkResult = 'no_work' | 'changed' | 'more_rows' | 'read_failed' | 'inputs_unavailable' | 'queue_full' | 'retired';
 interface StoredWalkStatus {
   lastRanAt: string;
@@ -359,6 +377,7 @@ interface StoredWalkState {
   status: StoredWalkStatus;
   active: boolean;
   clean?: { inputs: string; at: number } | undefined;
+  retiredInputs?: string | undefined;
   lap?: { inputs: string | undefined } | undefined;
   after?: TierLedgerIdentity | undefined;
 }
@@ -401,7 +420,7 @@ async function runStoredWalk(
     walk.status.lastResult = page.retired ? 'retired'
       : page.failed ? 'read_failed'
       : page.blocked ?? (page.changed ? 'changed' : page.complete === false ? 'more_rows' : inputs === undefined ? 'inputs_unavailable' : 'no_work');
-    if (page.retired) walk.status.reason = 'retired';
+    if (page.retired) { walk.status.reason = 'retired'; walk.retiredInputs = inputs; }
     else if (page.complete !== false && lap.inputs !== undefined) {
       walk.clean = { inputs: lap.inputs, at: clockMs() };
       walk.status.reason = 'idle_unchanged';
@@ -414,6 +433,33 @@ async function runStoredWalk(
   } finally {
     walk.active = false;
   }
+}
+
+export async function storedPersonalLoweringLap(
+  set: TieredStoreSet,
+  after: TierLedgerIdentity | undefined,
+  turn: () => Promise<void> | undefined,
+): Promise<StoredWalkPage> {
+  const retryPage = { complete: false, ...(after ? { next: after } : {}) };
+  if (!ownerRuleSweepsComplete(set)) return retryPage;
+  const page = await ledgerReadOffThread(set.ledger, set.ledger.storedPersonalLoweringSteps({
+    limit: DEFAULT_AUTO_MOVES_PER_PASS, ...(after ? { after } : {}),
+  }), { lane: 'background' });
+  let changed = false;
+  for (const record of page.records) {
+    await turn();
+    // A rule may have changed or a provider may have reopened a sweep while we yielded.
+    let rulesReady = true;
+    const queued = await withCurrentMoveLabels(set, recordIdentity(record), undefined, () => withTierRuleFence(set, () => set.ledger.queueStoredPersonalLowering(recordIdentity(record), (decision, current, copies) => {
+      rulesReady = ownerRuleSweepsComplete(set);
+      if (!rulesReady) return undefined;
+      const plan = set.placementFor(decision);
+      return tierMoveRuleAuthorization(set, current, decision, copies, plan.copies) !== undefined ? plan : undefined;
+    })));
+    if (!rulesReady) return { ...retryPage, changed };
+    if (queued) changed = true;
+  }
+  return { changed, complete: !page.resumeAfter, ...(page.resumeAfter ? { next: page.resumeAfter } : {}) };
 }
 
 async function staleEmbedHoldLap(ledger: TierLedger, turn: () => Promise<void> | undefined, log?: (line: string) => void): Promise<StoredWalkPage> {
@@ -437,6 +483,7 @@ export async function runUnattendedStaleEmbedHoldWalk(ledger: TierLedger, log: (
 export interface TierClassificationBacklog {
   /** Background walks, by ledger. No stored item content or filesystem paths. */
   storedWalks?: Array<{ ledger: string; walkers: Partial<Record<StoredWalker | 'lowerContentRepair', StoredWalkStatus>> }>;
+  labelsUnavailable?: number;
   /** Union of pending ledger items and items with open questions, including re-judges. */
   checkingItems: number;
   /** Questions still to ask (an item can have a names and an excerpt question). */
@@ -469,6 +516,8 @@ export interface TierClassificationBacklog {
    * Reasons are fixed words (tier-move.ts `TierMoveRefusal`), never item data.
    */
   movesRefused?: { items: number; attempts: number; byReason: Record<string, number> };
+  /** Cumulative earlier-build Personal text holds and their completed body verdicts. */
+  legacyPersonalBodies?: LegacyPersonalBodyProgress;
   /**
    * Sources whose privacy records could not be read: their items are held,
    * are not in the counts above, and wait until they can be read. Content-free.
@@ -548,6 +597,7 @@ function emptyThroughput(): TierSnifferThroughput {
 
 export type TierSnifferTick =
   | { state: 'skipped_running' }
+  | { state: 'settling_recorded'; more: boolean }
   | { state: 'awaiting_owner_approval'; lane: SnifferLaneKind; profileId: string; modelId: string; promptVersion: string }
   | { state: 'model_unavailable'; modelId: string }
   | { state: 'ran'; report: SnifferPassReport; rejudged?: TierRejudgeReport; autoMoves?: TierAutoMoveReport }
@@ -569,7 +619,7 @@ export class TierSnifferService {
   private lastCycle: TierSnifferThroughput | undefined;
   private readonly cycleTotals = emptyThroughput();
   private readonly moveAbort = new AbortController();
-  private moving: Promise<TierAutoMoveReport> | undefined;
+  private moving: Promise<TierAutoMoveReport | undefined> | undefined;
   private readonly moveLedgerOffsets = { raise: 0, lower: 0 };
   private movingDirection: 'raise' | 'lower' | undefined;
   private lowerMovePreempted = false;
@@ -623,7 +673,7 @@ export class TierSnifferService {
   private readonly ledgers = new Map<string, TierLedger>();
   /** The id each bound set ledger must have, by the path it was found at: a file there with another id is not read. */
   private readonly boundLedgerIds = new Map<string, string>();
-  private readonly storedWalks = new Map<string, { set: TieredStoreSet; walks: Map<StoredWalker, StoredWalkState> }>();
+  private readonly storedWalks = new Map<string, { set: TieredStoreSet; walks: Map<StoredWalker, StoredWalkState>; labelsUnavailable?: number }>();
   private readonly mediaJudgmentCursors = new WeakMap<TieredStoreSet, Map<LocalConnectorStore, string | null>>();
   /** Skip-only diagnostics sample a scanned window at most once per minute. */
   private lastBuiltinPromptSkipLogMs = -Infinity;
@@ -637,8 +687,9 @@ export class TierSnifferService {
       ...(options.now ? { now: options.now } : {}),
       ...(options.budgetStatePath ? { statePath: options.budgetStatePath } : {}),
     });
+    const { lane, model } = options;
+    if (!lane) return;
     options.installed.setReleaseWindowResolver(async (ledgerPath, request, signal, expected) => {
-      const lane = options.lane;
       if (this.stopped || signal.aborted || options.modelAvailable?.() === false || options.breakerOpen?.()
         || lane.rejudgeReady === false) return { verdict: 'undecided' };
       const ownerContext = options.ownerContext?.();
@@ -649,7 +700,7 @@ export class TierSnifferService {
       const builtInDefault = options.autoApproveBuiltIn === true && isBuiltInLane(lane);
       if (!isClassifierApproved(ledger.entries, key, { builtInDefault })) return { verdict: 'undecided' };
       return resolveReleaseWindow({
-        store: options.installed.snifferStoreForLedger(ledgerPath), lane, model: options.model,
+        store: options.installed.snifferStoreForLedger(ledgerPath), lane, model,
         request, promptVersion: versions.cache, ...(ownerContext ? { ownerContext } : {}), signal, budget: this.budget,
       });
     });
@@ -828,7 +879,9 @@ export class TierSnifferService {
   private backlogFrom(counts: BacklogCounts): Omit<TierClassificationBacklog, 'lowerMovesQueued'> {
     const { checkingItems, remainingQuestions, pendingWithoutQuestion, oldestPendingAgeMs } = counts;
     const now = this.clockMs();
-    const storedWalks = [...this.storedWalks.values()].map(({ set, walks }) => {
+    let labelsUnavailable = 0;
+    const storedWalks = [...this.storedWalks.values()].map(({ set, walks, labelsUnavailable: gaps }) => {
+      labelsUnavailable += gaps ?? 0;
       const repair = set.lowerContentRepairHealth();
       const walkers = Object.fromEntries([...walks].map(([name, walk]) => [name, {
         ...walk.status,
@@ -838,6 +891,7 @@ export class TierSnifferService {
     });
     return {
       ...counts,
+      ...(labelsUnavailable ? { labelsUnavailable } : {}),
       ...(storedWalks.length ? { storedWalks } : {}),
       summary: checkingItems === 0
         ? (this.unreadable.size > 0 ? `No items counted as waiting.${this.unreadableNote()}` : 'No items waiting for classification.')
@@ -952,21 +1006,22 @@ export class TierSnifferService {
 
   /** Index-only counts for the first read of a large backlog, before its first full count lands. */
   private roughBacklog(): BacklogCounts {
-    let pendingItems = 0;
-    let remainingQuestions = 0;
+    const counts = emptyBacklogCounts();
     for (const ledgerPath of this.ledgerPaths()) {
       const opened = this.openBacklogLedger(ledgerPath);
       if (!opened) continue;
       try {
-        pendingItems += (opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get() as { n: number }).n;
-        if (opened.hasQueue) remainingQuestions += (opened.db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+        counts.pendingItems += (opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get() as { n: number }).n;
+        if (opened.hasQueue) counts.remainingQuestions += (opened.db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get() as LegacyPersonalBodyProgress);
         this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
         this.noteUnreadable(ledgerPath, 'its privacy ledger');
       } finally { opened.db.close(); }
     }
-    return { checkingItems: Math.max(pendingItems, remainingQuestions ? 1 : 0), remainingQuestions, pendingItems, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+    counts.checkingItems = Math.max(counts.pendingItems, counts.remainingQuestions ? 1 : 0);
+    return counts;
   }
 
   private countBacklogNow(): BacklogCounts {
@@ -977,6 +1032,7 @@ export class TierSnifferService {
       try {
         this.addPendingSlice(counts, opened, undefined);
         if (opened.hasQueue) this.addQuestionSlice(counts, opened.db, undefined);
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get() as LegacyPersonalBodyProgress);
         this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
@@ -997,7 +1053,8 @@ export class TierSnifferService {
       const queue = tierSnifferPathForLedger(path);
       return { path, expectedId: this.boundLedgerIds.get(path) ?? null, queue: existsSync(queue) ? queue : null };
     });
-    const sql = { pendingQueued: pendingCountSql(true), pendingAlone: pendingCountSql(false), questions: questionCountSql() };
+    const sql = { pendingQueued: pendingCountSql(true), pendingAlone: pendingCountSql(false),
+      questions: questionCountSql(), legacyPersonalBodies: LEGACY_PERSONAL_BODY_PROGRESS_SQL };
     const results = await runBacklogCountWorker({ ledgers, sql });
     if (!results || this.stopped) return undefined;
     const counts = emptyBacklogCounts();
@@ -1012,6 +1069,7 @@ export class TierSnifferService {
       counts.pendingWithoutQuestion += result.missing ?? 0;
       counts.checkingItems += result.n + (result.other ?? 0);
       counts.remainingQuestions += result.questions;
+      addLegacyPersonalProgress(counts, result.legacyPersonalBodies);
       if (result.oldest) counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(result.oldest));
     }
     for (const path of read) this.noteReadable(path);
@@ -1055,6 +1113,7 @@ export class TierSnifferService {
             if (this.stopped) return undefined;
           }
         }
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get() as LegacyPersonalBodyProgress);
         this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
@@ -1119,8 +1178,8 @@ export class TierSnifferService {
 
   status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting; throughput?: { last: TierSnifferThroughput; total: TierSnifferThroughput } } {
     return {
-      lane: this.options.lane.kind,
-      modelId: this.options.lane.modelId,
+      lane: this.options.lane?.kind ?? 'off',
+      modelId: this.options.lane?.modelId ?? '',
       callsToday: this.budget.usedToday(),
       ...(this.lastTick ? { lastTick: this.lastTick } : {}),
       ...(this.waiting ? { waiting: { ...this.waiting } } : {}),
@@ -1206,7 +1265,7 @@ export class TierSnifferService {
       tickReturnedAt = this.monotonicNow();
       // The judge's deadline and tick timing have ended. Lowerings get their
       // own bounded slice before another pass starts, never its call budget.
-      const lowerMoves = await this.drainMoves('lower');
+      const lowerMoves = this.options.lane ? await this.drainMoves('lower') : undefined;
       if (tick.state === 'ran' && lowerMoves) {
         tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
       }
@@ -1249,7 +1308,7 @@ export class TierSnifferService {
       this.notAnsweringUntilMs = this.clockMs()
         + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
     }
-    if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
+    if (this.options.lane && this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
       if (backlog.checkingItems > 0) this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs} at=${new Date(this.clockMs()).toISOString()}.`);
@@ -1257,6 +1316,7 @@ export class TierSnifferService {
     // Going easy: the pass made its one call; the next scheduled one waits.
     if (tick.state === 'ran' && tick.report.calls > 0 && this.trickle()) this.pacedUntilMs = this.clockMs() + (this.options.pacing?.trickleGapMs ?? 0);
     if (this.stopped) this.closeLedgers();
+    else if (this.timer && tick.state === 'settling_recorded' && tick.more && !this.yieldNow()) this.wake();
     else if (this.timer && tick.state === 'ran' && !this.yieldNow()
       && tick.report.stoppedBy !== 'daily_budget' && tick.report.stoppedBy !== 'transport_failures' && tick.report.stoppedBy !== 'cloud_stopped'
       && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls
@@ -1276,7 +1336,7 @@ export class TierSnifferService {
 
   /** Local work goes easy while the owner uses this computer (#922); never for a cloud or remote judge. */
   private trickle(): boolean {
-    if (!this.options.pacing || !isBuiltInLane(this.options.lane)) return false;
+    if (!this.options.pacing || !this.options.lane || !isBuiltInLane(this.options.lane)) return false;
     try {
       return this.options.pacing.trickle();
     } catch {
@@ -1470,6 +1530,11 @@ export class TierSnifferService {
           paths.add(bound);
           if (binding?.ledgerId) this.boundLedgerIds.set(bound, binding.ledgerId);
         }
+        // A set can own a pre-routing store before its first durable copy binding.
+        if (!binding) {
+          const path = store.tierLedgerPathInUse?.();
+          if (path && path !== ':memory:' && tierSetForLedger(path) && existsSync(path)) paths.add(path);
+        }
         this.noteReadable(store.dbPath);
       } catch {
         // Fails closed elsewhere; the sniffer skips it, and says so.
@@ -1636,7 +1701,24 @@ export class TierSnifferService {
   }
 
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
-    const { lane } = this.options;
+    const { lane, model } = this.options;
+    if (!lane) {
+      const recorded = await this.settleRecordedDecisions();
+      await this.drainMoves();
+      // Without a judge this is a one-time boot job. Stop its timer after
+      // every indexed page and every previously queued receipt move has landed.
+      if (!recorded) {
+        let pendingMove = false;
+        for (const path of this.ledgerPaths()) {
+          const set = tierSetForLedger(path);
+          if (set && (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({
+            limit: 1, direction: 'raise', recordedOnly: true,
+          }), { lane: 'background' })).length) { pendingMove = true; break; }
+        }
+        if (!pendingMove) this.stop();
+      }
+      return { state: 'settling_recorded', more: recorded === 'more' };
+    }
     // Wall time of each step around the pass, for its log line: on Sparta
     // (2026-11-06) 30 s passes came 32-134 s apart, and nothing said where
     // the rest of the time went.
@@ -1655,11 +1737,17 @@ export class TierSnifferService {
     };
     // Owner rules that raise, and names-only folders, apply to stored items
     // whatever the model's state: no model is asked.
+    await this.applyOwnerOverrides();
+    const recorded = await this.settleRecordedDecisions();
+    if (recorded) {
+      await this.drainMoves();
+      return { state: 'settling_recorded', more: recorded === 'more' };
+    }
     await this.settleStoredItems();
     phase('settle');
     const targets = this.snifferTargets();
     phase('targets');
-    await this.recoverMissingQuestions(signal);
+    await this.recoverMissingQuestions(signal, lane);
     phase('recover');
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       // Nothing is asked and nothing is counted: flagged items wait, pending
@@ -1717,12 +1805,12 @@ export class TierSnifferService {
       return { state: 'awaiting_owner_approval', lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
     }
     phase('approval');
-    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
+    const preparationStopped = await prepareSnifferModel({ model, signal, shouldYield: () => this.yieldNow() });
     phase('prepare');
     // Items decided under another classifier, owner words or judge model are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
-    if (!preparationStopped) await this.recoverMissingQuestions(signal, true);
+    if (!preparationStopped) await this.recoverMissingQuestions(signal, lane, true);
     phase('recover');
     const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge(snifferId(lane, versions.cache));
     phase('rejudge');
@@ -1733,7 +1821,7 @@ export class TierSnifferService {
     const report = await runSnifferPass({
       targets,
       lane,
-      model: this.options.model,
+      model,
       promptVersion: versions.cache,
       ...(ownerContext ? { ownerContext } : {}),
       budget: this.budget,
@@ -1781,7 +1869,7 @@ export class TierSnifferService {
    * an unread item with no possible excerpt, or an orphaned ledger row.
    * Reconcile a bounded, durable page before model availability/approval.
    */
-  private async recoverMissingQuestions(signal: AbortSignal, allowReask = false): Promise<void> {
+  private async recoverMissingQuestions(signal: AbortSignal, lane: SnifferLane, allowReask = false): Promise<void> {
     // Cooperative bound: one row (including its synchronous store reads) may
     // finish after the deadline. Two phases cost at most two such overruns.
     const deadline = this.monotonicNow() + MISSING_QUESTION_RECOVERY_PHASE_MS;
@@ -1860,9 +1948,10 @@ export class TierSnifferService {
             // body and configured classifier can reconstruct the question.
             const classification = set?.classification();
             const retiredClearance = row.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
+            const legacyHold = row.contentPending && row.reasons.includes(LEGACY_PERSONAL_BODY_REASON);
             if (set && row.contentRead && row.contentPending && !row.metadataPending
               && (row.contentTier === 'private' || row.contentTier === 'public'
-                || (retiredClearance && row.contentTier === 'secure'))
+                || ((retiredClearance || legacyHold) && row.contentTier === 'secure'))
               && classification?.sniffer && !classification.unavailableReason) {
               // Cached verdicts and reconstructed questions use the approved
               // pass; only conservative Private settlement precedes approval.
@@ -1873,13 +1962,13 @@ export class TierSnifferService {
               if (ledger.getCurrent(identity)?.state !== 'pending'
                 || queue.questionFor(identity, 'metadata') || queue.questionFor(identity, 'content')) continue;
             }
-            // Retired clearances must keep their tier until a judge answers.
-            // A missing question/material waits for reconstruction or the next sync.
-            if (retiredClearance) continue;
+            // Previously cleared or newly held legacy bodies wait for the
+            // judge. If names are also missing, recover just that pass.
+            if (retiredClearance || (legacyHold && !missingMetadata)) continue;
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
-              missingMetadata, missingContent: missingContent && !waitingForText,
-              snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
+              missingMetadata, missingContent: missingContent && !waitingForText && !legacyHold,
+              snifferId: snifferId(lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, 'metadata'))
                 && (!missingContent || !queue.questionFor(identity, 'content')),
               ...(planner ? { placementFor: planner } : {}),
@@ -1939,8 +2028,9 @@ export class TierSnifferService {
       if (budget === 0) return false;
       try {
         const set = tierSetForLedger(path);
-        if (!set || !setEmbedsWithBuiltInOnly(set)) continue;
-        for (const record of set.ledger.listMoving({ limit: budget, direction: 'raise' }).filter(isAutoMoveCandidate)) {
+        if (!set) continue;
+        const builtInOnly = this.options.autoMoves!.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly(set);
+        for (const record of set.ledger.listMoving({ limit: budget, direction: 'raise', legacyHoldsOnly: !builtInOnly }).filter(isAutoMoveCandidate)) {
           budget--;
           if (!this.moveFailures.has(`${path}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`)) return true;
         }
@@ -1952,7 +2042,7 @@ export class TierSnifferService {
 
   private async drainMoves(direction: 'raise' | 'lower' = 'raise'): Promise<TierAutoMoveReport | undefined> {
     try {
-      if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly()) return undefined;
+      if (!this.options.autoMoves || this.stopped || (direction === 'lower' && !this.options.autoMoves.localEmbeddingsOnly())) return undefined;
       if (this.moving && this.movingDirection !== direction) {
         if (direction === 'raise') {
           // The idle timer also asks for raises. Only real queued raises may
@@ -2025,7 +2115,7 @@ export class TierSnifferService {
     name: StoredWalker,
     inputs: string | undefined,
     readPage: (after: TierLedgerIdentity | undefined) => Promise<StoredWalkPage>,
-  ): Promise<void> {
+  ): Promise<StoredWalkStatus> {
     const path = set.ledger.dbPath;
     let entry = this.storedWalks.get(path);
     if (entry?.set !== set) {
@@ -2033,19 +2123,40 @@ export class TierSnifferService {
       this.storedWalks.set(path, entry);
     }
     let walk = entry.walks.get(name);
-    if (!walk) {
+    if (!walk || (name === 'labelObservations' && walk.status.reason === 'retired' && walk.retiredInputs !== inputs)) {
       walk = newStoredWalk(this.clockMs());
       entry.walks.set(name, walk);
     }
     await runStoredWalk(walk, inputs, readPage, () => this.clockMs());
+    return walk.status;
+  }
+
+  // The start wake and each continuation process at most one recorded page per
+  // set. Model pacing starts after this pass, and the engine never awaits it at boot.
+  private async settleRecordedDecisions(): Promise<'more' | 'retry' | undefined> {
+    let pending: 'more' | 'retry' | undefined;
+    const paths = new Set(this.ledgerPaths());
+    for (const path of this.storedWalks.keys()) if (!paths.has(path)) this.storedWalks.delete(path);
+    for (const path of paths) {
+      const set = tierSetForLedger(path);
+      if (!set) continue;
+      const status = await this.runStoredWalker(set, 'legacyRecordedDecisions', undefined, async () => {
+        const page = await settleRecordedPersonalBodiesOffThread({
+          set, queue: this.options.installed.snifferStoreForLedger(path),
+          movesAvailable: () => !!this.options.autoMoves?.localEmbeddingsOnly() && (this.options.autoMoves.maxPerPass ?? 25) > 0,
+          turn: () => { this.progress(); return this.ingestionTurn(); },
+        });
+        return { complete: page.retired, retired: page.retired, changed: page.settled + page.secrets + page.held > 0, failed: page.failed > 0 };
+      });
+      if (status.lastResult === 'read_failed') pending ??= 'retry';
+      else if (status.reason !== 'retired') pending = 'more';
+    }
+    return pending;
   }
 
   /** Settles stored items even while model availability or approval is pending. */
   private async settleStoredItems(): Promise<void> {
-    await this.applyOwnerOverrides();
-    const paths = new Set(this.ledgerPaths());
-    for (const path of this.storedWalks.keys()) if (!paths.has(path)) this.storedWalks.delete(path);
-    for (const ledgerPath of paths) {
+    for (const ledgerPath of this.ledgerPaths()) {
       await this.ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
@@ -2103,6 +2214,23 @@ export class TierSnifferService {
           this.options.log?.(`Olympus tier hold: ${held.settled} item(s) recorded before every open question held text are held now (${held.movesQueued} move(s) to Private queued).`);
         }
         return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
+      });
+      await this.runStoredWalker(set, 'labelObservations', JSON.stringify(set.openStores().map(store => store.corpusId)), () =>
+        recoverStoredLabelPage(set, this.options.installed.snifferStoreForLedger(ledgerPath), turn));
+      this.storedWalks.get(ledgerPath)!.labelsUnavailable = set.ledger.unavailableLabelCount();
+      const movesAvailable = () => !!this.options.autoMoves?.localEmbeddingsOnly() && (this.options.autoMoves.maxPerPass ?? 25) > 0;
+      await this.runStoredWalker(set, 'legacyPersonalBodies', movesAvailable() ? undefined : this.storedWalkInputs(set, true), async () => {
+        const page = await settleLegacyPersonalBodiesOffThread({
+          set, queue: this.options.installed.snifferStoreForLedger(ledgerPath), turn,
+          movesAvailable,
+        });
+        if (page.held > 0) this.options.log?.(`Olympus tier hold: ${page.held} item(s) from earlier builds held for judgment, moves to Private queued.`);
+        return { retired: page.retired, complete: page.retired || page.waitingForMoves, changed: page.held + page.secrets > 0, failed: page.failed > 0 };
+      });
+      await this.runStoredWalker(set, 'personalLowerings', this.storedWalkInputs(set, true), async after => {
+        const page = await storedPersonalLoweringLap(set, after, turn);
+        if (page.changed) this.forgetLowerMoves();
+        return page;
       });
       await this.runStoredWalker(set, 'staleEmbedHolds', this.storedWalkInputs(set, true),
         () => staleEmbedHoldLap(set.ledger, turn, this.options.log));
@@ -2194,7 +2322,8 @@ export class TierSnifferService {
     signal: AbortSignal,
     direction: 'raise' | 'lower',
     changedPaths: Set<string>,
-  ): Promise<TierAutoMoveReport> {
+  ): Promise<TierAutoMoveReport | undefined> {
+    const recoveryOnly = !options.localEmbeddingsOnly();
     const timings = emptyTierMoveTimings();
     const started = this.monotonicNow();
     const paths = this.ledgerPaths();
@@ -2215,7 +2344,7 @@ export class TierSnifferService {
     const requestedMs = options.lowerSliceMs ?? adaptiveMs;
     const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
     const deadline = started + sliceMs;
-    const shouldStop = () => signal.aborted || (direction === 'lower'
+    const shouldStop = () => signal.aborted || (!recoveryOnly && !options.localEmbeddingsOnly()) || (direction === 'lower'
       && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow()));
     const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0, timings };
     const embeddingCorpora = new Set<string>();
@@ -2233,10 +2362,15 @@ export class TierSnifferService {
       // queued for the next pass.
       if (set.openStores().some(store => store.reclaiming)) continue;
       // Found on the ledger's read worker; each move re-checks its generation as it lands.
-      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction })))
-        .filter(isAutoMoveCandidate);
+      const builtInOnly = !recoveryOnly && setEmbedsWithBuiltInOnly(set);
+      const legacyHoldsOnly = direction === 'raise' && !builtInOnly;
+      const queued = (await ledgerReadOffThread(set.ledger,
+        set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly, recordedOnly: !this.options.lane }))).filter(isAutoMoveCandidate);
       if (set.openStores().some(store => store.reclaiming)) continue;
-      if (!setEmbedsWithBuiltInOnly(set)) { report.notEligible += queued.length; continue; }
+      if (!builtInOnly && direction === 'lower') { report.notEligible += queued.length; continue; }
+      // A stopped installation may have hidden the source of an authorized raise
+      // before the mover copied it. Finish only that transfer, without embedding.
+      if (recoveryOnly && (!queued.length || set.foreignBoundLeg())) continue;
       // Reorder retries within a bounded page while their generation is queued.
       const deferRetry = (identity: TierLedgerIdentity, generation: number) => {
         try {
@@ -2267,7 +2401,7 @@ export class TierSnifferService {
           this.moveRefusalAttempts += 1;
           this.movesRefusedNow.set(refusedKey, why);
         } else this.movesRefusedNow.delete(refusedKey);
-        if (error instanceof TierMoveContentChangedError) {
+        if (error instanceof TierMoveContentChangedError && this.options.lane) {
           // A stale lowering was refused before import and taken out of
           // moving. Re-read the actual stored body, even when this model
           // already judged the discarded edit. Its old verdict cannot
@@ -2300,27 +2434,39 @@ export class TierSnifferService {
         changedPaths.add(ledgerPath);
         report.moved++;
         for (const destination of result.destinations) {
-          if (destination.chunksToEmbed > 0) embeddingCorpora.add(destination.corpusId);
+          if (!recoveryOnly && destination.chunksToEmbed > 0) embeddingCorpora.add(destination.corpusId);
         }
         const key = `${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`;
         this.moveFailures.delete(key);
         this.movesRefusedNow.delete(`${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}`);
       };
+      // A live label read happens outside the batch's synchronous write transactions.
+      const liveProviders = new Set(queued.map(record => record.provider).filter(provider => mutableItemLabels(set, provider)));
+      if (liveProviders.size) {
+        const rules = withTierRuleFence(set, () => currentTierRulePolicy(set)).rules;
+        for (const provider of liveProviders) if (!applicableProviderLabelRules(rules, provider).length) liveProviders.delete(provider);
+      }
       const batchSize = Math.max(1, Math.min(100, options.lowerBatchSize ?? 25));
       for (let offset = 0; offset < queued.length && budget > 0 && !shouldStop();) {
         const pending: Array<{ record: TierLedgerRecord; move: TierMoveOptions }> = [];
         const batchDeadline = Math.min(deadline, this.monotonicNow() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
         for (let n = 0; n < (direction === 'raise' ? 1 : batchSize) && offset < queued.length && !shouldStop(); n++) {
+          const next = queued[offset]!;
+          if (pending.length && liveProviders.has(next.provider)) break;
           const record = queued[offset++]!;
           budget--;
           const identity = recordIdentity(record);
           pending.push({ record, move: {
             set, identity,
             target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
-            ...automaticTierMoveOptions(set, options), timings, expectedGeneration: record.generation,
+            ...(builtInOnly ? automaticTierMoveOptions(set, options) : {
+              embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: 'system-automatic',
+                why: 'Moved held text to Private without copying historical vectors.' },
+            }), timings, expectedGeneration: record.generation,
           } });
+          if (liveProviders.has(record.provider)) break;
         }
-        if (direction === 'raise') {
+        if (direction === 'raise' || (pending[0] && liveProviders.has(pending[0].record.provider))) {
           for (const { record, move } of pending) {
             try { succeeded(record, await moveTieredItem(move)); }
             catch (error) { failure(record, error); }
@@ -2368,7 +2514,7 @@ export class TierSnifferService {
         + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(' ') + '.',
       );
     }
-    return report;
+    return recoveryOnly && !didWork ? undefined : report;
   }
 
   /**
@@ -2569,7 +2715,8 @@ self.onmessage = ({ data }) => {
       if (ledger.queue) db.query('ATTACH DATABASE ? AS queue').run(ledger.queue);
       const pending = db.query(ledger.queue ? data.sql.pendingQueued : data.sql.pendingAlone).get();
       const questions = ledger.queue ? db.query(data.sql.questions).get() : { n: 0, other: 0 };
-      out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other });
+      const legacyPersonalBodies = db.query(data.sql.legacyPersonalBodies).get();
+      out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other, legacyPersonalBodies });
     } catch {
       out.push({ unreadable: ledger.path });
     } finally { try { db?.close(); } catch {} }
@@ -2579,7 +2726,10 @@ self.onmessage = ({ data }) => {
 
 const BACKLOG_COUNT_WORKER_TIMEOUT_MS = 10 * 60_000;
 
-type BacklogWorkerResult = { n: number; missing: number | null; oldest: string | null; questions: number; other: number | null }
+type BacklogWorkerResult = {
+  n: number; missing: number | null; oldest: string | null; questions: number; other: number | null;
+  legacyPersonalBodies: LegacyPersonalBodyProgress;
+}
   | { unreadable: string; mismatch?: boolean };
 
 function runBacklogCountWorker(message: unknown): Promise<BacklogWorkerResult[] | undefined> {

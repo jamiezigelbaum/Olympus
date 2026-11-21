@@ -59,6 +59,7 @@ export interface EngineItemIdentity {
  * answers with the response. Each kind names the routes it may carry.
  */
 export const ENGINE_FORWARDED_ROUTES = {
+  archive_remove: ['/dashboard/archive-import/remove'],
   delete_source_data: ['/dashboard/delete-source-data', '/v1/cli/data-delete'],
   // Every per-item override: the CLI's tier set, and the one-item privacy change
   // from the dashboard and from an agent (tier-owner-items.ts). Finding items stays a read.
@@ -149,7 +150,6 @@ export const ENGINE_FRONT_ONLY_ROUTES: Readonly<Record<string, string>> = {
   '/dashboard/archive-import/upload-cancel': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
   '/dashboard/archive-import/approve': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
   '/dashboard/archive-import/decline': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
-  '/dashboard/archive-import/remove': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
   '/dashboard/archive-import/stop': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
   '/dashboard/privacy/items/find': 'Reads the tier ledgers read-only.',
   '/dashboard/privacy/items/status': 'Reads the front’s receipt and the background’s command outcome relayed to it.',
@@ -210,6 +210,7 @@ export const ENGINE_DASHBOARD_SAMPLES_MAX = 500;
 export type EngineCommand =
   /** frontPid (models only): the background restarts once that front has ended, so its answer gets through. */
   | { kind: 'reload'; target: EngineReloadKind; corpora?: string[]; frontPid?: number }
+  | { kind: 'revoke_reads'; source: string; reason: import('../file-extraction/on-demand-read.ts').SourceReadRevocation }
   | { kind: 'archive_changed' }
   /** Install or re-arm the built-in private model: only the background installs it (a wake). */
   | { kind: 'model_prepare' }
@@ -417,6 +418,7 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
       }
       return { id, command: { kind, samples: samples as Record<string, unknown>[] } };
     }
+    case 'archive_remove':
     case 'delete_source_data':
     case 'tier_override':
     case 'storage_registry':
@@ -433,6 +435,13 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
       const frontPid = command!.frontPid;
       if (frontPid !== undefined && (kind !== 'delete_source_data' || !Number.isSafeInteger(frontPid) || (frontPid as number) <= 0)) fail('frontPid is a process id, carried by a delete.');
       return { id, command: { kind, request: forwardedRequest(kind, command!.request), ...(frontPid !== undefined ? { frontPid: frontPid as number } : {}) } };
+    }
+    case 'revoke_reads': {
+      const { source, reason } = command!;
+      if (typeof source === 'string' && SOURCE.test(source) && (reason === 'disconnect' || reason === 'scope' || reason === 'exclusions')) {
+        return { id, command: { kind, source, reason } };
+      }
+      throw new EngineCommandError(400, 'revoke_reads needs a source and a revocation reason.');
     }
     case 'sync_now':
     case 'start_approved': {

@@ -51,6 +51,7 @@ import type {
   OlympusSourceScopeSelection,
 } from '../control-ui-contract.ts';
 import {
+  createSourceExclusionMatcher,
   defaultSourceIngestionExclusionsPath,
   parseSourceIngestionExclusions,
   SOURCE_INGESTION_EXCLUSIONS_PATH_ENV,
@@ -257,6 +258,7 @@ export interface SourceIngestionExclusionsFile {
   present: boolean;
   document: SourceIngestionExclusions;
   rawRulesById: Map<string, unknown>;
+  pendingReads?: { previous: SourceIngestionExclusions; finish(): void };
 }
 
 export function resolveSourceIngestionExclusionsPath(
@@ -297,7 +299,15 @@ export function readSourceIngestionExclusionsFile(path: string): SourceIngestion
       if (typeof id === 'string' && id.trim()) rawRulesById.set(id.trim(), entry);
     }
   }
-  return { path, present: true, document, rawRulesById };
+  const record = raw as Record<string, unknown>;
+  if (record.previous_read_rules === undefined) return { path, present: true, document, rawRulesById };
+  const previous = parseSourceIngestionExclusions(record.previous_read_rules, path);
+  const finish = () => {
+    if (readFileSync(path, 'utf8') !== text) throw new OperationError('config_error', 'The disposition rules changed during reconciliation.');
+    delete record.previous_read_rules;
+    writePrivateFileAtomicSync(path, `${JSON.stringify(record, null, 2)}\n`);
+  };
+  return { path, present: true, document, rawRulesById, pendingReads: { previous, finish } };
 }
 
 /**
@@ -311,6 +321,7 @@ export function serializeSourceIngestionExclusions(
   document: SourceIngestionExclusions,
   rawRulesById: ReadonlyMap<string, unknown> = new Map(),
   preserveIds: ReadonlySet<string> = new Set(rawRulesById.keys()),
+  previousReadRules?: SourceIngestionExclusions,
 ): string {
   const rules = document.rules.map((rule) => {
     const raw = preserveIds.has(rule.id) ? rawRulesById.get(rule.id) : undefined;
@@ -325,7 +336,8 @@ export function serializeSourceIngestionExclusions(
       reason: rule.reason,
     };
   });
-  return `${JSON.stringify({ schemaVersion: document.schemaVersion, rules }, null, 2)}\n`;
+  const value = { schemaVersion: document.schemaVersion, rules, ...(previousReadRules ? { previous_read_rules: previousReadRules } : {}) };
+  return `${JSON.stringify(value, null, 2)}\n`;
 }
 
 export interface SourceIngestionExclusionsWriteResult {
@@ -360,6 +372,7 @@ export function writeSourceIngestionExclusionsFile(options: {
   document: SourceIngestionExclusions;
   rawRulesById?: ReadonlyMap<string, unknown>;
   preserveIds?: ReadonlySet<string>;
+  previousReadRules?: SourceIngestionExclusions;
   now?: Date;
 }): SourceIngestionExclusionsWriteResult {
   const { path } = options;
@@ -367,6 +380,7 @@ export function writeSourceIngestionExclusionsFile(options: {
     options.document,
     options.rawRulesById ?? new Map(),
     options.preserveIds ?? new Set((options.rawRulesById ?? new Map()).keys()),
+    options.previousReadRules,
   );
   const reparsed = parseSourceIngestionExclusions(JSON.parse(text) as unknown, path);
   if (reparsed.schemaVersion !== SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION) {
@@ -427,6 +441,7 @@ export interface SourceDispositionsSaveResult extends SourceDispositionEditResul
 export function saveSourceDispositions(
   path: string,
   request: SourceDispositionsSaveRequest,
+  options: { reconcileReadsFor?: readonly SourceDispositionsSource[] } = {},
 ): SourceDispositionsSaveResult {
   const file = readSourceIngestionExclusionsFile(path);
   const base = request.document !== undefined
@@ -449,9 +464,13 @@ export function saveSourceDispositions(
   const preserveIds = request.document !== undefined
     ? new Set<string>()
     : new Set(result.untouched_rule_ids);
+  for (const source of options.reconcileReadsFor ?? []) {
+    createSourceExclusionMatcher(result.rules, source.source_id, { enforceable: source.enforceable });
+  }
   const write = writeSourceIngestionExclusionsFile({
     path,
     document: result.rules,
+    ...(options.reconcileReadsFor ? { previousReadRules: file.document } : {}),
     rawRulesById: file.rawRulesById,
     preserveIds,
   });

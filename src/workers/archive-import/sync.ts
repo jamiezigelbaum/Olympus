@@ -321,6 +321,14 @@ function observeListing(
   };
 }
 
+// The writer owns standalone imports and Remove. Once marked removing, no new
+// pass can start, but a previously yielded page may still be landing.
+const activePulls = new Map<string, Set<Promise<ArchiveImportPullOutcome>>>();
+export function waitForActiveArchivePulls(archiveId: string) {
+  const pulls = activePulls.get(archiveId);
+  return pulls && Promise.allSettled(pulls);
+}
+
 export async function pullArchiveImport(options: ArchiveImportPullOptions): Promise<ArchiveImportPullOutcome> {
   const now = options.now ?? (() => new Date());
   const record = options.state.get(options.archiveId);
@@ -407,7 +415,7 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
   if (!format || !factory || format.family !== record.family || format.provider !== record.provider) {
     return stop({ code: 'format_unavailable', message: 'This build does not read this archive\'s format.', at: now().toISOString() });
   }
-  return runPass(options, record, {
+  const pass = runPass(options, record, {
     stop,
     idle,
     now,
@@ -425,6 +433,15 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       connector: (input) => factory(input),
     }),
   });
+  const active = activePulls.get(record.archive_id) ?? new Set();
+  activePulls.set(record.archive_id, active);
+  active.add(pass);
+  try {
+    return await pass;
+  } finally {
+    active.delete(pass);
+    if (!active.size) activePulls.delete(record.archive_id);
+  }
 }
 
 /**

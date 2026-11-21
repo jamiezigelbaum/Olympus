@@ -332,6 +332,10 @@ This guarantees **never searchable in two tiers at once**, and makes **rollback 
 
 **Exception for raises (more private):** hide first, then copy. The item is briefly unsearchable instead of briefly visible in the lower tier.
 
+On the first start after upgrading, a background pass checks unrouted Private and Secret decisions in the set ledger and the Personal store’s earlier ledger. It reads Personal bodies by item identity. A settled decision with a receipt matching the complete stored text queues a hide-first Private move or runs Secret disposition. Changed text enters the usual judgment hold. The pass checkpoints bounded pages before the newest-first legacy body walk begins.
+
+Until routing finishes, remote search, cloud answers and cloud embedding honor the recorded restriction even when the active copy is still in Personal.
+
 ### 3.4 Deletion custody
 
 - A provider deletion tombstones the current copy and any superseded copies.

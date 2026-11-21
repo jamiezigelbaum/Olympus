@@ -179,6 +179,8 @@ export const HELD_UNTIL_JUDGED_PRIORITY = -1;
 export const NEW_ARRIVAL_PRIORITY = 50;
 
 export interface TierSnifferRequest {
+  /** Order this earlier-build hold was discovered, newest first. Scheduling only. */
+  legacyHoldOrder?: number;
   /** Scheduling only; excluded from verdict inputs and cache keys. */
   conversationOrder?: -1 | 0 | 1;
   pass: 'metadata' | 'content';
@@ -304,6 +306,8 @@ export function contentHeldForJudgment(
  * (`heldUntilJudged`) and holds the same way.
  */
 export const HELD_UNTIL_JUDGED_REASON = 'content:held_until_judged';
+/** An active Personal body discovered by the one-time earlier-build repair. */
+export const LEGACY_PERSONAL_BODY_REASON = 'content:legacy_personal_body';
 
 /** Whether recorded reasons say the item's lane holds its content until judged. */
 export function heldUntilJudged(reasons: readonly string[] | undefined): boolean {
@@ -370,33 +374,83 @@ export function hasContentJudgeVerdict(reasons: readonly string[], tier: TierKey
     && reasons.includes(contentJudgeVerdictReason(reason, tier, digest)));
 }
 
+type PersonalContentEvidence = Pick<TierDecision, 'contentRead' | 'contentPending'>
+  & { decidedBy: string; reasons: readonly string[] };
+
+interface PersonalContentAuthority {
+  decidedBy: string;
+  reasons: readonly string[];
+  text: string;
+  digest: string;
+  notSecret: boolean;
+  override: ItemTierOverride | undefined;
+  imageJudgment: ImageJudgmentSignal | undefined;
+  photoReason: string | undefined;
+}
+
+type PersonalContentCheck = (input: PersonalContentAuthority) => boolean;
+
+/** Receipt failures are also reported by moves to a lower trust domain. */
+export function contentReceiptRefusal(reasons: readonly string[], digest: string) {
+  const receipts = reasons.filter(reason => reason.startsWith('content:sha256:'));
+  if (!receipts.length) return 'content_no_receipt';
+  if (receipts.length > 1) return 'content_several_receipts';
+  if (receipts[0] !== digest) return 'content_receipt_mismatch';
+  return undefined;
+}
+
+const personalContentAuthority = {
+  readAndSettled: (evidence: PersonalContentEvidence) => evidence.contentRead && !evidence.contentPending,
+  exactBody: ({ reasons, digest }: PersonalContentAuthority) => contentReceiptRefusal(reasons, digest) === undefined,
+  verdicts: {
+    itemOverride: ({ decidedBy, reasons }) => decidedBy === 'override'
+      && (reasons.includes('override:item:private') || reasons.includes('override:item:public')),
+    ownerNames: ({ reasons }) => namesDecidedByOwner(reasons),
+    shortMessage: ({ reasons, text }) => {
+      const rule = reasons.includes('content:text_only') ? trivialContentRule(text) : undefined;
+      return rule !== undefined && reasons.includes(`content:rule:${rule}`);
+    },
+    textJudge: ({ reasons, digest, photoReason }) => !photoReason && hasContentJudgeVerdict(reasons, 'private', digest),
+    ordinaryPhoto: ({ imageJudgment, photoReason }) => imageJudgment?.verdict === 'ordinary'
+      && !imageJudgment.textDecides && photoReason === IMAGE_ORDINARY_REASON,
+    photoTextJudge: ({ imageJudgment, photoReason, reasons, digest }) => imageJudgment?.verdict === 'ordinary'
+      && !!imageJudgment.textDecides
+      && photoReason === `${IMAGE_TEXT_DECIDES_REASON_PREFIX}${imageCategoryCode(imageJudgment.category)}`
+      && hasContentJudgeVerdict(reasons, 'private', digest),
+  } satisfies Record<string, PersonalContentCheck>,
+  secretClearance: {
+    ownerDigest: ({ override, decidedBy, reasons, digest }) => override?.kind === 'tier'
+      && decidedBy === 'override'
+      && reasons.includes(`override:item:${override.tier}`)
+      && ownerOverrideMatchesDigest(override, digest),
+    notSecret: ({ notSecret, reasons }) => notSecret && reasons.includes('override:item:not_secret'),
+    cleanScan: ({ text }) => contentSecretReasons(text).length === 0,
+  } satisfies Record<string, PersonalContentCheck>,
+};
+
+export type PersonalContentAuthorityEntry =
+  | Exclude<keyof typeof personalContentAuthority, 'verdicts' | 'secretClearance'>
+  | `verdicts.${keyof typeof personalContentAuthority.verdicts}`
+  | `secretClearance.${keyof typeof personalContentAuthority.secretClearance}`;
+
 /** Check the complete stored body against Personal placement's authority. */
 export function personalContentAuthorized(
-  evidence: Pick<TierDecision, 'contentRead' | 'contentPending'> & { decidedBy: string; reasons: readonly string[] },
+  evidence: PersonalContentEvidence,
   text: string,
   notSecret: boolean,
   override?: ItemTierOverride,
   imageJudgment?: ImageJudgmentSignal,
 ): boolean {
-  if (!evidence.contentRead || evidence.contentPending) return false;
-  const { reasons } = evidence;
-  const digest = contentDigestReason(text);
-  const receipts = reasons.filter(reason => reason.startsWith('content:sha256:'));
-  if (receipts.length !== 1 || receipts[0] !== digest) return false;
-  const ownerDecided = (evidence.decidedBy === 'override'
-    && (reasons.includes('override:item:private') || reasons.includes('override:item:public'))) || namesDecidedByOwner(reasons);
-  const trivial = reasons.includes('content:text_only') ? trivialContentRule(text) : undefined;
-  const trivialSettled = trivial !== undefined && reasons.includes(`content:rule:${trivial}`);
-  const photoReason = reasons.find(reason => reason === IMAGE_ORDINARY_REASON || reason.startsWith(IMAGE_TEXT_DECIDES_REASON_PREFIX));
-  const judgedPersonal = hasContentJudgeVerdict(reasons, 'private', digest);
-  const photoSettled = imageJudgment?.verdict === 'ordinary' && (imageJudgment.textDecides
-    ? photoReason === `${IMAGE_TEXT_DECIDES_REASON_PREFIX}${imageCategoryCode(imageJudgment.category)}` && judgedPersonal
-    : photoReason === IMAGE_ORDINARY_REASON);
-  if (!ownerDecided && !trivialSettled && !(photoReason ? photoSettled : judgedPersonal)) return false;
-  const ownerConfirmed = override?.kind === 'tier' && evidence.decidedBy === 'override'
-    && reasons.includes(`override:item:${override.tier}`) && ownerOverrideMatchesDigest(override, digest);
-  return ownerConfirmed
-    || (notSecret && reasons.includes('override:item:not_secret')) || contentSecretReasons(text).length === 0;
+  if (!personalContentAuthority.readAndSettled(evidence)) return false;
+  const { decidedBy, reasons } = evidence;
+  const input = {
+    decidedBy, reasons, text, notSecret, override, imageJudgment,
+    digest: contentDigestReason(text),
+    photoReason: reasons.find(reason => reason === IMAGE_ORDINARY_REASON || reason.startsWith(IMAGE_TEXT_DECIDES_REASON_PREFIX)),
+  };
+  return personalContentAuthority.exactBody(input)
+    && Object.values(personalContentAuthority.verdicts).some(check => check(input))
+    && Object.values(personalContentAuthority.secretClearance).some(check => check(input));
 }
 
 /**

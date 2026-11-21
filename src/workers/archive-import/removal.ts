@@ -41,6 +41,7 @@ import { resolveRemoteConnectionsDbPath } from '../../core/remote-connections.ts
 import { openTierSniffer } from '../../core/source-storage.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { archiveContinuations } from './continuation-cache.ts';
+import { revokeOnDemandReads } from '../file-extraction/on-demand-read.ts';
 import { archiveLaneLegs, archiveLaneStores, type ArchiveTierLane } from './lane.ts';
 import type { ArchiveMediaBindings } from './media-bindings.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID, archiveConnectorId, type ArchiveImportRecord, type ArchiveImportStateStore } from './state.ts';
@@ -153,6 +154,14 @@ function deleteJudgeQuestions(lane: ArchiveTierLane, provider: string, accountSc
   }
 }
 
+export function withdrawArchiveReads(lane: ArchiveTierLane, record: ArchiveImportRecord) {
+  const stores = archiveLaneStores(lane);
+  const prefix = record.archive_id + ':';
+  const ids = new Set(stores.flatMap(store => store.onDemandGrantIds().filter(id => id.startsWith(prefix))));
+  revokeOnDemandReads(stores, ids);
+  return lane.ledger.withdrawAccountScope(record.provider, record.archive_id);
+}
+
 export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise<ArchiveRemovalOutcome> {
   const record = options.state.get(options.archiveId);
   if (!record || record.status !== 'removing') {
@@ -165,6 +174,9 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
   const lane = options.lane;
   const corpusIds = archiveLaneLegs(lane).map((leg) => leg.corpusId);
   const counts = emptyCounts();
+  const withdrawn = withdrawArchiveReads(lane, record);
+  counts.decisions_removed += withdrawn.items;
+  counts.copies_hidden += withdrawn.copies;
 
   // An inflater parked for a member of this archive has nothing left to serve.
   archiveContinuations.dropArchive(record.archive_id);
@@ -180,10 +192,6 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
   ).length;
   counts.media_bindings_removed += options.media?.forgetArchive(accountScope) ?? 0;
 
-  // Hidden everywhere, and out of every later pass's reach.
-  const withdrawn = lane.ledger.withdrawAccountScope(provider, accountScope);
-  counts.decisions_removed += withdrawn.items;
-  counts.copies_hidden += withdrawn.copies;
   counts.questions_removed += deleteJudgeQuestions(lane, provider, accountScope);
   // 3: answers that read these items.
   counts.answers_removed += deleteWaitingAnswers(options, { provider, accountScope, corpusIds });

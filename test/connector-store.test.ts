@@ -2251,7 +2251,7 @@ describe('LocalConnectorStore reactions', () => {
     await store.syncFromConnector(createChatConnector([reactedChatItem(THUMBS_UP_BY_TWO)]), { fetchContent: true });
     store.close();
 
-    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(17);
+    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(18);
 
     const db = new Database(dbPath, { readonly: true });
     try {
@@ -2286,6 +2286,8 @@ describe('LocalConnectorStore reactions', () => {
     const rewind = rawStore(dbPath);
     try {
       rewind.exec(`
+        DROP TRIGGER connector_store_invalidate_label_observation;
+        ALTER TABLE items DROP COLUMN classification_labels_json;
         DROP TRIGGER on_demand_item_update;
         DROP TRIGGER on_demand_item_delete;
         DROP TABLE on_demand_item_reads;

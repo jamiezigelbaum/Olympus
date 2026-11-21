@@ -27,11 +27,12 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 
 import { dirname } from 'node:path';
 import { OperationError } from '../../core/operation-error.ts';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
-import { readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
+import { additiveMigration, readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore, loopWalAutocheckpointPragma, type SqliteCloseOptions } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import {
+  LEGACY_PERSONAL_BODY_REASON,
   NAMES_INPUT_REASON_PREFIX,
   OWNER_OVERRIDE_SECRET_REVIEW_REASON,
   PERSONAL_FIRST_REASON,
@@ -39,6 +40,7 @@ import {
   contentDigestReason,
   contentHeldForJudgment,
   contentJudgeVerdictReason,
+  hasContentJudgeVerdict,
   isContentJudgeReason,
   maxTier,
   ownerOverrideMatchesDigest,
@@ -53,9 +55,29 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 18;
+export const TIER_LEDGER_SCHEMA_VERSION = 19;
 export const RETIRED_EMBEDDING_CLEARANCE_REASON = 'content:sniffer:retired_embedding_clearance:undecided';
 export const RETAINED_MOVE_SOURCE_REASON = 'content:retained_move_source';
+
+export interface LegacyPersonalBodyProgress {
+  held: number;
+  judged: number;
+  waiting?: number;
+}
+
+const LEGACY_PROTECTED_ROWS = "routed = 0 AND (metadata_tier IN ('secure', 'secrets') OR content_tier IN ('secure', 'secrets'))";
+const LEGACY_PROTECTED_INDEX = 'tier_items_legacy_protected';
+const LEGACY_PROTECTED_KEYS = 'provider, account_scope, conversation_key, provider_item_id';
+
+const LEGACY_PERSONAL_BODIES_HELD = 'legacy-personal-bodies:held';
+const LEGACY_PERSONAL_BODIES_JUDGED = 'legacy-personal-bodies:judged';
+export const LEGACY_PERSONAL_BODIES_CURSOR = 'legacy_personal_bodies_cursor_v2';
+export const LEGACY_PERSONAL_BODIES_WAITING = 'legacy-personal-bodies:waiting';
+export const LEGACY_PERSONAL_BODY_PROGRESS_SQL = `SELECT
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_HELD}'), 0) AS INTEGER) AS held,
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged,
+  MAX(CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_WAITING}'), 0) AS INTEGER),
+    COALESCE((SELECT json_extract(NULLIF(value, ''), '$.waiting') FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_CURSOR}'), 0)) AS waiting`;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -211,11 +233,12 @@ function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead
 
 type HidingIntent = 'deletion' | 'secret';
 
-interface TierLedgerItemState {
+export interface TierLedgerItemState {
   record?: TierLedgerRecord;
   copies: TierCopy[];
   override?: ItemTierOverride;
   hidingIntent?: HidingIntent;
+  pendingRaisePurge?: true;
 }
 
 function* hidingIntentsSteps(values: string, params: string[]): Generator<LedgerRead, Array<TierIdentityRow & { kind: HidingIntent }>, unknown> {
@@ -366,6 +389,30 @@ const AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pendin
               OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`;
 const PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1
         AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`;
+// The same predicates run on the read pool and again by primary key under the writer lock.
+const PERSONAL_LOWERING_UNCLAIMED = `rejudge_json IS NULL AND metadata_forced = 0
+  AND metadata_tier <> 'secrets' AND content_tier <> 'secrets'
+  AND decided_by NOT IN ('override', 'owner_rule')
+  AND instr(reasons_json, '"override:') = 0 AND instr(reasons_json, '"metadata:owner_rule:') = 0
+  AND NOT EXISTS (SELECT 1 FROM tier_overrides o WHERE (o.provider, o.account_scope, o.conversation_key, o.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id))
+  AND NOT EXISTS (SELECT 1 FROM tier_copies c WHERE (c.provider, c.account_scope, c.conversation_key, c.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) AND c.copy_state = 'staged')
+  AND NOT EXISTS (SELECT 1 FROM tier_write_intents w WHERE (w.provider, w.account_scope, w.conversation_key, w.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id))`;
+const STORED_PERSONAL_LOWERING = `routed = 1 AND state = 'current' AND content_read = 1
+  AND metadata_pending = 0 AND content_pending = 0 AND move_attempts = 0
+  AND target_metadata_tier IS NULL AND target_content_tier IS NULL
+  AND metadata_tier IN ('public','private') AND content_tier IN ('public','private')
+  AND decided_by IN ('default','sniffer') AND instr(reasons_json, '"content:sniffer:') > 0
+  AND ${PERSONAL_LOWERING_UNCLAIMED}
+  -- A refused or abandoned move may still have zero counted failures. Its
+  -- next attempt belongs to a fresh judgment, not a replay of this receipt.
+  AND (SELECT h.decided_by FROM tier_history h WHERE (h.provider, h.account_scope, h.conversation_key, h.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) ORDER BY h.history_pk DESC LIMIT 1) IS NOT 'rollback'
+  AND EXISTS (SELECT 1 FROM tier_copies c WHERE (c.provider, c.account_scope, c.conversation_key, c.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id)
+    AND c.copy_state = 'current' AND c.layers IN ('content','both') AND c.trust_domain = 'secure_local')`;
 export const PERSONAL_FIRST_SETTLE_CURSOR = 'personal_first_settle_after';
 export const PERSONAL_FIRST_SETTLE_DONE = 'personal_first_settle_done';
 
@@ -400,7 +447,7 @@ function* windowSteps(
           SELECT * FROM tier_items ${keyAfter}
           ORDER BY provider, account_scope, conversation_key, provider_item_id
           LIMIT ?
-        )
+        ) AS i
         WHERE ${where}
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
@@ -426,12 +473,25 @@ function* windowSteps(
   return lastEnd ? { records, resumeAfter: identityOfRow(lastEnd) } : { records };
 }
 
-function listMovingRead(options: { limit?: number; direction?: 'raise' | 'lower' }): LedgerRead {
+interface MovingPageOptions {
+  limit?: number;
+  direction?: 'raise' | 'lower';
+  legacyHoldsOnly?: boolean;
+  recordedOnly?: boolean;
+}
+
+function listMovingRead(options: MovingPageOptions): LedgerRead {
   const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
   return {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
+      ${options.recordedOnly ? "AND (target_metadata_tier = 'secure' OR target_content_tier = 'secure') AND content_pending = 0 AND metadata_pending = 0" : ''}
+      ${options.legacyHoldsOnly || options.recordedOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
+        AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+          AND c.account_scope = tier_items.account_scope AND c.conversation_key = tier_items.conversation_key
+          AND c.provider_item_id = tier_items.provider_item_id AND c.trust_domain = 'internal' AND c.layers <> 'metadata'
+          AND c.copy_state = 'superseded' AND c.superseded_by_generation = tier_items.generation + 1)` : ''}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `,
@@ -948,6 +1008,9 @@ export class TierLedger {
       // an older build opens the file as before and ignores it.
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
+      // Install the recorded-pass index during writable schema setup, before any page or move transaction.
+      db.exec(`CREATE INDEX IF NOT EXISTS ${LEGACY_PROTECTED_INDEX}
+        ON tier_items (${LEGACY_PROTECTED_KEYS}) WHERE ${LEGACY_PROTECTED_ROWS}`);
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
       if (db) closeSqliteStore(db, this.readOnly || options.expectedLedgerId !== undefined
@@ -1491,19 +1554,29 @@ export class TierLedger {
   }
 
 
+  *legacyProtectedRowsSteps(after: TierLedgerIdentity | undefined, limit: number): Generator<LedgerRead, TierLedgerIdentity[], unknown> {
+    const rows = (yield {
+      sql: `SELECT ${LEGACY_PROTECTED_KEYS} FROM tier_items INDEXED BY ${LEGACY_PROTECTED_INDEX}
+        WHERE ${LEGACY_PROTECTED_ROWS} AND (${LEGACY_PROTECTED_KEYS}) > (?, ?, ?, ?)
+        ORDER BY ${LEGACY_PROTECTED_KEYS} LIMIT ?`,
+      params: [...(after ? idParams(after) : ['', '', '', '']), limit], mode: 'all',
+    }) as TierIdentityRow[];
+    return rows.map(identityFromRow);
+  }
+
   /**
    * Items with a queued move (state `moving`): the fewest failed attempts
    * first (`recordMoveFailure`), then the oldest decision. A move that keeps
    * failing goes to the back of the queue, so it never holds the head of a
    * bounded page while moves behind it could land.
    */
-  listMoving(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): TierLedgerRecord[] {
+  listMoving(options: MovingPageOptions = {}): TierLedgerRecord[] {
     const read = listMovingRead(options);
     return (this.db.query(read.sql).all(...read.params as never[]) as TierItemRow[]).map(recordFromRow);
   }
 
   /** `listMoving`'s read, for a read worker (loop-pass.ts). */
-  *listMovingSteps(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): Generator<LedgerRead, TierLedgerRecord[], unknown> {
+  *listMovingSteps(options: MovingPageOptions = {}): Generator<LedgerRead, TierLedgerRecord[], unknown> {
     return ((yield listMovingRead(options)) as TierItemRow[]).map(recordFromRow);
   }
 
@@ -1981,6 +2054,32 @@ export class TierLedger {
     return windowSteps(PERSONAL_FIRST_WHERE, [PERSONAL_FIRST_REASON], options);
   }
 
+  storedPersonalLoweringSteps(options: { limit: number; after?: TierLedgerIdentity }): Generator<LedgerRead, TierLedgerWindow, unknown> {
+    return windowSteps(STORED_PERSONAL_LOWERING, [], { ...options, examine: WINDOW_SLICE_ROWS });
+  }
+
+  queueStoredPersonalLowering(identity: TierLedgerIdentity,
+    placementFor: (decision: TierDecision, record: TierLedgerRecord, copies: TierCopy[]) => TierPlacementPlan | undefined,
+  ): boolean {
+    return this.db.transaction(() => {
+      const row = this.db.query(`SELECT * FROM tier_items i WHERE provider = ? AND account_scope = ?
+        AND conversation_key = ? AND provider_item_id = ? AND ${STORED_PERSONAL_LOWERING}`).get(...idParams(identity)) as TierItemRow | null;
+      if (!row) return false;
+      const record = recordFromRow(row);
+      if (!judgedPersonal(record) || record.reasons.filter(reason => reason.startsWith('content:sha256:')).length !== 1) return false;
+      const decision = decisionOfRow(record);
+      const copies = this.copies(identity).filter(copy => copy.state === 'current');
+      const plan = placementFor(decision, record, copies);
+      if (!plan) return false;
+      const source = copyServingLayer(copies, 'content');
+      const target = copyServingLayer(plan.copies, 'content');
+      if (!source || !target || trustDomainRank(target.trustDomain) >= trustDomainRank(source.trustDomain)
+        || placementIsRaise(copies, plan.copies)) return false;
+      this.queueMoveRow(identity, record, decision, { hide: false, decidedAt: this.now().toISOString() });
+      return true;
+    })();
+  }
+
   /** Items waiting on an unanswered sniffer question, oldest first. */
   listPending(options: { limit?: number; after?: TierLedgerIdentity } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
@@ -2093,6 +2192,7 @@ export class TierLedger {
       if (!current || current.state !== 'pending' || JSON.stringify(current) !== JSON.stringify(record)
         || this.getOverride(identity)?.kind === 'tier') return false;
       this.deleteCopies(identity);
+      this.setLabelsUnavailable(identity, false);
       this.db.query(`DELETE FROM tier_items
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
       return true;
@@ -2116,6 +2216,7 @@ export class TierLedger {
       if (!existing || existing.state !== 'moving' || existing.generation !== options.expectedGeneration
         || this.getOverride(identity)?.kind === 'tier') return false;
       this.deleteCopies(identity);
+      this.setLabelsUnavailable(identity, false);
       this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, '');
       this.db.query(`DELETE FROM tier_items
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
@@ -2733,6 +2834,19 @@ export class TierLedger {
     }
   }
 
+  /** One index seek per account, independent of how many items it holds. */
+  *storedAccounts(): Generator<{ provider: string; accountScope: string }> {
+    const first = this.db.query("SELECT provider, account_scope AS accountScope FROM tier_items WHERE provider >= '' ORDER BY provider, account_scope LIMIT 1");
+    const next = this.db.query(`SELECT provider, account_scope AS accountScope FROM tier_items
+      WHERE (provider, account_scope) > (?, ?) ORDER BY provider, account_scope LIMIT 1`);
+    type Account = { provider: string; accountScope: string };
+    let account = first.get() as Account | null;
+    while (account) {
+      yield account;
+      account = next.get(account.provider, account.accountScope) as Account | null;
+    }
+  }
+
   /** A small named value kept beside the ledger (a background pass's resume point); never item content. */
   readMeta(key: string): string | undefined {
     if (key === 'ledger_id') return undefined;
@@ -2742,6 +2856,55 @@ export class TierLedger {
 
   writeMeta(key: string, value: string): void {
     this.setMeta(key, value);
+  }
+
+  /** Hide the physical Personal copy. Only a body awaiting judgment counts as a new hold. */
+  recordLegacyPersonalHold(
+    identity: TierLedgerIdentity, decision: TierDecision, plan: TierPlacementPlan, digest: string | undefined,
+    guard: TierOwnerOverrideGuard, retainedBodyCorpusId?: string,
+  ): ReturnType<TierLedger['recordRoutedPlacement']> {
+    return this.db.transaction(() => {
+      // Record the observed physical content as a move source and hide it in
+      // this same transaction. No reader may see the widened content layer.
+      if (retainedBodyCorpusId) this.db.query(`
+        UPDATE tier_copies SET layers = 'both'
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND corpus_id = ? AND trust_domain = 'internal' AND copy_state = 'current' AND layers = 'metadata'
+      `).run(...idParams(identity), retainedBodyCorpusId);
+      const result = this.recordRoutedPlacement(identity, decision, plan, { guard });
+      if (result.outcome !== 'queued_move') {
+        if (retainedBodyCorpusId) throw new TierLedgerGenerationConflictError();
+        return result;
+      }
+      // Duplicate content layers can make another store the first source.
+      // Hide the physical Personal body even when a different layer raised.
+      for (const copy of result.previousCopies) {
+        if (copy.trustDomain !== 'internal' || copy.state !== 'current' || copy.layers === 'metadata') continue;
+        if (this.supersedeCurrentCopy(identity, copy.corpusId, result.record.generation + 1, result.record.decidedAt)) {
+          result.raise = true;
+        }
+      }
+      const key = legacyPersonalBodyKey(identity);
+      if (digest !== undefined && result.raise && this.readMeta(key) === undefined) {
+        const order = this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_HELD);
+        this.writeMeta(key, JSON.stringify({ digest, order }));
+      }
+      return result;
+    }).immediate();
+  }
+
+  /** The order in which the newest-first walk held this still-unjudged body. */
+  legacyPersonalBodyHold(identity: TierLedgerIdentity): { digest: string; order: number } | undefined {
+    const saved = this.readMeta(legacyPersonalBodyKey(identity));
+    return saved && saved !== 'judged' ? JSON.parse(saved) : undefined;
+  }
+
+  private incrementLegacyPersonalProgress(key: string): number {
+    const row = this.db.query(`
+      INSERT INTO tier_ledger_meta (key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1 RETURNING value
+    `).get(key) as { value: string };
+    return Number(row.value);
   }
 
   /** Positive answers from one complete or in-progress provider label walk. */
@@ -2765,6 +2928,36 @@ export class TierLedger {
     this.db.query(`
       DELETE FROM tier_label_rule_matches WHERE provider = ? AND account_scope = ? AND rule_key = ? AND walk_id <> ?
     `).run(provider, accountScope, ruleKey, walkId);
+  }
+
+  unavailableLabelCount(): number {
+    return Number(this.readMeta('labels_unavailable_count') ?? 0);
+  }
+
+  setLabelsUnavailable(identity: TierLedgerIdentity, unavailable: boolean): void {
+    if (!unavailable && !this.unavailableLabelCount()) return;
+    this.db.transaction(() => {
+      const delta = unavailable
+        ? this.db.query('INSERT OR IGNORE INTO tier_label_gaps (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)').run(...idParams(identity)).changes
+        : -this.db.query(`DELETE FROM tier_label_gaps WHERE provider = ? AND account_scope = ?
+            AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity)).changes;
+      if (delta) this.writeMeta('labels_unavailable_count', String(this.unavailableLabelCount() + delta));
+    })();
+  }
+
+  /** A rejudge from partial names can create a new receipt. Require the first decision's receipt as well. */
+  *firstListingNamesReceipts(items: readonly TierLedgerIdentity[]): Generator<LedgerRead, Map<string, string>, unknown> {
+    const receipts = new Map<string, string>();
+    if (!items.length) return receipts;
+    const rows = (yield { sql: `SELECT k.key AS idx, (SELECT reasons_json FROM tier_history WHERE
+      (provider,account_scope,conversation_key,provider_item_id) = (k.value ->> '$.provider', k.value ->> '$.accountScope',
+        COALESCE(k.value ->> '$.providerConversationId', ''), k.value ->> '$.providerItemId')
+      ORDER BY history_pk LIMIT 1) AS reasons FROM json_each(?) k`, params: [JSON.stringify(items)], mode: 'all' }) as Array<{ idx: number; reasons: string | null }>;
+    for (const row of rows) {
+      const receipt = row.reasons && (JSON.parse(row.reasons) as string[]).find(reason => reason.startsWith(NAMES_INPUT_REASON_PREFIX));
+      if (receipt) receipts.set(tierLedgerIdentityKey(items[row.idx]!), receipt);
+    }
+    return receipts;
   }
 
   /** A walk's own checkpoint does not invalidate a judge's clean lap. */
@@ -3395,13 +3588,24 @@ export class TierLedger {
         params, mode: 'all',
       }) as TierItemRow[];
       for (const row of rows) result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
+      // A mixed move may have flipped while the Personal source still awaits its purge.
+      // Read the durable receipt by primary key along with the affected copy.
       const copies = (yield {
-        sql: `SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        sql: `SELECT c.*, CASE WHEN trust_domain = 'internal' AND (copy_state = 'superseded' OR layers = 'metadata')
+          THEN (SELECT json_array_length(value, '$.raisePurge') FROM tier_ledger_meta
+            WHERE key = 'tier-move-verified:' || c.provider || char(0) || c.account_scope || char(0)
+              || c.conversation_key || char(0) || c.provider_item_id AND value <> '') END AS pending_raise_purge
+          FROM tier_copies c WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
           ORDER BY corpus_id`,
         params, mode: 'all',
-      }) as TierCopyRow[];
-      for (const row of copies) result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+      }) as Array<TierCopyRow & { pending_raise_purge: number | null }>;
+      for (const row of copies) {
+        const state = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+        if (state) {
+          state.copies.push(copyFromRow(row));
+          if (row.pending_raise_purge) state.pendingRaisePurge = true;
+        }
+      }
       // The owner's override, read in the same batch: a release check weighs an
       // override whose queued placement has not settled yet.
       const overrides = (yield {
@@ -3926,10 +4130,7 @@ export class TierLedger {
     }
     for (const copy of sources) {
       if (copy.state !== 'current' || !placementIsRaise([copy], destination)) continue;
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
-      `).run(generation, now, ...idParams(identity), copy.corpusId);
+      this.supersedeCurrentCopy(identity, copy.corpusId, generation, now);
     }
   }
 
@@ -4248,12 +4449,13 @@ export class TierLedger {
    */
   flipToSecrets(
     identity: TierLedgerIdentity,
-    options: { expectedGeneration: number; reasons?: readonly string[] },
+    options: { expectedGeneration: number; reasons?: readonly string[]; guard?: TierOwnerOverrideGuard },
   ): { record: TierLedgerRecord; copies: TierCopy[] } {
     const now = this.now().toISOString();
     let copies: TierCopy[] = [];
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (options.guard) this.assertOverrideGuard(identity, existing, options.guard);
       if (!existing || existing.generation !== options.expectedGeneration) {
         throw new TierLedgerGenerationConflictError();
       }
@@ -4499,6 +4701,7 @@ export class TierLedger {
     this.db.transaction(() => {
       removed = this.copies(identity);
       this.deleteCopies(identity);
+      this.setLabelsUnavailable(identity, false);
     })();
     return removed;
   }
@@ -5069,6 +5272,11 @@ export class TierLedger {
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
+      const gaps = this.unavailableLabelCount();
+      if (gaps) {
+        const removed = this.db.query('DELETE FROM tier_label_gaps WHERE provider = ? AND account_scope = ?').run(provider, accountScope).changes;
+        if (removed) this.writeMeta('labels_unavailable_count', String(gaps - removed));
+      }
       this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(labelSweepMetaKey(provider, accountScope));
       return { items, copies };
     })();
@@ -5118,6 +5326,14 @@ export class TierLedger {
       UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'
     `).run(byGeneration, now, ...idParams(identity));
+  }
+
+  private supersedeCurrentCopy(identity: TierLedgerIdentity, corpusId: string, byGeneration: number, now: string): boolean {
+    return this.db.query(`
+      UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND corpus_id = ? AND copy_state = 'current'
+    `).run(byGeneration, now, ...idParams(identity), corpusId).changes > 0;
   }
 
   private flipTiers(
@@ -5175,6 +5391,16 @@ export class TierLedger {
     decidedAt: string,
   ): void {
     if (metadataTier === 'secrets' || contentTier === 'secrets') this.writeMeta(overrideRestoreKey(identity), '');
+    if (reasonsJson.includes('"content:judge_verdict:')) {
+      const digest = this.legacyPersonalBodyHold(identity)?.digest;
+      if (digest) {
+        const reasons: string[] = JSON.parse(reasonsJson);
+        if (hasContentJudgeVerdict(reasons, 'private', digest) || hasContentJudgeVerdict(reasons, 'secure', digest)) {
+          this.writeMeta(legacyPersonalBodyKey(identity), 'judged');
+          this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_JUDGED);
+        }
+      }
+    }
     this.db.query(`
       INSERT INTO tier_history (
         provider, account_scope, conversation_key, provider_item_id, generation,
@@ -5190,6 +5416,10 @@ function caughtUpKey(connectorId: string): string {
 
 function newArrivalKey(identity: TierLedgerIdentity): string {
   return `new_arrival:${tierLedgerIdentityKey(identity)}`;
+}
+
+function legacyPersonalBodyKey(identity: TierLedgerIdentity): string {
+  return `legacy-personal-body:${tierLedgerIdentityKey(identity)}`;
 }
 
 export type TierMigrationProposalStatus = 'proposed' | 'moved' | 'rolled_back' | 'skipped' | 'purged';
@@ -5871,6 +6101,17 @@ export function holdSnifferLowering(
   return process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING === '1'
     && current.state === 'current' && current.contentTier === 'secure' && next.contentTier !== 'secrets'
     && (next.contentTier === 'private' || (current.metadataTier === 'secure' && next.metadataTier === 'private'));
+}
+
+function judgedPersonal(row: EffectiveRow): boolean {
+  return row.contentRead && !row.contentPending && !row.metadataPending && !row.metadataForced
+    && tierRank(maxTier(row.metadataTier, row.contentTier)) <= tierRank('private')
+    && row.decidedBy !== 'owner_rule' && row.decidedBy !== 'override'
+    && row.reasons.some(reason => reason.startsWith('content:sniffer:'))
+    && !row.reasons.some(reason => reason.startsWith('metadata:owner_rule:') || reason.startsWith('override:')
+      || reason.includes(':fail_safe:') || reason.includes(':record_held:') || reason.endsWith(':unresolved:0.00')
+      || reason.endsWith(':injection:classifier_instruction:0.00') || reason.endsWith(':union:decision:failed')
+      || isOpenSnifferReason(reason, 'content'));
 }
 
 /** A settled row as the classifier decision the P1b router takes. */
@@ -6752,7 +6993,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 18,
       name: 'provider_label_rule_matches',
       up(db) {
         db.exec(`
@@ -6767,6 +7008,11 @@ function tierLedgerMigrations(): SqliteMigration[] {
         `);
       },
     },
+    additiveMigration(19, 'uncheckable_label_items', [
+      `CREATE TABLE IF NOT EXISTS tier_label_gaps (
+        provider TEXT NOT NULL, account_scope TEXT NOT NULL, conversation_key TEXT NOT NULL, provider_item_id TEXT NOT NULL,
+        PRIMARY KEY(provider, account_scope, conversation_key, provider_item_id)) WITHOUT ROWID`,
+    ]),
   ];
 }
 
