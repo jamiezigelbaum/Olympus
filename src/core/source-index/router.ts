@@ -644,6 +644,8 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const lanesStartedAt = Date.now();
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const matchingIds = new Set<SourceIndexCandidateId>();
+  // A partial can prove a parent in another store only if this fan-out actually searched it.
+  const searchedContext = { ...request.context, allowedCorpusIds: searchableCorpora.map(corpus => corpus.corpusId) };
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
     let progress: SourceIndexReadProgress = () => {};
@@ -652,7 +654,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       query: request.query,
       maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
-      context: request.context,
+      context: searchedContext,
       onProgress: () => progress(),
       [DEFER_SEARCH_DELIVERY]: true,
       onPartialResponse: (response, lane = 'keyword') => {

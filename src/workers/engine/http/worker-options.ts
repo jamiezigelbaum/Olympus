@@ -14,6 +14,8 @@ import type { UpdateAvailable } from '../../../core/update-check.ts';
 import type { SelfUpdateStart, SelfUpdateStatus } from '../../../core/self-update.ts';
 import type { ModelSetupView } from '../../../core/model-setup.ts';
 import type { SourceIndexVisibilityGate } from '../../../core/source-index/router.ts';
+import type { ChildVisibilityLane } from '../../connector-store/child-visibility.ts';
+import type { SecretLocationIdentity } from '../../classification/secret-locations.ts';
 import type { SecretLocationNote } from '../../../core/evidence-pack.ts';
 import type {
   startOAuthSourceConnection,
@@ -198,6 +200,7 @@ export interface EmailSourceWorkerOptions {
   secretLocationSearch?: (
     query: string,
     searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
+    withholdLocators: (corpusId: string, identities: readonly SecretLocationIdentity[], lane: ChildVisibilityLane) => ReadonlySet<SecretLocationIdentity>,
   ) => readonly SecretLocationNote[];
   /** Generic corpus-keyed overrides for connector-store retrieval providers. */
   connectorStoreEmbeddingProviders?: ReadonlyMap<string, SourceEmbeddingProvider>;

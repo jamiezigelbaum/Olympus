@@ -42049,11 +42049,7 @@ class SecretLocationsIndex {
       ${scope.accountScope ? "WHERE account_scope = ?" : ""}
       ORDER BY detected_at DESC
     `).all(...scope.accountScope ? [scope.accountScope] : []);
-    const scored = [];
-    for (const row of rows) {
-      const location = locationFromRow(row);
-      if (!secretLocationWithinScope(location, scope))
-        continue;
+    const scoreLocation = (location) => {
       const words = secretLocationWords(location);
       let best = 0;
       for (const terms of readings) {
@@ -42061,8 +42057,16 @@ class SecretLocationsIndex {
         if (score >= Math.min(3, terms.length))
           best = Math.max(best, score);
       }
-      if (best > 0)
-        scored.push({ location, score: best });
+      return best;
+    };
+    const scored = [];
+    for (const row of rows) {
+      const location = locationFromRow(row);
+      if (!secretLocationWithinScope(location, scope))
+        continue;
+      const score = scoreLocation(location);
+      if (score > 0)
+        scored.push({ location, score });
     }
     const identities = scored.map(({ location }) => ({
       provider: location.source,
@@ -42071,14 +42075,24 @@ class SecretLocationsIndex {
       ...location.conversationKey ? { providerConversationId: location.conversationKey } : {}
     }));
     let hidden = new Set;
-    if (options.hide && scored.length > 0) {
+    if (scored.length > 0) {
       try {
-        hidden = options.hide(identities);
+        if (options.hide)
+          hidden = options.hide(identities);
+        if (options.withholdLocators) {
+          const withheld = options.withholdLocators(identities);
+          scored.forEach((match, index) => {
+            if (match.location.locator && withheld.has(identities[index])) {
+              match.location.locator = null;
+              match.score = scoreLocation(match.location);
+            }
+          });
+        }
       } catch {
         return [];
       }
     }
-    return scored.filter((_, index) => !hidden.has(identities[index])).sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
+    return scored.filter((match, index) => match.score > 0 && !hidden.has(identities[index])).sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
       source: location.source,
       ref: secretLocationRef(location),
       locator: location.namesReleasable ? location.locator : null,
@@ -67772,6 +67786,7 @@ async function routePreparedSourceIndexSearch(options) {
   const lanesStartedAt = Date.now();
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const matchingIds = new Set;
+  const searchedContext = { ...request.context, allowedCorpusIds: searchableCorpora.map((corpus) => corpus.corpusId) };
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
     let progress = () => {};
@@ -67780,7 +67795,7 @@ async function routePreparedSourceIndexSearch(options) {
       query: request.query,
       maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
-      context: request.context,
+      context: searchedContext,
       onProgress: () => progress(),
       [DEFER_SEARCH_DELIVERY]: true,
       onPartialResponse: (response, lane = "keyword") => {
@@ -69627,11 +69642,23 @@ function defineConnectorCorpus(options) {
     description: "Shared connector-store corpus: generic local index over a Contract 1 SourceConnector."
   });
 }
+function searchAncestorScope(accountScope, filters, owner) {
+  const { authoredAfter, authoredBefore, conversationId, senderId, senderLabel, senderIdentities, searchTextExactLines, ...admission } = filters ?? {};
+  return { ...accountScope ? { accountScope } : {}, filters: { ...admission, ...owner } };
+}
 function publishPartialRows(store, request, rows, filters, score, projector, lane = "keyword", searchEligibility) {
   if (!request.onPartialResponse)
     return;
   const eligible = searchEligibility?.(rows);
-  const prefix = (eligible ? rows.filter((_, index) => eligible[index]) : rows).slice(0, request.maxResults);
+  const admitted = eligible ? rows.filter((_, index) => eligible[index]) : rows;
+  const { allowedCorpusIds, allowedTrustDomains } = request.context;
+  const withheld = store.childrenWithWithheldSearchIdentifiers(admitted.map((row) => row.sourceItem), allowedTrustDomains.includes("secure_local"), (id) => {
+    if (allowedCorpusIds && !allowedCorpusIds.includes(id))
+      return;
+    const plan = request.ancestorPlanFor?.(id);
+    return plan && allowedTrustDomains.includes(plan.store.trustDomain) ? plan : undefined;
+  });
+  const prefix = (withheld.size ? admitted.filter((row) => !withheld.has(row.sourceItem)) : admitted).slice(0, request.maxResults);
   const hits = prefix.map((row) => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
   const response = withSearchGrantDelivery(store, filters, request, { hits, latencyMs: 0, incomplete: true, rawExposed: false }, prefix);
   request.onPartialResponse(response, lane);
@@ -69700,11 +69727,13 @@ async function withVectorMetadataFallbacks(store, request, rows, accountScope, f
 function createConnectorStoreCorpusAdapter(options) {
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
+  const ownAncestorPlan = { store, ancestorScope: searchAncestorScope(options.accountScope, filters) };
   const scopedSearch = (search) => async (input) => {
     assertConnectorStoreCorpusRequest(store, input);
     const publish = input.onPartialResponse;
     const request = {
       ...input,
+      ancestorPlanFor: options.ancestorPlanFor ?? ((id) => id === store.corpusId ? ownAncestorPlan : undefined),
       ...usesSearchGrants(filters) ? { startGrantEpoch: store.onDemandGrantEpoch() } : {},
       ...publish && !input[DEFER_SEARCH_DELIVERY] ? {
         onPartialResponse: (response, lane) => publish(deliverCorpusSearch([response], input.maxResults), lane)
@@ -74684,8 +74713,15 @@ var init_local_index = __esm(() => {
         stores: () => [this]
       };
     }
-    childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, plans) {
-      const links = this.parentLinksOf(identities);
+    childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, planFor, locationLane) {
+      try {
+        const keys = this.withheldSearchIdentifierKeys(identities, includePrivateNames, planFor, locationLane);
+        return new Set(identities.filter((identity) => keys.has(tierLedgerIdentityKey(identity))));
+      } catch {
+        return new Set(identities);
+      }
+    }
+    withheldSearchIdentifierKeys(identities, includePrivateNames, planFor, locationLane) {
       const withheld = new Set;
       const lookupKey = (parent) => ("parentLocalItemId" in parent) ? `local:${parentKey(parent)}` : `provider:${tierLedgerIdentityKey(parent)}`;
       let pending = new Map;
@@ -74698,17 +74734,27 @@ var init_local_index = __esm(() => {
           entry.children.add(child);
         pending.set(key, entry);
       };
-      for (const identity of identities) {
-        const child = tierLedgerIdentityKey(identity);
-        queue(links.get(child), [child]);
-        queue(parentIdentityOf(identity), [child]);
+      const lane = locationLane ?? this.childVisibilityLane();
+      const admittedPlans = () => childVisibilityStores(lane).flatMap((store) => {
+        const plan = planFor(store.corpusId);
+        return plan?.store === store ? [plan] : [];
+      });
+      const locationPlans = locationLane ? admittedPlans() : undefined;
+      for (const store of locationPlans?.map((plan) => plan.store) ?? [this]) {
+        for (const [child, parent] of store.parentLinksOf(identities))
+          queue(parent, [child]);
       }
+      for (const identity of identities)
+        queue(parentIdentityOf(identity), [tierLedgerIdentityKey(identity)]);
       if (!pending.size)
         return withheld;
-      const lane = this.childVisibilityLane();
       const ledger = lane.ledger();
-      const stores = childVisibilityStores(lane);
-      const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }] : [];
+      const plans = locationPlans ?? admittedPlans();
+      const scopes = ledger ? [{
+        ledger,
+        corpusIds: new Set(plans.map((plan) => plan.store.corpusId)),
+        preRoutingLedger: (id) => plans.find((plan) => plan.store.corpusId === id)?.store.preRoutingReadLedgerFor(ledger)
+      }] : [];
       for (let depth = 0;pending.size > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
         const linked = [];
         const encoded = [];
@@ -74718,17 +74764,14 @@ var init_local_index = __esm(() => {
           else
             encoded.push(parent);
         }
-        const rows = stores.flatMap((store) => {
-          const plan = plans.get(store.corpusId);
-          if (!plan || plan.store !== store)
-            return [];
+        const rows = plans.flatMap(({ store, ancestorScope }) => {
           const active = [
             ...store.parentStandings(linked).map((row) => ({ ...row, key: lookupKey(row) })),
             ...Array.from(store.itemStandings(encoded).values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
           ].filter((row) => row.active);
-          const account = normalizeOptionalAccountScope(plan.scope.accountScope);
-          const predicate = connectorStoreFilterSql(plan.scope.filters);
-          const matches = predicate.sql ? new Set(plan.store.itemRowsForIdentities(active.map((row) => row.identity), (id) => normalizeConversationId(id.providerConversationId), predicate).map((row) => row.idx)) : undefined;
+          const account = normalizeOptionalAccountScope(ancestorScope.accountScope);
+          const predicate = connectorStoreFilterSql(ancestorScope.filters);
+          const matches = predicate.sql ? new Set(store.itemRowsForIdentities(active.map((row) => row.identity), (id) => normalizeConversationId(id.providerConversationId), predicate).map((row) => row.idx)) : undefined;
           return active.map((row, index) => ({
             ...row,
             corpusId: store.corpusId,
@@ -229842,7 +229885,8 @@ function createEmailSourceWorker(options = {}) {
               ...accountScope ? { accountScope } : {},
               ...filters ? { filters } : {}
             };
-            return { store, scope, readScopeSignature, searchRequest };
+            const ancestorScope = searchAncestorScope(accountScope, searchRequest.filters, mandatoryScope?.filters);
+            return { store, scope, ancestorScope, readScopeSignature, searchRequest };
           };
           const plans = new Map;
           const planErrors = new Map;
@@ -229861,6 +229905,8 @@ function createEmailSourceWorker(options = {}) {
             }
           };
           const parentAllowed = (candidate) => plans.get(candidate.corpusId)?.store === candidate;
+          const planFor = (id) => plans.get(id);
+          const withheldIdentifiers = (corpusId, identities, lane) => plans.get(corpusId)?.store.childrenWithWithheldSearchIdentifiers(identities, !personalNamesOnly, planFor, lane) ?? new Set(identities);
           const prepare = (corpusId, ids) => withSearchVisibilityStores(parentAllowed, async () => {
             const searchConnectorStore = async ({ store, scope, readScopeSignature, searchRequest }) => {
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
@@ -229983,7 +230029,7 @@ function createEmailSourceWorker(options = {}) {
                 }
               }
               const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
-              const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
+              const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope), withheldIdentifiers) ?? [] : [];
               const pendingPrivacy = readPendingPrivacyItems(options);
               const released = runs.map((run) => deliverCorpusSearch([run.result]));
               const withheld = new Set(runs.flatMap((run) => [...run.privateMatches]));
@@ -230011,14 +230057,9 @@ function createEmailSourceWorker(options = {}) {
                 const governed = hits.filter((hit) => hit.corpusId === store.corpusId);
                 if (governed.length === 0)
                   continue;
-                try {
-                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map((hit) => hit.sourceItem), !personalNamesOnly, plans);
-                  for (const hit of governed) {
-                    if (children.has(tierLedgerIdentityKey(hit.sourceItem)))
-                      withheldChildIdentifiers.add(hit);
-                  }
-                } catch {
-                  for (const hit of governed)
+                const hidden = withheldIdentifiers(store.corpusId, governed.map((hit) => hit.sourceItem));
+                for (const hit of governed) {
+                  if (hidden.has(hit.sourceItem))
                     withheldChildIdentifiers.add(hit);
                 }
               }
@@ -246961,6 +247002,11 @@ function createOwnerQuestionActivity(relay, now = Date.now) {
 function createSourceAnswerLanes(deps) {
   return (request, mode) => {
     deps.ownerQuestions?.retrieving();
+    const ancestorPlans = new Map;
+    const ancestorPlanFor = (id) => {
+      const plan = ancestorPlans.get(id);
+      return plan && JSON.stringify(deps.readScope(plan.store)) === plan.readScopeSignature ? plan : undefined;
+    };
     const searchScopes = new Map;
     const requestEmbeddings = new Map;
     const sharedMemos = new Map;
@@ -246997,9 +247043,15 @@ function createSourceAnswerLanes(deps) {
         ...connectorStoreAccount ? { accountScope: connectorStoreAccount } : {},
         ...filters ? { filters } : {}
       });
+      ancestorPlans.set(store.corpusId, {
+        store,
+        ancestorScope: searchAncestorScope(mandatoryScope.accountScope ?? connectorStoreAccount, scope.filters, mandatoryScope.filters),
+        readScopeSignature: JSON.stringify(mandatoryScope)
+      });
       const semanticRelevanceBar = deps.semanticRelevanceBar?.(store);
       return createConnectorStoreCorpusAdapter({
         store,
+        ancestorPlanFor,
         retrievalMode: request.retrieval_mode ?? "keyword",
         localKeywordFallback: mode === "built_in_only" ? true : mode === "private_search" && store.trustDomain === "secure_local" ? "private_search" : false,
         ...semanticRelevanceBar !== undefined ? { semanticRelevanceBar } : {},
@@ -280388,20 +280440,22 @@ async function main() {
     tierLanes.push(lane);
     return lane;
   };
-  const tierSecretLocations = (query, searched) => tierLanes.flatMap((lane) => {
+  const tierSecretLocations = (query, searched, withholdLocators) => tierLanes.flatMap((lane) => {
     const scope = searched.find((entry) => entry.corpusId === lane.secureCorpusId);
     if (!scope || !lane.secrets)
       return [];
+    const parents = {
+      ledger: () => lane.ledger,
+      stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
+    };
     try {
       return lane.secrets.search(query, {
         ...scope.accountScope ? { accountScope: scope.accountScope } : {},
         ...scope.filters ? { filters: scope.filters } : {}
       }, {
         limit: 5,
-        hide: (identities) => hiddenProbesByParentIdentity({
-          ledger: () => lane.ledger,
-          stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
-        }, identities)
+        ...withholdLocators ? { withholdLocators: (ids) => withholdLocators(lane.secureCorpusId, ids, parents) } : {},
+        hide: (identities) => hiddenProbesByParentIdentity(parents, identities)
       });
     } catch {
       return [];
