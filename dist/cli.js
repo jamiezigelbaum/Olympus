@@ -172750,7 +172750,7 @@ async function runSnifferPass(options) {
           }
         }
         const batch = [group];
-        const admission = report.calls > 0 && options.trickle?.() === true ? "pass_budget" : admitCall(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+        const admission = report.calls > 0 && options.trickle?.() === true ? "pass_budget" : admitCall(options, report, maxCallsPerPass, monotonicNow() >= deadline, next.question.priority >= NEW_ARRIVAL_PRIORITY);
         if (typeof admission === "string") {
           report.stoppedBy = admission;
           return;
@@ -172771,6 +172771,7 @@ async function runSnifferPass(options) {
         const promptChars = SNIFFER_SYSTEM_PROMPT.length + prompt.length;
         report.promptChars += promptChars;
         report.estimatedInputTokens += Math.ceil(promptChars / 4);
+        const moreWaiting = pending.length > 0;
         let text;
         let decisionVerdict;
         let slotWaitMs = 0;
@@ -172814,6 +172815,7 @@ async function runSnifferPass(options) {
           report.timing.slotWaitMs += waited;
           report.timing.modelMs += turnCallMs - waited;
         }
+        options.onCallAnswered?.(moreWaiting);
         const preemptedAfterAnswer = options.signal?.aborted === true;
         consecutiveTransportFailures = 0;
         report.responseChars += text.length;
@@ -172887,14 +172889,14 @@ function openPasses(row) {
     passes.push("content");
   return passes;
 }
-function admitCall(options, report, maxCallsPerPass, timeUp) {
+function admitCall(options, report, maxCallsPerPass, timeUp, arrival) {
   if (options.signal?.aborted)
     return "aborted";
   if (report.calls >= maxCallsPerPass || timeUp)
     return "pass_budget";
   if (options.shouldYield?.())
     return "yield";
-  const release = options.acquireCall?.();
+  const release = options.acquireCall?.(arrival);
   if (release === false)
     return "yield";
   if (options.budget && !options.budget.tryConsume(options.lane.snifferMode === "decision")) {
@@ -250377,7 +250379,7 @@ class TierSnifferService {
   running = false;
   runningSinceMs = 0;
   yieldingSinceMs;
-  fairTurn = false;
+  modelHandoffGeneration;
   notAnsweringUntilMs = 0;
   pacedUntilMs = 0;
   notAnsweringPasses = 0;
@@ -250401,7 +250403,7 @@ class TierSnifferService {
   };
   heldBackSinceMs;
   arrivalTurn = false;
-  dispatch = { inFlight: 0, protected: false };
+  dispatch = { inFlight: 0, arrivalsInFlight: 0, protected: false };
   backlogRefresh;
   waiting;
   moveFailures = new Map;
@@ -250512,12 +250514,21 @@ class TierSnifferService {
       this.closeLedgers();
   }
   preempt(reason = "model") {
-    if (this.dispatch.protected)
+    const dispatch = this.dispatch;
+    if (dispatch.protected)
       return;
+    if (dispatch.inFlight === 1 && this.heldTurnDue(dispatch.arrivalsInFlight === 1)) {
+      dispatch.protected = true;
+      return;
+    }
     if ((reason === "question" || this.options.lane?.kind !== "local") && this.options.ownerAskTurn?.() === "share")
       return;
-    this.fairTurn = false;
-    this.yieldingSinceMs = undefined;
+    if (reason === "model" && !this.running)
+      this.modelHandoffGeneration = this.passGeneration + 1;
+    if (this.running) {
+      this.heldBackSinceMs ??= this.clockMs();
+      this.yieldingSinceMs ??= this.clockMs();
+    }
     this.abort?.abort();
   }
   backlog() {
@@ -250930,10 +250941,8 @@ class TierSnifferService {
       this.running = false;
     }
     const generation = ++this.passGeneration;
-    this.dispatch = { inFlight: 0, protected: false };
+    this.dispatch = { inFlight: 0, arrivalsInFlight: 0, protected: false };
     this.arrivalTurn = this.arrivalTurnDue();
-    if (this.arrivalTurn)
-      this.heldBackSinceMs = undefined;
     this.running = true;
     this.runningSinceMs = this.clockMs();
     this.lastProgressMs = this.runningSinceMs;
@@ -250959,18 +250968,16 @@ class TierSnifferService {
     } finally {
       leave();
       this.lastTickEndedAt = this.monotonicNow();
-      if (this.fairTurn) {
-        this.fairTurn = false;
-        this.yieldingSinceMs = undefined;
-      }
     }
     if (generation !== this.passGeneration) {
       abort.abort();
       return tick;
     }
     const overran = this.overrunAbortedAtMs !== 0;
-    if (this.arrivalTurn)
-      this.heldBackSinceMs = this.clockMs();
+    if (tick.state === "ran" && tick.report.pendingSeen === 0) {
+      this.heldBackSinceMs = undefined;
+      this.yieldingSinceMs = undefined;
+    }
     this.arrivalTurn = false;
     this.running = false;
     this.abort = undefined;
@@ -251107,26 +251114,33 @@ class TierSnifferService {
     if (this.running && this.arrivalTurn && turn !== "hold" && turn !== "share")
       return false;
     const held = this.holdsBack(turn);
-    if (this.running)
-      this.heldBackSinceMs = held ? this.heldBackSinceMs ?? this.clockMs() : undefined;
+    if (this.running && held)
+      this.heldBackSinceMs ??= this.clockMs();
     return held;
   }
-  acquireCall() {
+  acquireCall(arrival) {
     const dispatch = this.dispatch;
     if (dispatch.protected)
       return false;
     const turn = this.options.ownerAskTurn?.();
     if (this.yieldNow(turn))
       return false;
-    const protect = this.arrivalTurn || turn === "share" && this.options.lane?.kind === "local";
+    const protect = this.arrivalTurn || (turn === "share" ? this.options.lane?.kind === "local" : this.heldTurnDue(arrival) || this.fairTurnDue());
     if (protect && dispatch.inFlight > 0)
       return false;
     dispatch.inFlight++;
+    if (arrival)
+      dispatch.arrivalsInFlight++;
     if (protect)
       dispatch.protected = true;
+    if (this.fairTurnDue() && !this.arrivalTurn) {
+      this.options.log?.("Olympus tier sniffer: answers kept the private model busy; this pass takes its turn.");
+    }
     return () => {
       dispatch.inFlight--;
-      if (protect)
+      if (arrival)
+        dispatch.arrivalsInFlight--;
+      if (dispatch.inFlight === 0)
         dispatch.protected = false;
     };
   }
@@ -251143,7 +251157,7 @@ class TierSnifferService {
       return false;
     if (this.breakerOpen())
       return false;
-    if (this.clockMs() - this.heldBackSinceMs < ARRIVAL_STAND_BACK_MS) {
+    if (!this.heldTurnDue(true)) {
       try {
         const paths = this.ledgers.size > 0 ? [...this.ledgers.keys()] : this.ledgerPaths();
         return paths.some((path) => this.options.installed.snifferStoreForLedger(path).arrivalContentQuestions().some((question) => this.isOnDemandRead(question)));
@@ -251171,26 +251185,21 @@ class TierSnifferService {
     }
     if (!this.running || turn === "share")
       return busy;
-    if (!busy) {
-      if (!this.fairTurn)
-        this.yieldingSinceMs = undefined;
+    if (!busy)
       return false;
-    }
     if (turn === "hold" || this.ownerAnswering()) {
       this.lastYieldReason = "owner_answer";
-      this.fairTurn = false;
-      this.yieldingSinceMs = undefined;
       return true;
     }
-    if (this.fairTurn)
-      return false;
-    const now = this.clockMs();
-    this.yieldingSinceMs ??= now;
-    if (now - this.yieldingSinceMs < (this.options.fairTurnAfterMs ?? DEFAULT_CLASSIFICATION_FAIR_TURN_MS))
-      return true;
-    this.fairTurn = true;
-    this.options.log?.("Olympus tier sniffer: answers kept the private model busy; this pass takes its turn.");
-    return false;
+    this.yieldingSinceMs ??= this.clockMs();
+    return !this.fairTurnDue();
+  }
+  heldTurnDue(arrival) {
+    const bound = arrival ? ARRIVAL_STAND_BACK_MS : this.options.fairTurnAfterMs ?? DEFAULT_CLASSIFICATION_FAIR_TURN_MS;
+    return this.heldBackSinceMs !== undefined && this.clockMs() - this.heldBackSinceMs >= bound;
+  }
+  fairTurnDue() {
+    return this.yieldingSinceMs !== undefined && this.clockMs() - this.yieldingSinceMs >= (this.options.fairTurnAfterMs ?? DEFAULT_CLASSIFICATION_FAIR_TURN_MS);
   }
   ledgerPaths() {
     const paths = new Set;
@@ -251484,7 +251493,16 @@ class TierSnifferService {
       ...this.arrivalTurn ? { arrivalsOnly: true } : {},
       passTimeMs: this.options.passTimeMs,
       ...this.options.monotonicNow ? { monotonicNow: this.options.monotonicNow } : {},
-      acquireCall: () => this.acquireCall(),
+      acquireCall: (arrival) => this.acquireCall(arrival),
+      onCallAnswered: (moreWaiting) => {
+        if (signal !== this.abort?.signal)
+          return;
+        const nextWait = moreWaiting ? this.clockMs() : undefined;
+        if (this.heldBackSinceMs !== undefined)
+          this.heldBackSinceMs = nextWait;
+        if (this.yieldingSinceMs !== undefined)
+          this.yieldingSinceMs = nextWait;
+      },
       onProgress: this.progress,
       ...this.options.pacing && isBuiltInLane(lane) ? { trickle: () => this.trickle() } : {},
       signal
@@ -251683,7 +251701,7 @@ class TierSnifferService {
   }
   ownerAnswering() {
     try {
-      return this.options.ownerInFlight?.() ?? false;
+      return this.options.ownerInFlight?.() ?? this.modelHandoffGeneration === this.passGeneration;
     } catch {
       return false;
     }

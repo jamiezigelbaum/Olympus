@@ -307,7 +307,7 @@ export const DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60_000;
  * Answers go first, but they never hold classification off for good. An agent
  * asking without pause kept every pass yielding, so new items stayed Private
  * and unsearchable (1.4.0 release check, 2026-11-08). After this long of
- * yielding, one pass runs to its normal end, then answers lead again.
+ * yielding, one call runs to completion, then answers lead again.
  */
 export const DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60_000;
 /**
@@ -628,10 +628,10 @@ export class TierSnifferService {
   private lowerMovePreempted = false;
   private running = false;
   private runningSinceMs = 0;
-  /** When passes started yielding to other answers without a break (clock ms). */
+  /** First missed turn behind other model work. Idle observations do not settle the wait. */
   private yieldingSinceMs: number | undefined;
-  /** This pass is taking its turn: it does not yield to other answers. */
-  private fairTurn = false;
+  /** With no owner-activity probe, give a newly announced model request first use of the pass. */
+  private modelHandoffGeneration: number | undefined;
   /** Scheduled passes wait until this time while the model is not answering (0: no wait). */
   private notAnsweringUntilMs = 0;
   /** Going easy (#922): a scheduled pass waits until this time while the pacing says trickle. */
@@ -659,12 +659,12 @@ export class TierSnifferService {
   private lastProgressMs = 0;
   private passStep = 'starting';
   private readonly progress = (): void => { this.lastProgressMs = this.clockMs(); };
-  /** Since when passes have been held back by answers or the owner (cleared when one runs). */
+  /** First outstanding hold, including front questions. A model response or empty queue settles it. */
   private heldBackSinceMs: number | undefined;
   /** This pass is an arrival's bounded turn: it asks one new arrival and does not give way. */
   private arrivalTurn = false;
   /** Only an admitted call can extend its share, and only for its own pass. */
-  private dispatch = { inFlight: 0, protected: false };
+  private dispatch = { inFlight: 0, arrivalsInFlight: 0, protected: false };
   private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
@@ -779,17 +779,27 @@ export class TierSnifferService {
   /**
    * An answer needs the private pool (the worker calls this when answers in
    * flight go from 0 to 1, and when an answer is queued behind a running
-   * call): abort the sniffer's in-flight call at once. The pass stops as
-   * `preempted`; nothing is counted against any item, and the sniffer never
-   * records anything in the answer pool's breakers.
+   * call). A due turn finishes one call. Otherwise preemption leaves the
+   * items queued and does not count against the answer pool's breakers.
    */
   preempt(reason: 'model' | 'question' = 'model'): void {
-    if (this.dispatch.protected) return;
+    const dispatch = this.dispatch;
+    if (dispatch.protected) return;
+    // A call may have started in an idle gap just before its turn came due.
+    // Finishing that one call serves the turn without throwing its work away.
+    if (dispatch.inFlight === 1 && this.heldTurnDue(dispatch.arrivalsInFlight === 1)) {
+      dispatch.protected = true;
+      return;
+    }
     // A question announcement alone can leave the share running. A request
     // for the shared model can interrupt even preparation for the next call.
     if ((reason === 'question' || this.options.lane?.kind !== 'local') && this.options.ownerAskTurn?.() === 'share') return;
-    this.fairTurn = false;
-    this.yieldingSinceMs = undefined;
+    if (reason === 'model' && !this.running) this.modelHandoffGeneration = this.passGeneration + 1;
+    if (this.running) {
+      // A short question can interrupt every call without ever overlapping a poll.
+      this.heldBackSinceMs ??= this.clockMs();
+      this.yieldingSinceMs ??= this.clockMs();
+    }
     this.abort?.abort();
   }
 
@@ -1250,9 +1260,8 @@ export class TierSnifferService {
       this.running = false;
     }
     const generation = ++this.passGeneration;
-    this.dispatch = { inFlight: 0, protected: false };
+    this.dispatch = { inFlight: 0, arrivalsInFlight: 0, protected: false };
     this.arrivalTurn = this.arrivalTurnDue();
-    if (this.arrivalTurn) this.heldBackSinceMs = undefined;
     this.running = true;
     this.runningSinceMs = this.clockMs();
     this.lastProgressMs = this.runningSinceMs;
@@ -1281,11 +1290,6 @@ export class TierSnifferService {
     } finally {
       leave();
       this.lastTickEndedAt = this.monotonicNow();
-      // The turn is used: answers lead again, and a new wait starts from now.
-      if (this.fairTurn) {
-        this.fairTurn = false;
-        this.yieldingSinceMs = undefined;
-      }
     }
     // An abandoned pass that ends late changes nothing: a newer pass owns the state.
     if (generation !== this.passGeneration) {
@@ -1293,8 +1297,10 @@ export class TierSnifferService {
       return tick;
     }
     const overran = this.overrunAbortedAtMs !== 0;
-    // After an arrival's turn the bound starts again, so answers get the pool back.
-    if (this.arrivalTurn) this.heldBackSinceMs = this.clockMs();
+    if (tick.state === 'ran' && tick.report.pendingSeen === 0) {
+      this.heldBackSinceMs = undefined;
+      this.yieldingSinceMs = undefined;
+    }
     this.arrivalTurn = false;
     this.running = false;
     this.abort = undefined;
@@ -1448,23 +1454,29 @@ export class TierSnifferService {
     if (this.breakerOpen()) { this.lastYieldReason = 'breaker'; return true; }
     if (this.running && this.arrivalTurn && turn !== 'hold' && turn !== 'share') return false;
     const held = this.holdsBack(turn);
-    if (this.running) this.heldBackSinceMs = held ? this.heldBackSinceMs ?? this.clockMs() : undefined;
+    if (this.running && held) this.heldBackSinceMs ??= this.clockMs();
     return held;
   }
 
-  private acquireCall(): (() => void) | false {
+  private acquireCall(arrival: boolean): (() => void) | false {
     // While the last admitted call finishes, no contender starts a new share.
     const dispatch = this.dispatch;
     if (dispatch.protected) return false;
     const turn = this.options.ownerAskTurn?.();
     if (this.yieldNow(turn)) return false;
-    const protect = this.arrivalTurn || (turn === 'share' && this.options.lane?.kind === 'local');
+    const protect = this.arrivalTurn || (turn === 'share' ? this.options.lane?.kind === 'local'
+      : this.heldTurnDue(arrival) || this.fairTurnDue());
     if (protect && dispatch.inFlight > 0) return false;
     dispatch.inFlight++;
+    if (arrival) dispatch.arrivalsInFlight++;
     if (protect) dispatch.protected = true;
+    if (this.fairTurnDue() && !this.arrivalTurn) {
+      this.options.log?.('Olympus tier sniffer: answers kept the private model busy; this pass takes its turn.');
+    }
     return () => {
       dispatch.inFlight--;
-      if (protect) dispatch.protected = false;
+      if (arrival) dispatch.arrivalsInFlight--;
+      if (dispatch.inFlight === 0) dispatch.protected = false;
     };
   }
 
@@ -1487,7 +1499,7 @@ export class TierSnifferService {
   private arrivalTurnDue(): boolean {
     if (this.heldBackSinceMs === undefined) return false;
     if (this.breakerOpen()) return false;
-    if (this.clockMs() - this.heldBackSinceMs < ARRIVAL_STAND_BACK_MS) {
+    if (!this.heldTurnDue(true)) {
       try {
         // The ledgers earlier passes opened: reading the stores again here
         // would cost every held-back pass a store listing.
@@ -1519,25 +1531,23 @@ export class TierSnifferService {
     }
     // Only a pass takes a turn; the timer's move drain still yields.
     if (!this.running || turn === 'share') return busy;
-    if (!busy) {
-      if (!this.fairTurn) this.yieldingSinceMs = undefined;
-      return false;
-    }
-    // A long owner call still running ends a turn and holds the wait at its
-    // start, as preempt() does when that call begins (#1031).
+    if (!busy) return false;
     if (turn === 'hold' || this.ownerAnswering()) {
       this.lastYieldReason = 'owner_answer';
-      this.fairTurn = false;
-      this.yieldingSinceMs = undefined;
       return true;
     }
-    if (this.fairTurn) return false;
-    const now = this.clockMs();
-    this.yieldingSinceMs ??= now;
-    if (now - this.yieldingSinceMs < (this.options.fairTurnAfterMs ?? DEFAULT_CLASSIFICATION_FAIR_TURN_MS)) return true;
-    this.fairTurn = true;
-    this.options.log?.('Olympus tier sniffer: answers kept the private model busy; this pass takes its turn.');
-    return false;
+    this.yieldingSinceMs ??= this.clockMs();
+    return !this.fairTurnDue();
+  }
+
+  private heldTurnDue(arrival: boolean): boolean {
+    const bound = arrival ? ARRIVAL_STAND_BACK_MS : this.options.fairTurnAfterMs ?? DEFAULT_CLASSIFICATION_FAIR_TURN_MS;
+    return this.heldBackSinceMs !== undefined && this.clockMs() - this.heldBackSinceMs >= bound;
+  }
+
+  private fairTurnDue(): boolean {
+    return this.yieldingSinceMs !== undefined
+      && this.clockMs() - this.yieldingSinceMs >= (this.options.fairTurnAfterMs ?? DEFAULT_CLASSIFICATION_FAIR_TURN_MS);
   }
 
   /** Every existing ledger behind the stores, each once: bound set ledgers and stores' own. */
@@ -1853,7 +1863,15 @@ export class TierSnifferService {
       passTimeMs: this.options.passTimeMs,
       // One clock for the tick and its pass, so the breakdown adds up (#893).
       ...(this.options.monotonicNow ? { monotonicNow: this.options.monotonicNow } : {}),
-      acquireCall: () => this.acquireCall(),
+      acquireCall: arrival => this.acquireCall(arrival),
+      onCallAnswered: moreWaiting => {
+        if (signal !== this.abort?.signal) return;
+        // The completed call used its turn. Other questions already waiting
+        // start their next interval here, even if the owner is between Asks.
+        const nextWait = moreWaiting ? this.clockMs() : undefined;
+        if (this.heldBackSinceMs !== undefined) this.heldBackSinceMs = nextWait;
+        if (this.yieldingSinceMs !== undefined) this.yieldingSinceMs = nextWait;
+      },
       onProgress: this.progress,
       ...(this.options.pacing && isBuiltInLane(lane) ? { trickle: () => this.trickle() } : {}),
       signal,
@@ -2096,7 +2114,7 @@ export class TierSnifferService {
 
   private ownerAnswering(): boolean {
     try {
-      return this.options.ownerInFlight?.() ?? false;
+      return this.options.ownerInFlight?.() ?? (this.modelHandoffGeneration === this.passGeneration);
     } catch {
       return false;
     }

@@ -36,10 +36,10 @@ import { SnifferCallBudget, runSnifferPass } from '../src/workers/classification
 import { BUILT_IN_SNIFFER_LANE, resolveTierSnifferRuntime } from '../src/workers/classification/built-in-sniffer.ts';
 import { createLocalModelActivity, runClassificationInference } from '../src/workers/answer-activity.ts';
 import { createStandBack, STAND_BACK_MAX_MS, STAND_BACK_SHARE_MS } from '../src/workers/engine/stand-back.ts';
-import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { ARRIVAL_STAND_BACK_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS, TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { archivePrivateModelFromSniffer } from '../src/workers/archive-import/dashboard.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
-import { classifyItemTiers, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
+import { arrivalOrderedSniffer, classifyItemTiers, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { SecureAnalystPoolState } from '../src/workers/source-index/analyst-pool.ts';
 import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
@@ -838,10 +838,11 @@ describe('bounds and the owner-approval gate', () => {
       // The turn is used: answers lead again until the next minute.
       clock += 1_000;
       expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
-      // The owner's own answer ends a turn and starts the minute over.
+      // A newly announced owner call gets the next pass. The work is still due afterwards.
       clock += 60_000;
       service.preempt();
       expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 1 } });
       service.stop();
     } finally {
       installed.close();
@@ -849,6 +850,104 @@ describe('bounds and the owner-approval gate', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  const mixedGaps = [5_000, 20_000, 12_000, 8_000];
+  const clusteredGaps = [5_000, 5_000, 5_000, 20_000, 20_000];
+  for (const [source, arrivals, gaps] of [
+    ['front', true, mixedGaps], ['model', true, mixedGaps],
+    ['front', false, mixedGaps], ['model', false, mixedGaps],
+    ['front', true, clusteredGaps], ['model', true, clusteredGaps],
+  ] as const) {
+    test(`30 minutes of short ${source} Asks leave time for slow ${arrivals ? 'arrival' : 'backlog'} verdicts (gaps ${gaps.join('/')})`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'tier-sniffer-short-asks-'));
+      const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+      const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+      const clock = createTestClock(0);
+      const callMs = 30_000;
+      const end = 30 * 60_000;
+      let asks = 0;
+      let nextAsk = 0;
+      let busySince: number | undefined;
+      let lastEnd = -Infinity;
+      const lines: string[] = [];
+      const log = (line: string) => { lines.push(line); };
+      const standBack = createStandBack({
+        now: clock.now, reason: () => source === 'front' && busySince !== undefined ? 'question in the front' : undefined,
+        idleWindow: () => ({ since: lastEnd, until: busySince ?? Infinity }), log,
+      });
+      function updateActivity() {
+        const at = clock.now();
+        if (at === nextAsk) {
+          busySince = at;
+          nextAsk += gaps[asks++ % gaps.length]!;
+          service.preempt(source === 'front' ? 'question' : 'model');
+        } else if (busySince !== undefined && at - busySince === (asks % 2 + 1) * 1_000) {
+          busySince = undefined;
+          lastEnd = at;
+        }
+      }
+      // Advance the same owner timeline inside slow model calls and between ticks.
+      function step() { clock.set(clock.now() + 1_000); updateActivity(); }
+      const completed: number[] = [];
+      const model = spyModel((request, items) => {
+        const due = clock.now() + callMs;
+        while (clock.now() < due) {
+          step();
+          request.signal?.throwIfAborted();
+        }
+        return verdictsFor(items, { tier: 'private', category: 'health', confidence: 0.95 });
+      });
+      const classificationLedgerPath = join(dir, 'classification-ledger.jsonl');
+      const service = new TierSnifferService({
+        installed, model, lane: LOCAL_LANE, classificationLedgerPath, now: clock.date, monotonicNow: clock.now, log,
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }], ownerAskTurn: () => standBack.turn('judge'),
+        answersInFlight: () => source === 'model' && busySince !== undefined,
+        ownerInFlight: () => source === 'model' && busySince !== undefined,
+      });
+      try {
+        await appendClassificationLedgerEntry(classificationLedgerPath, {
+          recorded_at: clock.date().toISOString(), kind: 'classifier_model_decision', what: 'Approved the fixture sniffer.',
+          model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+          approved_by: 'owner', status: 'complete',
+        });
+        const store = installed.snifferStoreForLedger(ledger.dbPath);
+        const sniffer = arrivalOrderedSniffer(new CachedTierSniffer(store, LOCAL_LANE), arrivals);
+        for (const n of [1, 2]) {
+          const decision = classifyItemTiers({ signals: { title: `visit ${n}`, labels: [STRUCTURED_METADATA_LABEL] },
+            subject: subject(n) }, { sniffer });
+          ledger.recordDecision(subject(n), decision);
+        }
+        expect(service.backlog()).toMatchObject({ pendingItems: 2, remainingQuestions: 2 });
+        updateActivity();
+        while (clock.now() < end) {
+          if (completed.length < 2) {
+            const tick = await service.runOnce();
+            if (tick.state !== 'ran') throw new Error(`Unexpected tick: ${tick.state}`);
+            for (let i = 0; i < tick.report.verdictsApplied; i++) completed.push(clock.now());
+          }
+          step();
+        }
+        expect(lines.some(line => line.includes('pending=2 questions=2'))).toBe(true);
+        expect(lines.some(line => line.includes('nothing asked: yielding to answers in progress'))).toBe(true);
+        expect(model.requests.length).toBeGreaterThan(1);
+        expect(completed).toHaveLength(2);
+        const wait = arrivals ? ARRIVAL_STAND_BACK_MS : DEFAULT_CLASSIFICATION_FAIR_TURN_MS;
+        // Up to one short Ask and one scheduler tick to observe the next idle gap.
+        const bound = wait + 2_000 + 1_000 + callMs;
+        expect(completed[0]!).toBeLessThanOrEqual(bound);
+        expect(completed[1]!).toBeLessThanOrEqual(2 * bound);
+        expect(completed[1]! - completed[0]!).toBeLessThanOrEqual(bound);
+        expect(service.backlog().remainingQuestions).toBe(0);
+        for (const n of [1, 2]) expect(ledger.getCurrent(subject(n))?.metadataPending).toBe(false);
+        if (source === 'front') expect(standBack.counts().judge?.holds).toBeGreaterThan(0);
+      } finally {
+        service.stop();
+        installed.close();
+        ledger.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
 
   test('pending questions get a judge call within 75 s while short owner gaps and model contention continue', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-share-'));

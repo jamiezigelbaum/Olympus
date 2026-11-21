@@ -216,7 +216,9 @@ export interface SnifferPassOptions {
   /** True when an answer needs the private pool (or its breaker is open): stop before the next call. */
   shouldYield?: () => boolean;
   /** Acquire one dispatch before charging its budget. False leaves the item queued. */
-  acquireCall?: () => (() => void) | false;
+  acquireCall?: (arrival: boolean) => (() => void) | false;
+  /** A model response settles a scheduling wait. Aborts and unused reservations do not. */
+  onCallAnswered?: (moreWaiting: boolean) => void;
   signal?: AbortSignal;
   /**
    * Go easy on this computer (#922, local-pacing.ts): true while local work
@@ -817,7 +819,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       }
       const batch = [group];
       const admission = report.calls > 0 && options.trickle?.() === true ? 'pass_budget'
-        : admitCall(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+        : admitCall(options, report, maxCallsPerPass, monotonicNow() >= deadline, next.question.priority >= NEW_ARRIVAL_PRIORITY);
       if (typeof admission === 'string') {
         report.stoppedBy = admission;
         return;
@@ -843,6 +845,9 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       const promptChars = SNIFFER_SYSTEM_PROMPT.length + prompt.length;
       report.promptChars += promptChars;
       report.estimatedInputTokens += Math.ceil(promptChars / 4);
+      // A concurrent contender can remove a waiting item from this pass's
+      // local list and then be denied admission while this call runs.
+      const moreWaiting = pending.length > 0;
       let text: string;
       let decisionVerdict: SnifferModelCompletion['decisionVerdict'];
       let slotWaitMs = 0;
@@ -890,6 +895,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       // A preemption that lands after the model answered frees nothing: the
       // call is over. Apply the answer, then stop (a dropped answer cost a
       // new arrival its whole judgment on test-mac, 2026-11-14).
+      options.onCallAnswered?.(moreWaiting);
       const preemptedAfterAnswer = options.signal?.aborted === true;
       consecutiveTransportFailures = 0;
       report.responseChars += text.length;
@@ -976,11 +982,11 @@ function openPasses(row: TierLedgerRecord): SnifferPass[] {
   return passes;
 }
 
-function admitCall(options: SnifferPassOptions, report: SnifferPassReport, maxCallsPerPass: number, timeUp: boolean): SnifferPassStop | (() => void) | undefined {
+function admitCall(options: SnifferPassOptions, report: SnifferPassReport, maxCallsPerPass: number, timeUp: boolean, arrival: boolean): SnifferPassStop | (() => void) | undefined {
   if (options.signal?.aborted) return 'aborted';
   if (report.calls >= maxCallsPerPass || timeUp) return 'pass_budget';
   if (options.shouldYield?.()) return 'yield';
-  const release = options.acquireCall?.();
+  const release = options.acquireCall?.(arrival);
   if (release === false) return 'yield';
   if (options.budget && !options.budget.tryConsume(options.lane.snifferMode === 'decision')) {
     release?.();
