@@ -24960,7 +24960,7 @@ class EmailClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       ...options.signal ? { signal: options.signal } : {},
-      body: JSON.stringify(body)
+      body: JSON.stringify({ ...body, corpus_ids: this.searchCorpora().map((corpus) => corpus.corpusId) })
     });
   }
   async sourceAnswer(options) {
@@ -25228,8 +25228,11 @@ class EmailClient {
       includeLocators: options.includeLocators === true
     });
   }
+  searchCorpora() {
+    return createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
+  }
   async sourceIndexSearchMany(options) {
-    const searchCorpora = createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
+    const searchCorpora = this.searchCorpora();
     if (!searchCorpora.length)
       throw new OperationError("invalid_params", "No source is configured for search.");
     const response = await this.requestSourceIndexSearch({

@@ -48,6 +48,7 @@ import { applyOwnerOverrides } from '../src/workers/connector-store/tier-overrid
 import { emptyTierRejudgeReport, rejudgeStoredContent } from '../src/workers/connector-store/tier-rejudge.ts';
 import { sweepOwnerRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { StaticCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import {
   createDropboxProviderStoreSyncHandler,
@@ -397,7 +398,12 @@ describe('one item, Private -> Personal -> Private', () => {
     expect(await search(install, 'loan terms')).toContain(LOAN_TEXT);
 
     // An agent raises it back to Private: hidden at once, before any tick.
-    const raised = ownerItems().set({ itemId, choice: 'private', allowLower: false });
+    const worker = createEmailSourceWorker({ connectorStores: install.lane.set.openStores(), ownerTierItems: ownerItems() });
+    closers.push(() => worker.close());
+    const response = await worker.fetch(new Request('http://localhost/v1/privacy-item/raise', {
+      method: 'POST', body: JSON.stringify({ item_id: itemId }),
+    }));
+    const raised = await response.json();
     expect(raised).toMatchObject({ ok: true, changed: 'set' });
     expect(await search(install, 'loan terms')).not.toContain(LOAN_TEXT);
     await install.service.runOnce();
@@ -575,7 +581,7 @@ describe('one item, Private -> Personal -> Private', () => {
     const itemId = bankItem().item_id;
     await runTierCommand(['set', 'id:bank', 'secrets'], { storePaths: storePaths() });
     expect(ownerItems().set({ itemId, choice: 'personal', allowLower: true })).toMatchObject({ ok: false, code: 'secret_item' });
-    expect(ownerItems().set({ itemId, choice: 'private', allowLower: false })).toMatchObject({ ok: false, code: 'secret_item' });
+    expect(ownerItems().set({ itemId, choice: 'private', allowLower: false })).toMatchObject({ ok: false, code: 'not_found' });
     expect(ownerItems().find({ query: 'bank letter' }).items).toEqual([]);
   });
 });
