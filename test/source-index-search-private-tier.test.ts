@@ -8,6 +8,8 @@
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildSourceSensitivity, type SourceTrustDomain, type SourceTrustTier } from '../src/core/source-index/types.ts';
+import { findOperationByName } from '../src/core/operations.ts';
+import { createInProcessOperationContext } from '../src/workers/remote-mcp.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
@@ -166,6 +168,52 @@ describe('source_index_search and rows Private by their own tier', () => {
     } finally {
       internal.close();
       secure.close();
+    }
+  });
+
+  test.each(['caller', 'worker'])('all-sources search skips a mounted sibling opted out by the %s', async authority => {
+    const config = defaultConfig();
+    const internalId = 'internal.drive.docs';
+    const secureId = 'secure_local.drive.docs';
+    const registry = config.sourceIndex.corpusRegistry;
+    registry.corpora = registry.corpora.filter(entry => [internalId, secureId].includes(entry.corpusId));
+    if (authority === 'caller') registry.corpora.find(entry => entry.corpusId === secureId)!.capabilities = ['status'];
+    const internal = await store(internalId, 'internal', [INTERNAL_FIXTURES[0]!]);
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const secure = await store(secureId, 'secure_local', [
+      { id: 'deed', name: 'orchard-deed.md', text: 'Orchard deed.', tier: 'S4' },
+    ], ledger);
+    try {
+      const unrestricted = createEmailSourceWorker({ connectorStores: [secure] });
+      expect((await search(unrestricted, { corpus_id: secureId, query: 'orchard' })).hits).toMatchObject([
+        { selected_item: { provider_item_id: 'deed', title: 'orchard-deed.md' } },
+      ]);
+      const reads: string[] = [];
+      const worker = createEmailSourceWorker({
+        connectorStores: [internal, secure],
+        connectorStoreTierSiblings: () => [secureId],
+        searchableCorpusIds: new Set(authority === 'worker' ? [internalId] : [internalId, secureId]),
+        connectorStoreReadScope: holder => { reads.push(holder.corpusId); return { allowed: true }; },
+      });
+      const context = createInProcessOperationContext({
+        config, sourceIndexReadEnabled: true, workerFetch: worker.fetch,
+        caller: { surface: 'remote', displayName: 'fixture' },
+      });
+      const operation = findOperationByName('source_index_search')!;
+      const result = await operation.handler(context, { query: 'orchard' });
+      expect(result).toMatchObject({
+        audit: { searched_corpora: [internalId], queries_attempted: 1, items_returned: 1 },
+        hits: [{ selected_item: { corpus_id: internalId, provider_item_id: 'plan' } }],
+      });
+      expect(await operation.handler(context, { query: 'orchard', corpus_id: internalId })).toMatchObject({
+        audit: { queries_attempted: 1, items_returned: 1 },
+        hits: [{ selected_item: { corpus_id: internalId, provider_item_id: 'plan' } }],
+      });
+      expect(reads).not.toContain(secureId);
+    } finally {
+      internal.close();
+      secure.close();
+      ledger.close();
     }
   });
 

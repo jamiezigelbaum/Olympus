@@ -8,7 +8,7 @@ import { assertNoRawEmailFields } from './email-policy.ts';
 import { fetchWithTimeout, isAbortError } from './http-timeout.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { operationCallerToWire, type OperationCaller } from './operation-caller.ts';
-import { canonicalSourceCorpusId, createSourceCorpusRegistry } from './source-corpus-registry.ts';
+import { canonicalSourceCorpusId, createPublicSourceCorpusRegistry, createSourceCorpusRegistry, type SourceCorpusConfig } from './source-corpus-registry.ts';
 import type { SourceTrustDomain } from './source-index/types.ts';
 import {
   sourceWatchAuthenticatedRouteHeaders,
@@ -836,7 +836,7 @@ export class EmailClient {
     return result;
   }
 
-  private async requestSourceIndexSearch(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async requestSourceIndexSearch(body: Record<string, unknown>, searchCorpora: readonly SourceCorpusConfig[]): Promise<Record<string, unknown>> {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError(
         'source_index_not_enabled',
@@ -856,7 +856,7 @@ export class EmailClient {
     const data = asRecord(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, tier_corpus_ids: searchCorpora.map(corpus => corpus.corpusId) }),
     }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
@@ -868,6 +868,7 @@ export class EmailClient {
     audience: 'calling_model' | 'private_answer' = 'calling_model',
   ): Promise<SourceIndexSearchResult> {
     const corpusId = canonicalSourceCorpusId(options.corpusId);
+    const searchCorpora = createSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list('search');
     const data = await this.requestSourceIndexSearch({
       query: options.query,
       corpus_id: corpusId,
@@ -893,9 +894,9 @@ export class EmailClient {
       ...(options.maxResults !== undefined ? { max_results: options.maxResults } : {}),
       ...(options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {}),
       ...(options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}),
-    });
+    }, searchCorpora);
     return parseSourceIndexSearchResult(data, {
-      config: this.config,
+      searchCorpora,
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true,
     });
@@ -905,6 +906,7 @@ export class EmailClient {
   async sourceIndexSearchMany(corpusIds: string[], options: Pick<SourceIndexSearchOptions,
     'query' | 'retrievalMode' | 'maxResults' | 'includeLocators'>): Promise<SourceIndexSearchResult[]> {
     if (!corpusIds.length) throw new OperationError('invalid_params', 'No source is configured for search.');
+    const searchCorpora = createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list('search');
     const response = await this.requestSourceIndexSearch({
       query: options.query,
       corpus_ids: corpusIds,
@@ -912,12 +914,12 @@ export class EmailClient {
       retrieval_mode: options.retrievalMode,
       max_results: options.maxResults,
       include_locators: options.includeLocators,
-    });
+    }, searchCorpora);
     if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
       throw new OperationError('email_error', 'The worker did not return a search result for each requested source.');
     }
     return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord(value), {
-      config: this.config,
+      searchCorpora,
       requestedCorpusId: corpusIds[index]!,
       includeLocators: options.includeLocators === true,
     })]);
@@ -1525,7 +1527,7 @@ function parseSourceIndexStatusResult(value: Record<string, unknown>): SourceInd
 }
 
 function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
-  config: OlympusConfig;
+  searchCorpora: readonly SourceCorpusConfig[];
   requestedCorpusId: string;
   includeLocators: boolean;
 }): SourceIndexSearchResult {
@@ -1539,8 +1541,7 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
   if (corpusId !== context.requestedCorpusId) {
     throw new OperationError('email_error', 'source index search returned a different corpus than requested.');
   }
-  const searchCorpora = createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list('search');
-  const corpus = searchCorpora.find((entry) => entry.corpusId === corpusId);
+  const corpus = context.searchCorpora.find((entry) => entry.corpusId === corpusId);
   if (!corpus) {
     throw new OperationError('email_error', 'source index search returned an unsupported corpus.');
   }
@@ -1551,10 +1552,10 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
   const tierCorpora = Array.isArray(auditRecord.searched_corpora)
     ? auditRecord.searched_corpora.map((searchedId) => {
       const entry = typeof searchedId === 'string'
-        ? createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list().find((candidate) => candidate.corpusId === searchedId)
+        ? context.searchCorpora.find((candidate) => candidate.corpusId === searchedId)
         : undefined;
       if (!entry || entry.sourceId !== corpus.sourceId) {
-        throw new OperationError('email_error', 'source index search reported a corpus outside the requested source.');
+        throw new OperationError('email_error', 'source index search reported a corpus outside the requested searchable corpora.');
       }
       return entry;
     })
@@ -1564,6 +1565,14 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
     : tierCorpora.some((entry) => entry.trustDomain === 'internal') ? 'internal' : corpus.trustDomain;
   if (!Array.isArray(value.hits)) {
     throw new OperationError('email_error', 'source index search hits must be an array.');
+  }
+  for (const hit of value.hits) {
+    const selected = asRecord(hit).selected_item;
+    if (selected === undefined) continue;
+    const hitCorpusId = asRecord(selected).corpus_id;
+    if (!tierCorpora.some(entry => entry.corpusId === hitCorpusId)) {
+      throw new OperationError('email_error', 'source index search returned a hit outside its searched corpora.');
+    }
   }
   const audit = asRecord(value.audit);
   const policy = asRecord(value.policy);
