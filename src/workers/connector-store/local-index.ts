@@ -6410,49 +6410,77 @@ export class LocalConnectorStore {
   childrenWithWithheldSearchIdentifiers(identities: readonly ChildProbe[], includePrivateNames: boolean): Set<string> {
     const links = this.parentLinksOf(identities);
     const withheld = new Set<string>();
+    // A local link and an encoded provider id are independent evidence of ancestry.
+    // Check both, including on intermediate rows whose stored link is missing.
+    type Parent = ParentRef | ChildProbe;
+    const lookupKey = (parent: Parent) => 'parentLocalItemId' in parent
+      ? `local:${parentKey(parent)}` : `provider:${tierLedgerIdentityKey(parent)}`;
+    let pending = new Map<string, { parent: Parent; children: Set<string> }>();
+    const queue = (parent: Parent | undefined, children: Iterable<string>) => {
+      if (!parent) return;
+      const key = lookupKey(parent);
+      const entry = pending.get(key) ?? { parent, children: new Set<string>() };
+      for (const child of children) entry.children.add(child);
+      pending.set(key, entry);
+    };
     for (const identity of identities) {
-      const key = tierLedgerIdentityKey(identity);
-      if (!links.has(key) && parentIdentityOf(identity)) withheld.add(key);
+      const child = tierLedgerIdentityKey(identity);
+      queue(links.get(child), [child]);
+      queue(parentIdentityOf(identity), [child]);
     }
-    let pending = [...links].map(([child, parent]) => ({ child, parent }));
-    if (pending.length === 0) return withheld;
+    if (!pending.size) return withheld;
     const lane = this.childVisibilityLane();
     const ledger = lane.ledger();
     const stores = childVisibilityStores(lane);
     const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map(store => store.corpusId)) }] : [];
-    for (let depth = 0; pending.length > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
-      const refs = [...new Map(pending.map(({ parent }) => [parentKey(parent), parent])).values()];
-      const rows = stores.flatMap(store => store.parentStandings(refs)
-        .filter(row => row.active)
-        .map(row => ({ ...row, corpusId: store.corpusId })));
+    for (let depth = 0; pending.size > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
+      const linked: ParentRef[] = [];
+      const encoded: ChildProbe[] = [];
+      for (const { parent } of pending.values()) {
+        if ('parentLocalItemId' in parent) linked.push(parent);
+        else encoded.push(parent);
+      }
+      const rows = stores.flatMap(store => [
+        ...store.parentStandings(linked).map(row => ({ ...row, key: lookupKey(row) })),
+        ...Array.from(store.itemStandings(encoded).values(), row => ({ ...row, key: lookupKey(row.identity) })),
+      ].filter(row => row.active).map(row => ({ ...row, corpusId: store.corpusId })));
       const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map(row => ({
         ...row.identity, corpusId: row.corpusId, privateAtAnswer: false, layer: 'names' as const,
       }))));
       const allowed = new Map<string, typeof rows[number]>();
       const denied = new Set<string>();
       rows.forEach((row, index) => {
-        const key = parentKey(row);
+        const key = row.key;
         const verdict = verdicts[index]!;
         const canRelease = !row.secret && !verdict.gone && !verdict.pendingDeletion
           && (verdict.tier === 'public_or_personal'
           || (verdict.tier === 'private' && includePrivateNames)
           || (verdict.tier === 'legacy' && (row.legacyPrivateNames === false || includePrivateNames)));
         const previous = allowed.get(key);
-        if (!canRelease || (previous && previous.grandparentLocalItemId !== row.grandparentLocalItemId)) {
+        if (!canRelease || (previous && (previous.grandparentLocalItemId !== row.grandparentLocalItemId
+          || tierLedgerIdentityKey(previous.identity) !== tierLedgerIdentityKey(row.identity)))) {
           denied.add(key);
         } else {
           allowed.set(key, row);
         }
       });
-      pending = pending.flatMap(({ child, parent }) => {
-        const key = parentKey(parent);
+      const level = pending;
+      pending = new Map();
+      for (const [key, { children }] of level) {
         const row = denied.has(key) ? undefined : allowed.get(key);
-        if (!row) withheld.add(child);
-        if (!row?.grandparentLocalItemId) return [];
-        return [{ child, parent: { provider: row.provider, accountScope: row.accountScope, parentLocalItemId: row.grandparentLocalItemId } }];
-      });
+        if (!row) {
+          for (const child of children) withheld.add(child);
+          continue;
+        }
+        if (row.grandparentLocalItemId) {
+          queue({ provider: row.provider, accountScope: row.accountScope, parentLocalItemId: row.grandparentLocalItemId }, children);
+        }
+        queue(parentIdentityOf(row.identity), children);
+      }
     }
-    for (const { child } of pending) withheld.add(child);
+    for (const { children } of pending.values()) {
+      for (const child of children) withheld.add(child);
+    }
     return withheld;
   }
 
@@ -6668,6 +6696,7 @@ export class LocalConnectorStore {
           },
           active: row.tombstoned === 0,
           secret: row.trust_tier === 'S5',
+          legacyPrivateNames: isSecureSensitivity({ trustDomain: this.trustDomain, trustTier: trustTierFromRow(row.trust_tier) }),
           ...(row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}),
         });
       }

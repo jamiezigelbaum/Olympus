@@ -297,6 +297,7 @@ describe('source_index_search and rows Private by their own tier', () => {
       const reads = [
         spyOn(secure, 'parentLinksOf'), spyOn(secure, 'parentLinksOfOffThread'),
         spyOn(secure, 'parentStandings'), spyOn(secure, 'parentStandingsOffThread'),
+        spyOn(secure, 'itemStandings'), spyOn(secure, 'itemStandingsOffThread'),
       ];
       const result = await find();
       expect(result.audit.skipped_corpora).toEqual([SECURE]);
@@ -381,6 +382,40 @@ describe('source_index_search and rows Private by their own tier', () => {
       internal.close();
       ledger?.close();
     }
+  });
+
+  test('a linked Personal child withholds its id when its parent embeds an unlinked Private grandparent', async () => {
+    const grandparentId = 'private-contract-marker';
+    const parentId = `${grandparentId}#child:folder`;
+    const internal = await store(INTERNAL, 'internal', [
+      { id: grandparentId, name: 'contract', text: 'Restricted figures', tier: 'S4' },
+      { id: parentId, name: 'folder', text: 'Attachments', tier: 'S3' },
+      { id: `${parentId}#child:notes`, parentId, name: 'pruning notes', text: 'orchard', tier: 'S3' },
+    ]);
+    try {
+      const worker = createEmailSourceWorker({ connectorStores: [internal] });
+      const result = await search(worker, { query: 'orchard', corpus_id: INTERNAL, personal_names_only: true });
+      expect(result.hits).toMatchObject([{ provenance: { citation: { title: 'pruning notes' } } }]);
+      expect(result.hits[0]).not.toHaveProperty('selected_item');
+      expect(JSON.stringify(result)).not.toContain(grandparentId);
+    } finally { internal.close(); }
+  });
+
+  test('an unlinked child keeps its identifiers when its encoded parent has Personal names', async () => {
+    const parentId = 'garden-plan';
+    const childId = `${parentId}#child:notes`;
+    const internal = await store(INTERNAL, 'internal', [
+      { id: parentId, name: 'plan', text: 'Garden layout', tier: 'S3' },
+      { id: childId, name: 'pruning notes', text: 'orchard', tier: 'S3' },
+    ]);
+    try {
+      const worker = createEmailSourceWorker({ connectorStores: [internal] });
+      const result = await search(worker, { query: 'orchard', corpus_id: INTERNAL, personal_names_only: true });
+      expect(result.hits).toMatchObject([{
+        sourceItem: { providerItemId: childId, localItemId: `${ACCOUNT}:${childId}` },
+        selected_item: { provider_item_id: childId },
+      }]);
+    } finally { internal.close(); }
   });
 
   test('a withheld top-ranked hit leaves room for the next eligible match', async () => {
