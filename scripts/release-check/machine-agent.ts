@@ -1902,7 +1902,9 @@ async function askDuringStartup(workerFetch: Platform['workerFetch'], bearer: ()
     const completed = response.status === 200 && body?.ok === true && body.status === 'answered';
     // The engine's start-up wording (STARTUP_SEARCH_GAP, the waiting line) or its startup progress field.
     const saidStarting = /still starting/i.test(text) || (body && typeof body === 'object' && 'startup' in body);
-    return { status: response.status, ms, saidStarting: Boolean(saidStarting), completed };
+    // What a 200 that is not an answer said (mac-upgrade 44892444143: 200 in 59 ms, not answered, status not kept).
+    const answer = typeof body?.status === 'string' ? body.status.slice(0, 40) : undefined;
+    return { status: response.status, ms, saidStarting: Boolean(saidStarting), completed, ...(!completed && answer ? { answer } : {}) };
   } catch (error) {
     return { status: null, ms: Math.round(performance.now() - started), saidStarting: false, completed: false, error: String(error).slice(0, 200) };
   }

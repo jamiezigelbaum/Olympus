@@ -145,7 +145,7 @@ type WatchEntry = Sample | { pageSample: PageSample } | { startupStarted: number
   | { qualifyStarted: number } | { plannedRestart: { start: number; end: number } } | { startupAsk: StartupAsk } | { watchEnded: number; stopped: boolean } | { owner_session_minted: boolean } | { owner: Owner } | { owner_session_after_ready_status: number | null };
 
 /** An Ask accepted during start-up: judged only on saying it is still starting and completing by itself; its time is reported. */
-export interface StartupAsk { status: number | null; ms: number; saidStarting: boolean; completed: boolean; error?: string }
+export interface StartupAsk { status: number | null; ms: number; saidStarting: boolean; completed: boolean; error?: string; answer?: string }
 
 /** A start-up shorter than this ends before an Ask sent in it is accepted, so the Ask cannot see it. */
 const STARTUP_ASK_MIN_MS = 1_000;
@@ -160,7 +160,7 @@ export function startupAskCheck(ask: StartupAsk | undefined, startup?: { started
     return { id, title, status: 'skip', ms: ask.ms, detail: `start-up took ${startupMs} ms, too short for an Ask to land in it; the Ask completed on the ready engine · ${ask.ms} ms` };
   }
   const ok = ask.completed && ask.saidStarting;
-  const why = !ask.completed ? (ask.status === null ? `lost or cancelled (${ask.error ?? 'no response'})` : `cancelled (HTTP ${ask.status})`) : !ask.saidStarting ? 'silent: the answer never said Olympus was still starting' : 'completed and said it was still starting';
+  const why = !ask.completed ? (ask.status === null ? `lost or cancelled (${ask.error ?? 'no response'})` : `cancelled (HTTP ${ask.status}${ask.answer ? `, ${ask.answer}` : ''})`) : !ask.saidStarting ? 'silent: the answer never said Olympus was still starting' : 'completed and said it was still starting';
   return { id, title, status: ok ? 'pass' : 'fail', ms: ask.ms, detail: `${why} · ${ask.ms} ms` };
 }
 
