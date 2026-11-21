@@ -250394,7 +250394,7 @@ class TierSnifferService {
   preempt(reason = "model") {
     if (this.dispatch.protected)
       return;
-    if ((reason === "question" || this.options.lane.kind !== "local") && this.options.ownerAskTurn?.() === "share")
+    if ((reason === "question" || this.options.lane?.kind !== "local") && this.options.ownerAskTurn?.() === "share")
       return;
     this.fairTurn = false;
     this.yieldingSinceMs = undefined;
@@ -250998,7 +250998,7 @@ class TierSnifferService {
     const turn = this.options.ownerAskTurn?.();
     if (this.yieldNow(turn))
       return false;
-    const protect = this.arrivalTurn || turn === "share" && this.options.lane.kind === "local";
+    const protect = this.arrivalTurn || turn === "share" && this.options.lane?.kind === "local";
     if (protect && dispatch.inFlight > 0)
       return false;
     dispatch.inFlight++;

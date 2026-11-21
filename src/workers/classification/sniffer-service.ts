@@ -787,7 +787,7 @@ export class TierSnifferService {
     if (this.dispatch.protected) return;
     // A question announcement alone can leave the share running. A request
     // for the shared model can interrupt even preparation for the next call.
-    if ((reason === 'question' || this.options.lane.kind !== 'local') && this.options.ownerAskTurn?.() === 'share') return;
+    if ((reason === 'question' || this.options.lane?.kind !== 'local') && this.options.ownerAskTurn?.() === 'share') return;
     this.fairTurn = false;
     this.yieldingSinceMs = undefined;
     this.abort?.abort();
@@ -1458,7 +1458,7 @@ export class TierSnifferService {
     if (dispatch.protected) return false;
     const turn = this.options.ownerAskTurn?.();
     if (this.yieldNow(turn)) return false;
-    const protect = this.arrivalTurn || (turn === 'share' && this.options.lane.kind === 'local');
+    const protect = this.arrivalTurn || (turn === 'share' && this.options.lane?.kind === 'local');
     if (protect && dispatch.inFlight > 0) return false;
     dispatch.inFlight++;
     if (protect) dispatch.protected = true;
