@@ -334,8 +334,25 @@ export async function watchCutover(workDir: string, dataDir: string, seconds: nu
   writeFileSync(join(workDir, CUTOVER_DONE), '');
 }
 
+/**
+ * The worker's own planned restarts in its log: each "is restarting, as it asked to" up to the next "worker is ready".
+ * The worker asks for one when credentials change (unpairing exits 75 to reload them), so like the leg's own
+ * `olympus engine restart` it is start-up again, not a freeze after READY (linux 44862072978: 1,316 ms across one).
+ */
+export function selfRestarts(engineLog: string): PlannedRestart[] {
+  const restarts: PlannedRestart[] = [];
+  let start: number | undefined;
+  for (const line of engineLog.split('\n')) {
+    const at = Date.parse(line.slice(0, 24));
+    if (!Number.isFinite(at)) continue;
+    if (line.includes('Olympus worker is restarting, as it asked to')) start ??= at;
+    else if (start !== undefined && line.includes('Olympus worker is ready')) { restarts.push({ start, end: at }); start = undefined; }
+  }
+  return restarts;
+}
+
 /** Summarize the evidence in sampling order, even if the watcher stopped before it could finish. */
-export async function cutoverReport(workDir: string): Promise<CutoverSummary | undefined> {
+export async function cutoverReport(workDir: string, engineLogPaths: readonly string[] = []): Promise<CutoverSummary | undefined> {
   const log = join(workDir, CUTOVER_LOG);
   if (!existsSync(log)) return undefined;
   const done = join(workDir, CUTOVER_DONE);
@@ -343,10 +360,11 @@ export async function cutoverReport(workDir: string): Promise<CutoverSummary | u
     const deadline = performance.now() + PAGE_BOUND_MS + 2 * SAMPLE_MS;
     while (!existsSync(done) && performance.now() < deadline) await sleep(SAMPLE_MS);
   }
-  return summarizeCutover(readFileSync(log, 'utf8'));
+  const restarts = engineLogPaths.filter(path => existsSync(path)).flatMap(path => selfRestarts(readFileSync(path, 'utf8')));
+  return summarizeCutover(readFileSync(log, 'utf8'), restarts);
 }
 
-export function summarizeCutover(log: string): CutoverSummary {
+export function summarizeCutover(log: string, selfRestartWindows: readonly PlannedRestart[] = []): CutoverSummary {
   const summary: CutoverSummary = {
     old_engine_down_at: null, new_engine_ready_at: null, boot_to_ready_ms: null,
     wals: [], largest_wal: null, owner_session_minted: null, owner_session_after_ready_status: null, owner: null,
@@ -358,7 +376,7 @@ export function summarizeCutover(log: string): CutoverSummary {
   const pageSamples: PageSample[] = [];
   let startupStarted: number | undefined, startupEnded: number | undefined, qualifyStarted: number | undefined, watchEnded: number | undefined;
   let stopped = false;
-  const plannedRestarts: PlannedRestart[] = [];
+  const plannedRestarts: PlannedRestart[] = [...selfRestartWindows];
   for (const line of log.split('\n').slice(0, -1)) {
     const entry = JSON.parse(line) as WatchEntry;
     if ('pageSample' in entry) { pageSamples.push(entry.pageSample); continue; }

@@ -3019,7 +3019,7 @@ async function main(): Promise<void> {
       emit({ ok: true });
     }
     case 'cutover-report': {
-      const summary = await cutoverReport(WORKDIR);
+      const summary = await cutoverReport(WORKDIR, platform().engineLogPaths.slice(0, 2));
       emit({ ok: summary !== undefined, summary });
     }
     case 'qualify-private': return await qualifyPrivacyCommand();
