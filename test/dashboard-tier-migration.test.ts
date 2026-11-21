@@ -5,6 +5,11 @@
 
 import { describe, expect, test } from 'bun:test';
 import { DASHBOARD_PREVIEW_NOW, buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
+import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
+import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
+import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
+import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 
 describe('dashboard tier counts and migration state', () => {
   test('the view model sums a source\'s tier facts and names the migration only where it applies', () => {
@@ -29,4 +34,27 @@ describe('dashboard tier counts and migration state', () => {
     expect(readwise.tier_classification).toBeUndefined();
   });
 
+  test('shows progress judging items held from earlier builds on the dashboard', async () => {
+    const progress = { held: 12, judged: 7, waiting: 3 };
+    const status = createSourceIndexStatusHandler({
+      corpusDefinitions: [],
+      tierClassification: () => ({
+        checking_items: 5,
+        remaining_questions: 5,
+        summary: 'Checking five items.',
+        awaiting_owner_approval: false,
+        legacy_personal_bodies: progress,
+      }),
+    });
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: await status.status(),
+      sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig()),
+      now: DASHBOARD_PREVIEW_NOW,
+    });
+    expect(view.background_work?.legacy_personal_bodies).toEqual(progress);
+    const dashboard = buildChatGptDashboardViewModel(view, {
+      now: DASHBOARD_PREVIEW_NOW, privacy: { configured: true, pendingCount: 5, ruleCount: 0 },
+    });
+    expect(copyDashboardViewModel(dashboard).privacy?.legacyPersonalBodies).toEqual(progress);
+  });
 });

@@ -643,6 +643,18 @@ describe('the release manifest, revalidated against current tiers and rules', ()
       .toBe('answered');
   });
 
+  test('delayed output withholds an unrouted Private input even with approval for Private derivatives', () => {
+    const check: ReleaseCheck = {
+      inputs: inputs => inputs.map(() => ({ tier: 'private', gone: false, unroutedPrivate: true })),
+      secureDerivativeDefault: () => 'allow',
+    };
+    const answer = leakyAnswer([leakyEvidence('garden')], 'The gate code is in the notebook.');
+    expect(remoteOperationOutput('source_answer_result', answer, {
+      releaseCheck: check,
+      releaseManifests: [manifest([input('garden', { privateAtAnswer: true })], { includeSecureLocalContent: true })],
+    })).toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_WITHHELD, citations: [] });
+  });
+
   test('a parent label\'s names input is a dependency of the answer, never a cited item', async () => {
     const { fixture, check } = await routed();
     // The label names `orchard`'s names; the answer cites `garden`, which is what its text came from.

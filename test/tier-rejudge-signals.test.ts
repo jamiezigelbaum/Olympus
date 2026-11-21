@@ -3,6 +3,8 @@ import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { SecretLocationsIndex, secretLocationsPathForStore } from '../src/workers/classification/secret-locations.ts';
+import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { SNIFFER_PROMPT_VERSION, snifferCacheModelId, snifferId, CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
@@ -12,7 +14,7 @@ import { classifyItemTiers, tierSnifferInputHash, type TierSnifferRequest } from
 import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets, settleLegacySecrets } from '../src/workers/connector-store/tier-rejudge.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { storedSignals } from '../src/workers/connector-store/stored-names.ts';
-import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openLegStore, openTierFixture, storePaths, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0)) close(); });
@@ -237,17 +239,25 @@ for (const locator of [
 });
 
 
+/** The legacy resolver serves standalone stores that have no tier set. */
+function openLegacyResolverFixture() {
+  const tmp = tempDir();
+  const paths = storePaths(tmp.dir);
+  const ledger = new TierLedger({ dbPath: tierLedgerPathForStore(paths.internal) });
+  const store = openLegStore(paths, 'internal', ledger);
+  const secrets = new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(store.dbPath) });
+  cleanup.push(() => { secrets.close(); store.close(); ledger.close(); tmp.cleanup(); });
+  return { dir: tmp.dir, ledger, store, secrets };
+}
+
 for (const locator of ['https://example.test/notes', 'https://example.test/?%61ccess%5F%74oken=synthetic-credential'])
   test('a legacy secret refusal removes the stored copy and records a safe location', async () => {
-    const tmp = tempDir();
-    const f = openTierFixture(tmp.dir, { embed: false });
-    cleanup.push(() => { f.close(); tmp.cleanup(); });
-    const store = f.stores.internal!;
+    const f = openLegacyResolverFixture();
+    const { store } = f;
     await store.syncFromConnector(fixtureConnector(() => [{ id: 'record', name: 'Orchard notes', text }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-    store.bindTierSet(f.ledger);
     expect(f.ledger.getCurrent(identity)?.routed).toBe(false);
     expect(store.searchItems('Orchard', 10)).toHaveLength(1);
-    const db = new Database(f.paths.internal);
+    const db = new Database(store.dbPath);
     db.query('UPDATE items SET locator_uri = ?').run(locator); db.close();
     const pending = classifyItemTiers({ signals: { title: 'Orchard notes' }, text, subject: identity },
       { sniffer: { id: 'pending', judge() { return { verdict: 'undecided' }; } } });
@@ -258,7 +268,7 @@ for (const locator of ['https://example.test/notes', 'https://example.test/?%61c
     let calls = 0;
     const service = new TierSnifferService({ installed, lane: BUILT_IN_SNIFFER_LANE,
       model: { async complete() { calls++; throw new Error('must not dispatch'); } },
-      stores: () => [store], classificationLedgerPath: join(tmp.dir, 'classification.jsonl'), autoApproveBuiltIn: true });
+      stores: () => [store], classificationLedgerPath: join(f.dir, 'classification.jsonl'), autoApproveBuiltIn: true });
     try {
       expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { secretRefused: 1 } });
       expect(store.searchItems('Orchard', 10)).toEqual([]);
@@ -352,10 +362,8 @@ test(`routed secret cleanup retries after ${failure} and service restart`, async
 
 for (const scenario of ['secret', 'clean', 'unreadable', 'missing', 'cached-secret', 'cleanup-interrupted', 'changed-during-model'] as const)
 test(`legacy full-body screening before resolving a clean excerpt: ${scenario}`, async () => {
-  const tmp = tempDir();
-  const f = openTierFixture(tmp.dir, { embed: false });
-  cleanup.push(() => { f.close(); tmp.cleanup(); });
-  const store = f.stores.internal!;
+  const f = openLegacyResolverFixture();
+  const { store } = f;
   const body = `${'Ordinary orchard notes. '.repeat(400)}\n${scenario.includes('secret') || scenario === 'cleanup-interrupted'
     ? ['postgres://alice:', 'q7', '@db.internal/app'].join('') : 'Prune the apple trees in winter.'}`;
   // Land under the pre-upgrade screen, then restore the actual persisted body.
@@ -364,7 +372,6 @@ test(`legacy full-body screening before resolving a clean excerpt: ${scenario}`,
   const original = store.exportItemCopy(identity)!;
   store.importItemCopy({ ...original, chunks: original.chunks.map(chunk => ({ ...chunk, boundedText: body })) },
     { trustTier: 'S3', syncConnectorId: 'legacy-fixture' });
-  store.bindTierSet(f.ledger);
   const pending = classifyItemTiers({ signals: { title: 'Orchard notes' }, text, subject: identity },
     { sniffer: { id: 'old-prompt', judge() { return { verdict: 'undecided' }; } } });
   f.ledger.recordDecision(identity, { ...pending, engineVersion: '2026-10-01.p3' });
@@ -391,7 +398,7 @@ test(`legacy full-body screening before resolving a clean excerpt: ${scenario}`,
       return { modelId: BUILT_IN_SNIFFER_LANE.modelId, text: JSON.stringify({ verdicts: [
       { i: 1, tier: 'personal', category: 'ordinary', ownRecord: false, privateKind: 'none', confidence: 1 },
     ] }) }; } },
-    stores: () => [store], classificationLedgerPath: join(tmp.dir, 'classification.jsonl'), autoApproveBuiltIn: true });
+    stores: () => [store], classificationLedgerPath: join(f.dir, 'classification.jsonl'), autoApproveBuiltIn: true });
   try {
     const result = await service.runOnce();
     if (scenario === 'unreadable' || scenario === 'missing') {

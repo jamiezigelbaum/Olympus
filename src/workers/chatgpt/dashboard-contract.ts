@@ -362,6 +362,8 @@ export interface DashboardViewModelV1 {
      * on Home, never Needs you.
      */
     judgePerMinute?: number;
+    /** Cumulative earlier-build body holds and completed privacy checks. */
+    legacyPersonalBodies?: { held: number; judged: number; waiting?: number };
   };
   /**
    * Contract v1 addition (2026-10-10, remote mode): present only when the

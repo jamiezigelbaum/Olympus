@@ -1,28 +1,100 @@
+import { signalText, signalTexts } from './classification-signals.ts';
+import type { RawItem, SourceConnector } from './contracts.ts';
+
 /** The classification label capabilities of connectors and archive formats. */
 interface ConnectorLabelCapability {
   readonly provider: string;
+  /** Where the mover gets current label membership for this item. */
+  readonly proof: 'stored' | 'provider_walk';
+  /** Live tag membership can change independently of the stored item's names. */
+  readonly mutable?: true;
+  /** Older note imports capped the number and length of their tags. */
+  readonly legacyTagLimits?: true;
   /** Absent when the connector computes labels from its provider context. */
   readonly metadataKey?: string;
 }
 
 export const NOTE_TAGS_METADATA_KEY = 'tags';
-export const GMAIL_LABEL_CAPABILITY = { provider: 'gmail', metadataKey: 'labels' } as const;
-export const MBOX_LABEL_CAPABILITY = { provider: 'mbox', metadataKey: 'labels' } as const;
-export const EVERNOTE_LABEL_CAPABILITY = { provider: 'evernote', metadataKey: NOTE_TAGS_METADATA_KEY } as const;
-export const READWISE_LABEL_CAPABILITY = { provider: 'readwise', metadataKey: NOTE_TAGS_METADATA_KEY } as const;
-export const REFLECT_LABEL_CAPABILITY = { provider: 'reflect', metadataKey: NOTE_TAGS_METADATA_KEY } as const;
-export const TELEGRAM_LABEL_CAPABILITY = { provider: 'telegram' } as const;
+export const GMAIL_LABEL_CAPABILITY = { provider: 'gmail', proof: 'provider_walk', metadataKey: 'labels' } as const;
+export const MBOX_LABEL_CAPABILITY = { provider: 'mbox', proof: 'stored', metadataKey: 'labels' } as const;
+export const EVERNOTE_LABEL_CAPABILITY = { provider: 'evernote', proof: 'stored', mutable: true, legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY } as const;
+export const READWISE_LABEL_CAPABILITY = { provider: 'readwise', proof: 'stored', mutable: true, metadataKey: NOTE_TAGS_METADATA_KEY } as const;
+export const REFLECT_LABEL_CAPABILITY = { provider: 'reflect', proof: 'stored', legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY } as const;
+export const TELEGRAM_LABEL_CAPABILITY = { provider: 'telegram', proof: 'stored' } as const;
 
-const capabilities: readonly ConnectorLabelCapability[] = [
+const capabilities = [
   GMAIL_LABEL_CAPABILITY,
   MBOX_LABEL_CAPABILITY,
   EVERNOTE_LABEL_CAPABILITY,
   READWISE_LABEL_CAPABILITY,
   REFLECT_LABEL_CAPABILITY,
   TELEGRAM_LABEL_CAPABILITY,
-];
-const byProvider = new Map(capabilities.map(capability => [capability.provider, capability]));
+] as const satisfies readonly ConnectorLabelCapability[];
+
+export const storedLabelProviders = capabilities.filter(capability => capability.proof === 'stored').map(capability => capability.provider);
+
+export const legacyCappedTagProviders = capabilities.filter(capability => 'legacyTagLimits' in capability).map(capability => capability.provider);
+
+export type LabelProofByProvider = {
+  [Capability in (typeof capabilities)[number] as Capability['provider']]: Capability['proof'];
+};
+
+const byProvider = new Map<string, ConnectorLabelCapability>(capabilities.map(capability => [capability.provider, capability]));
 
 export function connectorLabelCapability(provider: string): ConnectorLabelCapability | undefined {
   return byProvider.get(provider);
+}
+
+/**
+ * The names in an item's search context that are neither its chat nor its
+ * sender: who a forward came from, and the names of its attachments. They
+ * reach search and embedding input, so they are judged as the item's names.
+ */
+export function telegramContextNames({ metadata }: Pick<RawItem, 'metadata'>): string[] {
+  const names: string[] = [];
+  const forwardedFrom = signalText(metadata, 'forwardedFrom');
+  if (forwardedFrom) names.push(`Forwarded from ${forwardedFrom}`);
+  const attachmentNames = metadata['attachmentNames'];
+  if (Array.isArray(attachmentNames)) {
+    for (const name of attachmentNames) {
+      if (typeof name === 'string' && name.trim() && !names.includes(name.trim())) names.push(name.trim());
+    }
+  }
+  return names;
+}
+
+/** The same provider fields are read on listing and on recovery of retained names. */
+export function providerMetadataLabels(provider: string, metadata: RawItem['metadata']): readonly string[] | undefined {
+  const capability = connectorLabelCapability(provider);
+  if (capability?.proof !== 'stored') return undefined;
+  if (capability.metadataKey) {
+    const values = metadata[capability.metadataKey];
+    if (!Array.isArray(values)) return undefined;
+    if (capability === MBOX_LABEL_CAPABILITY) return values.filter((entry): entry is string => typeof entry === 'string');
+    return signalTexts(metadata, capability.metadataKey);
+  }
+  if (!Array.isArray(metadata.attachmentNames) && typeof metadata.forwardedFrom !== 'string') return undefined;
+  return telegramContextNames({ metadata });
+}
+
+export function encodeLabelObservation(provider: string, labels: readonly string[]): string {
+  const values = [...new Set(labels.map(label => label.trim().toLowerCase()))].sort();
+  // Older note writers capped tags before case folding. Even a short legacy
+  // array can therefore be a prefix of the actual membership.
+  return JSON.stringify(connectorLabelCapability(provider)?.legacyTagLimits ? { labels: values } : values);
+}
+
+export function observedLabelValues(provider: string, raw: string): string[] | undefined {
+  const value = JSON.parse(raw);
+  if (Array.isArray(value) && value.length && connectorLabelCapability(provider)?.legacyTagLimits) return undefined;
+  const labels: unknown = Array.isArray(value) ? value : value?.labels;
+  return Array.isArray(labels) && labels.every(label => typeof label === 'string') ? labels : undefined;
+}
+
+/** Capture the exact listed signals, including labels computed from item context. */
+export function listedLabelObservation(connector: Pick<SourceConnector, 'classificationSignals'>, item: RawItem): string | undefined {
+  const capability = connectorLabelCapability(item.identity.provider);
+  if (capability?.proof !== 'stored') return undefined;
+  if (item.content.kind === 'metadata_only' && providerMetadataLabels(item.identity.provider, item.metadata) === undefined) return 'null';
+  return encodeLabelObservation(item.identity.provider, connector.classificationSignals(item).labels ?? []);
 }

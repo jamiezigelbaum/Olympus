@@ -25,8 +25,6 @@ import { NOTE_TAGS_METADATA_KEY } from '../../../core/source-connector-labels.ts
 
 /** One record of a JSON export is read whole up to this size; a bigger one is reported and passed over. */
 export const NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
-const MAX_TAGS = 100;
-const MAX_TAG_CHARS = 200;
 const MAX_TITLE_CHARS = 500;
 
 /** The kinds of finding a notes archive reports, beside the ones every format can (ARCHIVE_COMMON_FINDINGS). */
@@ -150,16 +148,15 @@ export function latestIso(...times: ReadonlyArray<string | undefined>): string |
   return known.length === 0 ? undefined : known.reduce((a, b) => (a >= b ? a : b));
 }
 
-/** Tags as a short, de-duplicated list of text. */
+/** Tags as a complete, de-duplicated list of text. */
 export function cleanTags(tags: Iterable<string>): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const tag of tags) {
-    const text = tag.trim().replace(/^#+/, '').trim().slice(0, MAX_TAG_CHARS);
+    const text = tag.trim().replace(/^#+/, '').trim();
     if (text === '' || seen.has(text)) continue;
     seen.add(text);
     out.push(text);
-    if (out.length >= MAX_TAGS) break;
   }
   return out;
 }

@@ -158,6 +158,10 @@ describe('the boot migration, in a real worker', () => {
     const env = freshHome();
     const paths = await seedLegacyDropbox(env);
     const itemsBefore = { internal: snapshotStore(paths.internal).items.length, secure_local: snapshotStore(paths.secure_local).items.length };
+    // The migration keeps every row it found. (The worker may add rows of its own after it listens:
+    // a legacy Personal body without a judge verdict is held in Private until judged.)
+    const idsBefore = Object.fromEntries((['internal', 'secure_local'] as const).map((tier) => [tier,
+      snapshotStore(paths[tier]).items.map((row) => String((row as Record<string, unknown>)['local_item_id']))])) as Record<'internal' | 'secure_local', string[]>;
     const inodes = Object.fromEntries(Object.entries(paths).map(([tier, path]) => [tier, lstatSync(path).ino]));
     expect(itemsBefore.internal).toBeGreaterThan(0);
     expect(itemsBefore.secure_local).toBeGreaterThan(0);
@@ -178,7 +182,7 @@ describe('the boot migration, in a real worker', () => {
     for (const tier of ['internal', 'secure_local'] as const) {
       const moved = join(folder, 'stores', `${tier}.sqlite`);
       expect(lstatSync(moved).ino, tier).toBe(inodes[tier]!);
-      expect(snapshotStore(moved).items.length, tier).toBe(itemsBefore[tier]);
+      expect(snapshotStore(moved, idsBefore[tier]).items.length, tier).toBe(itemsBefore[tier]);
     }
     const registry = registryOf(env);
     expect(registry.schema).toBe(2);
@@ -194,7 +198,7 @@ describe('the boot migration, in a real worker', () => {
     }
     expect(atOldPlaces(env)).toEqual([]);
     for (const tier of ['internal', 'secure_local'] as const) {
-      expect(snapshotStore(join(folder, 'stores', `${tier}.sqlite`)).items.length, tier).toBe(itemsBefore[tier]);
+      expect(snapshotStore(join(folder, 'stores', `${tier}.sqlite`), idsBefore[tier]).items.length, tier).toBe(itemsBefore[tier]);
     }
   }, 180_000);
 

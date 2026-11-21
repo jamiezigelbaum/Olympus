@@ -384,6 +384,7 @@ export interface SourceIndexTierClassificationStatus {
   /** Per ledger, each background walk's last run, last result and why it waits (content-free). */
   stored_walks?: Array<{ ledger: string; walkers: Record<string, { lastRanAt: string; lastResult?: string; reason: string }> }>;
   over_private?: import('../classification/tier-over-private.ts').TierOverPrivateStatus;
+  legacy_personal_bodies?: import('../classification/tier-ledger.ts').LegacyPersonalBodyProgress;
 }
 
 /**

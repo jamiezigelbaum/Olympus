@@ -1962,8 +1962,8 @@ function parseSourceCorpusRegistryConfig(rawConfig) {
   if (!root) {
     throw new OperationError("config_error", "sourceIndex corpus registry must be an object.");
   }
-  if (root.schemaVersion !== SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION) {
-    throw new OperationError("config_error", "sourceIndex corpus registry schemaVersion must be 1.");
+  if (root.schemaVersion !== 1 && root.schemaVersion !== SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION) {
+    throw new OperationError("config_error", "sourceIndex corpus registry schemaVersion must be 1 or 2.");
   }
   if (!Array.isArray(root.corpora)) {
     throw new OperationError("config_error", "sourceIndex corpus registry requires a corpora array.");
@@ -1975,6 +1975,10 @@ function parseSourceCorpusRegistryConfig(rawConfig) {
       throw new OperationError("config_error", `Duplicate source-index corpus id "${corpus.corpusId}" in registry.`);
     }
     seen.add(corpus.corpusId);
+    const former = root.schemaVersion === 1 && V1_SEARCH_UPGRADES.get(corpus.corpusId);
+    if (former && former.length === corpus.capabilities.length && former.every((capability) => corpus.capabilities.includes(capability)) && !narrowSourceCorpusToPublic(corpus).violation) {
+      corpus.capabilities.push("search");
+    }
   }
   return { schemaVersion: SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION, corpora };
 }
@@ -2075,7 +2079,7 @@ function requiredEnum(value, allowed, label) {
     return value;
   throw new OperationError("config_error", `${label} must be one of: ${allowed.join(", ")}.`);
 }
-var SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION = 1, READWISE_LIBRARY_CORPUS_ID = "internal.readwise.library", LEGACY_READWISE_LIBRARY_CORPUS_ID = "public_safe.readwise.library", PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.protected.messages", LEGACY_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.messages", SOURCE_CORPUS_CAPABILITIES, DEFAULT_SOURCE_CORPORA, DEFAULT_CAPABILITY_ORDER, PUBLIC_SOURCE_IDS, PUBLIC_CORPUS_DECLARATIONS;
+var SOURCE_CORPUS_REGISTRY_SCHEMA_VERSION = 2, READWISE_LIBRARY_CORPUS_ID = "internal.readwise.library", LEGACY_READWISE_LIBRARY_CORPUS_ID = "public_safe.readwise.library", PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.protected.messages", LEGACY_TELEGRAM_MESSAGES_CORPUS_ID = "secure_local.telegram.messages", SOURCE_CORPUS_CAPABILITIES, DEFAULT_SOURCE_CORPORA, DEFAULT_CAPABILITY_ORDER, V1_SEARCH_UPGRADES, PUBLIC_SOURCE_IDS, PUBLIC_CORPUS_DECLARATIONS;
 var init_source_corpus_registry = __esm(() => {
   init_operation_error();
   init_corpus();
@@ -2164,7 +2168,7 @@ var init_source_corpus_registry = __esm(() => {
       family: "readwise",
       trustDomain: "internal",
       activationMode: "hybrid_primary",
-      capabilities: ["answer", "status", "sync"],
+      capabilities: ["answer", "status", "sync", "search"],
       description: "S1/internal Readwise saved library. The former public-safe corpus id resolves here as an input alias."
     },
     {
@@ -2174,7 +2178,7 @@ var init_source_corpus_registry = __esm(() => {
       family: "readwise",
       trustDomain: "secure_local",
       activationMode: "hybrid_primary",
-      capabilities: ["answer", "status"],
+      capabilities: ["answer", "status", "search"],
       createdOnDemand: true,
       description: "Readwise items raised to Private by per-item four-tier classification (for example a private highlight)."
     },
@@ -2398,6 +2402,10 @@ var init_source_corpus_registry = __esm(() => {
     ],
     promotion_candidates: ["secure_local.dropbox.files", "secure_local.local.files"]
   };
+  V1_SEARCH_UPGRADES = new Map([
+    [READWISE_LIBRARY_CORPUS_ID, ["answer", "status", "sync"]],
+    ["secure_local.readwise.library", ["answer", "status"]]
+  ]);
   PUBLIC_SOURCE_IDS = new Set(V0_4_PUBLIC_SOURCE_IDS);
   PUBLIC_CORPUS_DECLARATIONS = new Map(DEFAULT_SOURCE_CORPORA.map((corpus) => [corpus.corpusId, corpus]));
 });
@@ -8284,16 +8292,25 @@ var TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_FILE_SUFFI
 var init_tier_ledger_path = __esm(() => {
   init_olympus_layout();
 });
-
 // src/core/source-connector-labels.ts
-var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, byProvider;
+function connectorLabelCapability(provider) {
+  return byProvider.get(provider);
+}
+function observedLabelValues(provider, raw) {
+  const value = JSON.parse(raw);
+  if (Array.isArray(value) && value.length && connectorLabelCapability(provider)?.legacyTagLimits)
+    return;
+  const labels = Array.isArray(value) ? value : value?.labels;
+  return Array.isArray(labels) && labels.every((label) => typeof label === "string") ? labels : undefined;
+}
+var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, storedLabelProviders, legacyCappedTagProviders, byProvider;
 var init_source_connector_labels = __esm(() => {
-  GMAIL_LABEL_CAPABILITY = { provider: "gmail", metadataKey: "labels" };
-  MBOX_LABEL_CAPABILITY = { provider: "mbox", metadataKey: "labels" };
-  EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", metadataKey: NOTE_TAGS_METADATA_KEY };
-  READWISE_LABEL_CAPABILITY = { provider: "readwise", metadataKey: NOTE_TAGS_METADATA_KEY };
-  REFLECT_LABEL_CAPABILITY = { provider: "reflect", metadataKey: NOTE_TAGS_METADATA_KEY };
-  TELEGRAM_LABEL_CAPABILITY = { provider: "telegram" };
+  GMAIL_LABEL_CAPABILITY = { provider: "gmail", proof: "provider_walk", metadataKey: "labels" };
+  MBOX_LABEL_CAPABILITY = { provider: "mbox", proof: "stored", metadataKey: "labels" };
+  EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", proof: "stored", mutable: true, legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+  READWISE_LABEL_CAPABILITY = { provider: "readwise", proof: "stored", mutable: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+  REFLECT_LABEL_CAPABILITY = { provider: "reflect", proof: "stored", legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+  TELEGRAM_LABEL_CAPABILITY = { provider: "telegram", proof: "stored" };
   capabilities = [
     GMAIL_LABEL_CAPABILITY,
     MBOX_LABEL_CAPABILITY,
@@ -8302,6 +8319,8 @@ var init_source_connector_labels = __esm(() => {
     REFLECT_LABEL_CAPABILITY,
     TELEGRAM_LABEL_CAPABILITY
   ];
+  storedLabelProviders = capabilities.filter((capability) => capability.proof === "stored").map((capability) => capability.provider);
+  legacyCappedTagProviders = capabilities.filter((capability) => ("legacyTagLimits" in capability)).map((capability) => capability.provider);
   byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
 });
 
@@ -8541,6 +8560,9 @@ function isArchiveProvider(provider, formats = ARCHIVE_FORMATS) {
 }
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
+}
+function isArchiveCorpusId(corpusId, trustDomain) {
+  return corpusId.startsWith(`${trustDomain}.archive.`);
 }
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
@@ -10988,14 +11010,190 @@ var init_engine = __esm(() => {
 });
 
 // src/core/sender-rules.ts
-var init_sender_rules = () => {};
+function validDomain(raw) {
+  let end = raw.length;
+  while (end > 0 && (raw[end - 1] === "." || raw[end - 1] === "-"))
+    end -= 1;
+  const domain = raw.slice(0, end).toLowerCase();
+  const labels = domain.split(".");
+  if (labels.length < 2 || labels.some((label) => !label || label.startsWith("-") || label.endsWith("-")))
+    return;
+  return domain;
+}
+function scanHeader(value) {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  let angleOpens = 0;
+  let comma = false;
+  for (let index = 0;index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "\\" && index + 1 < value.length) {
+      if (depth === 0)
+        out += char + value[index + 1];
+      index += 1;
+      continue;
+    }
+    if (depth === 0 && char === '"')
+      quoted = !quoted;
+    if (!quoted && char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (!quoted && char === ")" && depth > 0) {
+      depth -= 1;
+      continue;
+    }
+    if (depth > 0)
+      continue;
+    if (!quoted && char === "<")
+      angleOpens += 1;
+    if (!quoted && char === ",")
+      comma = true;
+    out += char;
+  }
+  return { text: out, angleOpens, comma };
+}
+function parseAddrSpec(value) {
+  const spec = value.trim();
+  let local;
+  let rest;
+  if (spec.startsWith('"')) {
+    let index = 1;
+    while (index < spec.length && spec[index] !== '"')
+      index += spec[index] === "\\" ? 2 : 1;
+    if (index >= spec.length || spec[index + 1] !== "@")
+      return;
+    local = spec.slice(0, index + 1);
+    rest = spec.slice(index + 2);
+  } else {
+    const at = spec.indexOf("@");
+    if (at <= 0)
+      return;
+    local = spec.slice(0, at);
+    rest = spec.slice(at + 1);
+    for (const char of local)
+      if (!LOCAL_CHAR.test(char))
+        return;
+  }
+  for (const char of rest)
+    if (!DOMAIN_CHAR.test(char))
+      return;
+  const domain = validDomain(rest);
+  if (!domain || domain !== rest.toLowerCase())
+    return;
+  return { address: `${local.toLowerCase()}@${domain}`, domain };
+}
+function senderAddress(from) {
+  if (!from || from.length > MAX_FROM_HEADER_CHARS)
+    return;
+  const scanned = scanHeader(from);
+  if (scanned.angleOpens > 1 || scanned.comma)
+    return;
+  if (scanned.angleOpens === 1) {
+    const open = scanned.text.indexOf("<");
+    const close = scanned.text.indexOf(">", open + 1);
+    if (close < 0 || scanned.text.slice(close + 1).trim() !== "")
+      return;
+    return parseAddrSpec(scanned.text.slice(open + 1, close));
+  }
+  return parseAddrSpec(scanned.text);
+}
+function everyAddressIn(from) {
+  if (!from)
+    return [];
+  return addressSpansIn(from.slice(0, MAX_FROM_HEADER_CHARS)).map(({ address, domain }) => ({ address, domain }));
+}
+function addressSpansIn(text) {
+  const found = [];
+  for (let at = text.indexOf("@");at >= 0; at = text.indexOf("@", at + 1)) {
+    let start = at;
+    while (start > 0 && LOCAL_CHAR.test(text[start - 1]))
+      start -= 1;
+    let end = at + 1;
+    while (end < text.length && DOMAIN_CHAR.test(text[end]))
+      end += 1;
+    if (start === at)
+      continue;
+    const domain = validDomain(text.slice(at + 1, end));
+    if (!domain)
+      continue;
+    const local = text.slice(start, at).toLowerCase();
+    found.push({ address: `${local}@${domain}`, domain, local, start, end: at + 1 + domain.length });
+  }
+  return found;
+}
+function addressMatches(sender, normalizedRule) {
+  if (normalizedRule.startsWith("@")) {
+    const domain = normalizedRule.slice(1);
+    return domain !== "" && (sender.domain === domain || sender.domain.endsWith(`.${domain}`));
+  }
+  return sender.address === normalizedRule;
+}
+function ownerSenderRuleMatches(from, value, raises) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized)
+    return false;
+  if (!normalized.includes("@"))
+    return raises && (from ?? "").slice(0, MAX_FROM_HEADER_CHARS).toLowerCase().includes(normalized);
+  const sender = senderAddress(from);
+  if (sender)
+    return addressMatches(sender, normalized);
+  return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));
+}
+var MAX_FROM_HEADER_CHARS = 4096, LOCAL_CHAR, DOMAIN_CHAR;
+var init_sender_rules = __esm(() => {
+  LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
+  DOMAIN_CHAR = /[a-z0-9.-]/i;
+});
+
+// src/core/location-rules.ts
+function normalizeLocationPath(value) {
+  return value.trim().toLowerCase().replace(/\/+$/, "");
+}
+function pathPrefixMatches(path, prefix) {
+  if (!prefix.trim() || path === undefined || !path.trim())
+    return false;
+  const folder = normalizeLocationPath(prefix);
+  if (folder === "")
+    return true;
+  const value = normalizeLocationPath(path);
+  return value === folder || value.startsWith(`${folder}/`);
+}
 // src/workers/classification/tier-classifier.ts
-var UNDECIDED_TIER_SNIFFER, OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review";
+function tierRank(tier) {
+  return TIER_RANK[tier];
+}
+function ownerRuleMatches(rule, signals, provider) {
+  if (rule.source !== undefined && rule.source !== provider)
+    return false;
+  const value = rule.match.value.trim().toLowerCase();
+  if (!value)
+    return false;
+  switch (rule.match.kind) {
+    case "pathPrefix":
+      return pathPrefixMatches(signals.path, value);
+    case "folderKey":
+    case "chat":
+      return (signals.folderKeys ?? []).some((key) => key.trim().toLowerCase() === value);
+    case "label":
+      return (signals.labels ?? []).some((label) => label.trim().toLowerCase() === value);
+    case "sender":
+      return ownerSenderRuleMatches(signals.sender, value, tierRank(rule.tier) > tierRank("private"));
+  }
+}
+var TIER_RANK, UNDECIDED_TIER_SNIFFER, OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review";
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
   init_engine();
   init_sender_rules();
+  TIER_RANK = {
+    public: 0,
+    private: 1,
+    secure: 2,
+    secrets: 3
+  };
   UNDECIDED_TIER_SNIFFER = Object.freeze({
     id: "undecided",
     judge: () => ({ verdict: "undecided" })
@@ -11060,7 +11258,61 @@ var init_sniffer_store = __esm(() => {
   init_tier_ledger_path();
 });
 // src/workers/classification/tier-ledger.ts
-var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
+function labelSweepMetaKey(provider, accountScope) {
+  return `owner_rules_label_sweep:${provider}:${accountScope}`;
+}
+function tierLedgerIdentityOfRecord(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+function tierLedgerIdentityKey(identity) {
+  return TIER_LEDGER_IDENTITY_FIELDS.map((field) => identity[field] ?? "").join("\x00");
+}
+function trustDomainRank(domain) {
+  return TRUST_DOMAIN_RANK[domain] ?? Number.MAX_SAFE_INTEGER;
+}
+function copyServingLayer(copies, layer) {
+  return copies.find((copy) => copy.layers === "both" || copy.layers === layer);
+}
+function overrideAuthorizes(override, metadataTier, contentTier) {
+  if (override?.kind !== "tier")
+    return false;
+  const allowed = (tier) => tier === override.tier || override.tier === "public" && tier === "private";
+  return allowed(metadataTier) && allowed(contentTier);
+}
+function tierMoveOverrideConflict(override, record, target, sources, destination) {
+  const authorized = overrideAuthorizes(override, target.metadataTier, target.contentTier);
+  if (override?.kind === "tier") {
+    const floor = tierRank(override.tier);
+    const belowTier = tierRank(target.metadataTier) < floor || tierRank(target.contentTier) < floor;
+    if (belowTier && !authorized || destination.some((copy) => trustDomainRank(copy.trustDomain) < floor))
+      return "tier_floor";
+  }
+  if (record.decidedBy !== "override" || authorized)
+    return;
+  return tierRank(target.metadataTier) < tierRank(record.metadataTier) || tierRank(target.contentTier) < tierRank(record.contentTier) || loweredCopyLayers(sources, destination).length > 0 ? "override_changed" : undefined;
+}
+function loweredCopyLayers(sources, destination) {
+  return ["metadata", "content"].filter((layer) => {
+    const from = copyServingLayer(sources, layer);
+    const to = copyServingLayer(destination, layer);
+    return from && to && trustDomainRank(to.trustDomain) < trustDomainRank(from.trustDomain);
+  });
+}
+var LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2", LEGACY_PERSONAL_BODIES_WAITING = "legacy-personal-bodies:waiting", LEGACY_PERSONAL_BODY_PROGRESS_SQL, PERSONAL_LOWERING_UNCLAIMED = `rejudge_json IS NULL AND metadata_forced = 0
+  AND metadata_tier <> 'secrets' AND content_tier <> 'secrets'
+  AND decided_by NOT IN ('override', 'owner_rule')
+  AND instr(reasons_json, '"override:') = 0 AND instr(reasons_json, '"metadata:owner_rule:') = 0
+  AND NOT EXISTS (SELECT 1 FROM tier_overrides o WHERE (o.provider, o.account_scope, o.conversation_key, o.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id))
+  AND NOT EXISTS (SELECT 1 FROM tier_copies c WHERE (c.provider, c.account_scope, c.conversation_key, c.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) AND c.copy_state = 'staged')
+  AND NOT EXISTS (SELECT 1 FROM tier_write_intents w WHERE (w.provider, w.account_scope, w.conversation_key, w.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id))`, STORED_PERSONAL_LOWERING, RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
           AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')`, RELABEL_UNREAD_CANDIDATES_SQL, CORPUS_VISIBILITY_FLAGS_SQL = `c.provider, c.account_scope, c.conversation_key, c.provider_item_id,
       c.copy_state <> 'current' OR EXISTS (SELECT 1 FROM tier_write_intents w
         WHERE w.provider = c.provider AND w.account_scope = c.account_scope
@@ -11088,7 +11340,7 @@ var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe
       EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
         AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`, CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_ID_SQL = "w.provider, w.account_scope, w.conversation_key, w.provider_item_id", CORPUS_INTENT_OTHER_FLAGS_SQL = "0 AS held, 0 AS held_for_judgment, 0 AS metadata_layer, 0 AS metadata_unread, 0 AS moving", CORPUS_INTENT_WITHOUT_COPY_SQL = `w.kind IN ('deletion', 'secret') AND NOT EXISTS (
   SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
-    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, STALE_EMBED_HOLD_DECIDED;
+    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STALE_EMBED_HOLD_DECIDED;
 var init_tier_ledger = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -11096,6 +11348,24 @@ var init_tier_ledger = __esm(() => {
   init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
+  LEGACY_PERSONAL_BODY_PROGRESS_SQL = `SELECT
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_HELD}'), 0) AS INTEGER) AS held,
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged,
+  MAX(CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_WAITING}'), 0) AS INTEGER),
+    COALESCE((SELECT json_extract(NULLIF(value, ''), '$.waiting') FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_CURSOR}'), 0)) AS waiting`;
+  STORED_PERSONAL_LOWERING = `routed = 1 AND state = 'current' AND content_read = 1
+  AND metadata_pending = 0 AND content_pending = 0 AND move_attempts = 0
+  AND target_metadata_tier IS NULL AND target_content_tier IS NULL
+  AND metadata_tier IN ('public','private') AND content_tier IN ('public','private')
+  AND decided_by IN ('default','sniffer') AND instr(reasons_json, '"content:sniffer:') > 0
+  AND ${PERSONAL_LOWERING_UNCLAIMED}
+  -- A refused or abandoned move may still have zero counted failures. Its
+  -- next attempt belongs to a fresh judgment, not a replay of this receipt.
+  AND (SELECT h.decided_by FROM tier_history h WHERE (h.provider, h.account_scope, h.conversation_key, h.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) ORDER BY h.history_pk DESC LIMIT 1) IS NOT 'rollback'
+  AND EXISTS (SELECT 1 FROM tier_copies c WHERE (c.provider, c.account_scope, c.conversation_key, c.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id)
+    AND c.copy_state = 'current' AND c.layers IN ('content','both') AND c.trust_domain = 'secure_local')`;
   RELABEL_UNREAD_CANDIDATES_SQL = `SELECT rowid FROM tier_items WHERE ${RELABEL_UNREAD_WHERE} LIMIT ?`;
   CORPUS_COPY_FLAGS_PAGE_SQL = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
   INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;
@@ -11104,6 +11374,12 @@ var init_tier_ledger = __esm(() => {
   FROM tier_write_intents w WHERE w.rowid > ? ORDER BY w.rowid LIMIT 500`;
   REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
   REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
+  TIER_LEDGER_IDENTITY_FIELDS = ["provider", "accountScope", "providerConversationId", "providerItemId"];
+  TRUST_DOMAIN_RANK = {
+    public_safe: 0,
+    internal: 1,
+    secure_local: 2
+  };
   STALE_EMBED_HOLD_DECIDED = `EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
@@ -11146,7 +11422,6 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger();
   init_tier_ledger_path();
 });
-
 // src/workers/local-pacing.ts
 var GO_EASY_IDLE_FULL_SPEED_MS, GO_EASY_LOCAL_WORK_RECENT_MS;
 var init_local_pacing = __esm(() => {
@@ -12204,6 +12479,7 @@ var init_provider_account_identity = __esm(() => {
   };
   IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 });
+
 // src/core/store-identity.ts
 var init_store_identity = __esm(() => {
   init_archive_formats();
@@ -12239,6 +12515,7 @@ var init_tier_placement = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
 });
+
 // src/workers/source-index/media-judge.ts
 var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
 var init_media_judge = __esm(() => {
@@ -12259,6 +12536,35 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/stored-names.ts
+function servingMetadataCopy(copies, record) {
+  return copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata") ?? (record?.state === "moving" ? copyServingLayer(copies.filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1), "metadata") : undefined);
+}
+function storedSignals(copy) {
+  const text = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const title = text(copy.columns["title"]);
+  const locator = text(copy.columns["locator_uri"]);
+  const path = locator?.startsWith("/") ? locator : undefined;
+  const sender = text(copy.columns["sender_label"]) ?? text(copy.columns["sender_id"]);
+  let folderKeys = [];
+  const keysJson = text(copy.columns["source_scope_folder_keys_json"]);
+  if (keysJson) {
+    try {
+      const parsed = JSON.parse(keysJson);
+      if (Array.isArray(parsed))
+        folderKeys = parsed.filter((key) => typeof key === "string");
+    } catch {
+      folderKeys = [];
+    }
+  }
+  if (copy.identity.providerConversationId)
+    folderKeys.push(copy.identity.providerConversationId);
+  return {
+    ...title ? { title } : {},
+    ...path ? { path } : {},
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...sender ? { sender } : {}
+  };
+}
 var init_stored_names = __esm(() => {
   init_tier_ledger();
 });
@@ -12589,15 +12895,130 @@ var init_tier_rules = __esm(() => {
 });
 
 // src/workers/connector-store/tier-move-rule-policy.ts
-var heldPolicyFences;
+import { createHash as createHash2 } from "node:crypto";
+function mutableItemLabels(set, provider) {
+  if (!connectorLabelCapability(provider)?.mutable)
+    return false;
+  const stores = set.openStores();
+  return !stores.length || stores.some((store) => !isArchiveCorpusId(store.corpusId, store.trustDomain));
+}
+function servingNames(set, record) {
+  const identity = tierLedgerIdentityOfRecord(record);
+  const copies = set.ledger.copies(identity);
+  const source = servingMetadataCopy(copies, record);
+  return source && set.store(source.trustDomain)?.exportItemNames(identity);
+}
+function applicableProviderLabelRules(rules, provider) {
+  if (!connectorLabelCapability(provider))
+    return [];
+  return rules.filter((rule) => rule.match.kind === "label" && ownerRuleMatches(rule, { labels: [rule.match.value] }, provider));
+}
+function labelRulesWithoutNonmatch(set, record, policy, rules, names = () => servingNames(set, record)) {
+  if (rules.length === 0 || policy.unavailable)
+    return rules;
+  const { provider, accountScope, providerItemId } = record;
+  const capability = connectorLabelCapability(provider);
+  if (!capability)
+    return rules;
+  if (capability.proof === "stored") {
+    const raw = names()?.columns.classification_labels_json;
+    if (typeof raw !== "string")
+      return rules;
+    const stored = observedLabelValues(provider, raw);
+    if (!stored)
+      return rules;
+    let labels = stored;
+    if (mutableItemLabels(set, provider)) {
+      const fresh = currentLabels.get(set);
+      if (!fresh || fresh.identityKey !== tierLedgerIdentityKey(tierLedgerIdentityOfRecord(record)) || fresh.revision !== policy.revision || fresh.generation !== record.generation || fresh.decidedAt !== record.decidedAt)
+        return rules;
+      labels = [...stored, ...fresh.labels];
+    }
+    return rules.filter((rule) => ownerRuleMatches(rule, { labels }, provider));
+  }
+  const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
+  if (!labelSweepHasPolicy(progress, policy, provider, accountScope))
+    return rules;
+  const itemKey = labelEvidenceItemKey(providerItemId);
+  return rules.filter((rule) => {
+    const key = ruleKey(rule);
+    const walkId = progress.completed?.[key];
+    return !walkId || !progress.done.includes(key) || !!progress.walks?.[key] || set.ledger.labelRuleMatched(provider, accountScope, key, walkId, itemKey);
+  });
+}
+function labelSweepHasPolicy(state, policy, provider, accountScope) {
+  return state.revision === policy.revision && state.provider === provider && state.accountScope === accountScope;
+}
+function readLabelState(raw) {
+  if (!raw)
+    return { done: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const walks = {};
+    for (const [key, walk] of Object.entries(parsed.walks ?? {})) {
+      if (walk && isWalkId(walk.id)) {
+        walks[key] = {
+          id: walk.id,
+          ...typeof walk.pageToken === "string" && walk.pageToken ? { pageToken: walk.pageToken } : {},
+          ...walk.deferred === true ? { deferred: true } : {}
+        };
+      }
+    }
+    const completed = Object.fromEntries(Object.entries(parsed.completed ?? {}).filter(([, id]) => isWalkId(id)));
+    const strings = (value) => Array.isArray(value) ? value.filter((key) => typeof key === "string") : [];
+    return {
+      ...typeof parsed.revision === "string" ? { revision: parsed.revision } : {},
+      ...typeof parsed.provider === "string" ? { provider: parsed.provider } : {},
+      ...typeof parsed.accountScope === "string" ? { accountScope: parsed.accountScope } : {},
+      done: strings(parsed.done),
+      completed,
+      walks,
+      order: strings(parsed.order)
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+function isWalkId(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+function ruleKey(rule) {
+  return digest([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength]).slice(0, 24);
+}
+function labelEvidenceItemKey(providerItemId) {
+  return digest(providerItemId);
+}
+function digest(value) {
+  return createHash2("sha256").update(JSON.stringify(value)).digest("hex");
+}
+var currentLabels, heldPolicyFences, moveRuleChecks, moveRuleRegistry;
 var init_tier_move_rule_policy = __esm(() => {
   init_owner_config_read();
+  init_archive_formats();
   init_source_connector_labels();
   init_tier_classifier();
   init_tier_ledger();
   init_tier_rules();
   init_stored_names();
+  currentLabels = new WeakMap;
   heldPolicyFences = new WeakMap;
+  moveRuleChecks = {
+    override: (a) => !tierMoveOverrideConflict(a.override, a.record, a.target, a.sources, a.destination),
+    policy: (a) => !Number.isFinite(a.ceiling) || !a.policy.unavailable,
+    publicTier: (a) => !a.policy.retirePublic || a.ceiling >= tierRank("private"),
+    storedFields: (a) => {
+      const rules = a.rules.filter((rule) => rule.match.kind !== "label");
+      if (!rules.length)
+        return true;
+      const names = a.names();
+      if (!names)
+        return false;
+      const signals = storedSignals(names);
+      return !rules.some((rule) => ownerRuleMatches(rule, signals, a.record.provider));
+    },
+    labels: (a) => labelRulesWithoutNonmatch(a.set, a.record, a.policy, applicableProviderLabelRules(a.rules, a.record.provider), a.names).length === 0
+  };
+  moveRuleRegistry = Object.values(moveRuleChecks);
 });
 
 // src/workers/connector-store/tier-move.ts
@@ -12665,8 +13086,13 @@ var init_reactions = () => {};
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
+var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", CONNECTOR_STORE_PERSONAL_BODY_INDEX = "idx_connector_store_personal_body_order", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, PERSONAL_BODY_DATE_SQL = `COALESCE(
+  CASE WHEN authored_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(authored_at) END,
+  CASE WHEN updated_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(updated_at) END,
+  0)`, CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, LEGACY_CAPPED_TAGS, RECOVERABLE_LABEL_SET, KNOWN_LABEL_SET, STORED_LABEL_FIELDS, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_V18_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
+  init_tier_classifier();
+  init_source_connector_labels();
   init_memory_counters();
   init_local_pacing();
   init_embedding_sweep_idle();
@@ -12732,6 +13158,8 @@ var init_local_index = __esm(() => {
   CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX}
     ON items(account_scope, COALESCE(authored_at, updated_at, indexed_at)) WHERE ${ACCOUNT_RECENCY_LIVE_SQL};
 `;
+  CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+  ON items(${PERSONAL_BODY_DATE_SQL}, item_pk) WHERE ${RECENCY_LIVE_SQL};`;
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
@@ -12779,6 +13207,25 @@ var init_local_index = __esm(() => {
   LAST_SYNC_RUN_SQL = `SELECT * FROM sync_runs
   WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
   ORDER BY started_at DESC, rowid DESC LIMIT 1`;
+  LEGACY_CAPPED_TAGS = `provider IN (${legacyCappedTagProviders.map((provider) => `'${provider}'`).join(", ")})
+  AND CASE WHEN json_valid(classification_labels_json) THEN json_array_length(classification_labels_json) > 0 ELSE 0 END`;
+  RECOVERABLE_LABEL_SET = `(classification_labels_json IS NULL OR (${LEGACY_CAPPED_TAGS}))`;
+  KNOWN_LABEL_SET = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN 0 WHEN json_valid(classification_labels_json)
+  THEN json_type(classification_labels_json) = 'array' OR json_type(classification_labels_json, '$.labels') = 'array' ELSE 0 END`;
+  STORED_LABEL_FIELDS = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN classification_labels_json END AS legacyObservation, i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN NULL
+        WHEN ${KNOWN_LABEL_SET} THEN 'known' ELSE 'null' END AS observed,
+      i.title, COALESCE(i.sender_label, i.sender_id) AS sender, i.locator_uri AS locator,
+      CASE WHEN json_valid(i.source_scope_folder_keys_json) THEN i.source_scope_folder_keys_json END AS folderKeys,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN substr(i.search_text, -?1) END AS searchTail,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} AND i.mime_type LIKE 'text/markdown%' THEN
+        (SELECT substr(c.bounded_text, 1, ?1) FROM chunks c WHERE c.item_pk = i.item_pk AND c.chunk_index = 0) END AS opening,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN
+        EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.first_seen_sync_run_id = i.sync_run_id)
+        AND NOT EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND
+          (o.first_seen_sync_run_id <> i.sync_run_id OR o.last_seen_sync_run_id <> i.sync_run_id OR o.first_seen_at <> o.last_seen_at))
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk)
+      END AS originalListing`;
   lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_V4_ITEM_COLUMNS = [
     "item_pk",
@@ -12835,6 +13282,7 @@ var init_local_index = __esm(() => {
     "bytes_available",
     "size_bytes"
   ];
+  CONNECTOR_STORE_V18_ITEM_COLUMNS = [...CONNECTOR_STORE_V15_ITEM_COLUMNS, "classification_labels_json"];
   LOCAL_RELAXED_STOPWORDS = new Set([
     "do",
     "i",
@@ -13642,6 +14090,19 @@ var init_mail_source_scope = __esm(() => {
   GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
 });
 
+// src/workers/connector-store/tier-label-observations.ts
+var lastStoreRead;
+var init_tier_label_observations = __esm(() => {
+  init_source_connector_labels();
+  init_tier_classifier();
+  init_sniffer_store();
+  init_tier_ledger();
+  init_off_thread_reads();
+  init_child_visibility();
+  init_stored_names();
+  lastStoreRead = new WeakMap;
+});
+
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
   init_tier_classifier();
@@ -13719,6 +14180,7 @@ var init_tier_override_settle = __esm(() => {
 
 // src/workers/connector-store/tier-rules-sweep.ts
 var init_tier_rules_sweep = __esm(() => {
+  init_source_connector_labels();
   init_tier_classifier();
   init_tier_ledger();
   init_stored_names();
@@ -13758,6 +14220,8 @@ var init_tier_secrets_floor_sweep = __esm(() => {
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
+  init_tier_label_observations();
+  init_source_connector_labels();
   init_store_write_guard();
   init_source_ingestion_exclusions();
   init_control_path_headroom();
@@ -14138,6 +14602,7 @@ var init_message = __esm(() => {
 
 // src/workers/telegram-messages/record-builder.ts
 var init_record_builder = __esm(() => {
+  init_source_connector_labels();
   init_capture_spool_connector();
 });
 
@@ -16353,7 +16818,7 @@ var init_worker_service = __esm(() => {
 });
 
 // src/core/managed-tools.ts
-import { createHash as createHash2, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash3, randomUUID as randomUUID8 } from "node:crypto";
 import {
   accessSync as accessSync8,
   constants as constants5,
@@ -16520,7 +16985,7 @@ function trustedInside(realDir, path, uid, versionDir) {
   return true;
 }
 function fileSha256(path) {
-  return createHash2("sha256").update(readFileSync30(path)).digest("hex");
+  return createHash3("sha256").update(readFileSync30(path)).digest("hex");
 }
 function verifyPinnedFiles(staging, asset, uid, label, tool) {
   for (const pinned of asset.pinnedFiles ?? []) {
@@ -17991,7 +18456,7 @@ main().catch(() => process.exit(1));
 import { execFile as execFile3 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
 import { readFile as readFile4, stat as fileStat } from "node:fs/promises";
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { lstatSync as lstatSync13, readFileSync as readFileSync32, readlinkSync as readlinkSync2, readdirSync as readdirSync5, realpathSync as realpathSync6 } from "node:fs";
 import { dirname as dirname29, join as join40 } from "node:path";
 function record(value) {
@@ -18168,7 +18633,7 @@ async function launcherPath(env) {
           break;
         current = dirname29(current);
       }
-      if (!lstatSync13(path).isFile() || createHash3("sha256").update(await readFile4(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
+      if (!lstatSync13(path).isFile() || createHash4("sha256").update(await readFile4(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
@@ -18179,7 +18644,7 @@ async function launcherIdentity(path) {
   const info = await fileStat(path);
   if (!info.isFile())
     throw new Error("not a launcher");
-  const hash = createHash3("sha256").update(await readFile4(path)).digest("hex");
+  const hash = createHash4("sha256").update(await readFile4(path)).digest("hex");
   return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
 }
 function linuxZkapiConfinement(deps = {}) {
@@ -18340,7 +18805,7 @@ var init_zkapi_confinement_linux = __esm(() => {
 
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn3, execFileSync as execFileSync2 } from "node:child_process";
-import { createHash as createHash4, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID9 } from "node:crypto";
 import { accessSync as accessSync9, chmodSync as chmodSync7, closeSync as closeSync5, constants as constants6, existsSync as existsSync16, mkdirSync as mkdirSync17, mkdtempSync as mkdtempSync2, readdirSync as readdirSync6, readFileSync as readFileSync33, readlinkSync as readlinkSync3, realpathSync as realpathSync7, rmSync as rmSync10, statSync as statSync17, writeFileSync as writeFileSync8 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
 import { homedir as homedir15, tmpdir as tmpdir4 } from "node:os";
@@ -18568,7 +19033,7 @@ function zkapiWalletDirectory(env) {
   }
 }
 function zkapiFenceScope(input) {
-  return createHash4("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+  return createHash5("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
 }
 function updateState(path, now, mutate) {
   mkdirSync17(dirname30(path), { recursive: true, mode: 448 });
@@ -20370,7 +20835,9 @@ var init_vocabulary = __esm(() => {
     dashboardPending: {
       one: "{n} item waiting for the private model",
       many: "{n} items waiting for the private model"
-    }
+    },
+    legacyPersonalWaiting: "Waiting for your embedding choice: {waiting}",
+    legacyPersonalBodies: "Held for a privacy check from earlier builds: {held} · Checked so far: {judged}"
   };
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
     sentence: "Tell Olympus what's private for you",
@@ -23920,7 +24387,7 @@ function asRecord7(value) {
 // src/native-plugin.ts
 init_native_process_service();
 init_config();
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 
 // src/core/delphi.ts
 init_model_stream();
@@ -27347,7 +27814,6 @@ init_source_corpus_registry();
 init_source_placement();
 init_source_registry();
 init_source_storage();
-init_tier_classifier();
 init_tier_ledger();
 init_tier_ledger_path();
 init_tier_set_binding();
@@ -27409,11 +27875,20 @@ init_secret_locations();
 
 // src/core/restore-held-content.ts
 init_local_index();
+
+// src/workers/connector-store/place-personal-body.ts
+init_operation_error();
+init_tier_classifier();
+init_engine();
+init_media_judge();
 init_secrets_disposition();
 init_stored_names();
 init_tier_move();
+init_tier_rejudge();
+
+// src/core/restore-held-content.ts
+init_tier_move();
 init_tiered_store_set();
-init_media_judge();
 
 // src/core/linux-engine-service.ts
 init_file_lease();
@@ -28056,7 +28531,7 @@ function storeSecretRemedy(key) {
 }
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -28068,7 +28543,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash5("sha256").update(material, "utf8").digest("hex");
+  return createHash6("sha256").update(material, "utf8").digest("hex");
 }
 
 // src/core/doctor.ts
@@ -28216,7 +28691,7 @@ init_consult_transport_zkapi();
 
 // src/core/consult-gate.ts
 init_owner_config_read();
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 import { existsSync as existsSync22, readFileSync as readFileSync39, statSync as statSync20 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
 import { basename as basename8, dirname as dirname36, join as join47 } from "node:path";
@@ -28467,7 +28942,7 @@ function verifiedPackFile(path, sha256) {
     if (statSync20(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync39(path);
-    return createHash6("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
+    return createHash7("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
@@ -34027,7 +34502,7 @@ function sourceWatchRouteFromToolContext(context) {
   const ownerSeed = context.requesterSenderId?.trim() || context.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId = `owner:${createHash7("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId = `owner:${createHash8("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context.deliveryContext?.channel || context.messageChannel)?.trim().toLowerCase();
   const target = context.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

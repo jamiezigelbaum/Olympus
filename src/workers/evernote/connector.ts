@@ -330,6 +330,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         mimeType: mime,
         content: { kind: 'metadata_only' },
         metadata: Object.freeze({
+          tags: [],
           title: names[index],
           name: names[index],
           mimeType: mime,

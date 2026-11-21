@@ -159,7 +159,7 @@ import {
   isStandaloneEngineProcess,
   validateSovereigntyConfig,
 } from '../../core/sovereignty.ts';
-import { createSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
+import { createSourceCorpusRegistry, defaultSourceCorpusRegistryConfig } from '../../core/source-corpus-registry.ts';
 import {
   dropboxPolicyFullExtractionScopeKeys,
   dropboxPolicyApprovedScopeKeys,
@@ -604,7 +604,8 @@ import {
 } from './runtime/private-analysts.ts';
 import { createConnectorStoreMountDiscovery, mergeConnectorStores, type ConnectorStoreMount } from './runtime/connector-mounts.ts';
 import { connectorStoreAnswerScope, googleFilePage } from './runtime/answer-scope.ts';
-import { openIngestionDispositionsRuntime } from './runtime/ingestion-dispositions.ts';
+import { revokeSourceOnDemandReads } from './runtime/on-demand-revocation.ts';
+import { dispositionReadChange, openIngestionDispositionsRuntime } from './runtime/ingestion-dispositions.ts';
 
 /** How this process was launched; set only by startWorkerWithLaunch from the validated entry point. */
 let workerLaunch: WorkerLaunch = {};
@@ -4062,6 +4063,7 @@ export async function main(): Promise<void> {
                 ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since }
                 : {}),
               ...(backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {}),
+              ...(backlog.legacyPersonalBodies ? { legacy_personal_bodies: backlog.legacyPersonalBodies } : {}),
               over_private: tierOverPrivate(),
             }
           : undefined;
@@ -4862,6 +4864,31 @@ export async function main(): Promise<void> {
       ...(googleDriveRequestBudget ? { googleDriveRequestBudget } : {}),
     });
   };
+  const applySourceReadRevocation = (source: string, reason: Parameters<typeof revokeSourceOnDemandReads>[1]) => {
+    const stores = connectorStores.filter(store => sourceIdForStore(store) === source);
+    const opened: LocalConnectorStore[] = [];
+    try {
+      // A disabled lane can still hold grants from its last run.
+      const names = accountStoreNames(source);
+      for (const corpus of defaultSourceCorpusRegistryConfig().corpora) {
+        if (corpus.sourceId !== source || !names.includes(corpus.trustDomain)) continue;
+        const dbPath = resolvedStorePath(source, corpus.trustDomain, process.env);
+        if (stores.some(store => store.dbPath === dbPath) || !existsSync(dbPath)) continue;
+        opened.push(openConnectorStore({ sourceId: source }, { ...corpus, dbPath }));
+      }
+      return revokeSourceOnDemandReads([...stores, ...opened], reason,
+        reason === 'scope' && fileSourceScopeAuthority ? { authority: fileSourceScopeAuthority, source } : undefined,
+        reason === 'exclusions' ? dispositionReadChange(source, process.env) : undefined);
+    } finally { for (const store of opened) store.close(); }
+  };
+  const revokeSourceReads = async (source: string, reason: Parameters<typeof applySourceReadRevocation>[1]) => {
+    if (!engineFront) return applySourceReadRevocation(source, reason);
+    const receipt = await engineFront.client.send({ kind: 'revoke_reads', source, reason }, { timeoutMs: OWNER_ACTION_WAIT_MS });
+    if (receipt.state !== 'done' || typeof receipt.result !== 'number') {
+      throw new OperationError('source_index_error', 'The background engine could not finish revoking on-demand reads. Retry the action.');
+    }
+    return receipt.result;
+  };
   const fileSourceScopes = fileSourceScopeAuthority ? {
     summaries: () => [...listFileScopeSources().map(({ sourceId, dispositionSourceId, label }) => {
       const snapshot = fileSourceScopeAuthority.snapshot(sourceId);
@@ -5046,6 +5073,7 @@ export async function main(): Promise<void> {
       }
       const verifiedSelections = await browser.validateSelections(selections);
       const approval = fileSourceScopeAuthority.approve({
+        reconcileReads: true,
         sourceId: input.sourceId,
         accountGeneration: input.accountGeneration,
         expectedRevision: input.expectedRevision,
@@ -5295,6 +5323,7 @@ export async function main(): Promise<void> {
       : {}),
     connectorStores,
     refreshConnectorStores: () => mountConfiguredSourceStores(),
+    revokeSourceReads,
     connectorStoreTierSiblings: (corpusId: string) => [
       ...(tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []),
     ].filter((sibling) => sibling !== corpusId),
@@ -6450,6 +6479,7 @@ export async function main(): Promise<void> {
       const missing = judgeMissing();
       return {
         configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length,
+        labelsUnavailable: backlog?.labelsUnavailable ?? 0,
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
         // No judge: every new item waits, held, until one is set up (#1316).
         ...(missing ? { judgeMissing: missing } : {}),
@@ -6843,6 +6873,17 @@ export async function main(): Promise<void> {
   let lastSecondRoundLog = '';
   const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
   const withSecondRound = (model: SnifferModel): SnifferModel => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed, localDecisionBar) : model;
+  const tierMoveOptions = {
+    ...automaticMoveContext,
+    onPlacementChecked: (paths: ReadonlySet<string>) => { void overPrivate?.refresh(paths); },
+    // A sweep may have visited the destination while the item was held
+    // or moving. Wake its source once the new copy is visible.
+    onEmbeddingNeeded: (corpora: ReadonlySet<string>) => {
+      const sourceIds = new Set(sourceCorpusRegistry.list()
+        .filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
+      sourceScheduler?.wakeTasksOfKind('embed', undefined, sourceIds);
+    },
+  };
   // The front judges nothing: the background is the only judge.
   const tierSniffer = !engineFront && snifferLane && snifferModel
     ? new TierSnifferService({
@@ -6899,19 +6940,17 @@ export async function main(): Promise<void> {
         // for the sniffer by default, and a Personal verdict's queued move
         // runs at once while every embedding is the built-in local model.
         ...(snifferRuntime.source === 'built_in' ? { autoApproveBuiltIn: true } : {}),
-        autoMoves: {
-          ...automaticMoveContext,
-          onPlacementChecked: (paths) => { void overPrivate?.refresh(paths); },
-          // A sweep may have visited the destination while the item was held
-          // or moving. Wake its source once the new copy is visible.
-          onEmbeddingNeeded: (corpora) => {
-            const sourceIds = new Set(sourceCorpusRegistry.list()
-              .filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
-            sourceScheduler?.wakeTasksOfKind('embed', undefined, sourceIds);
-          },
-        },
+        autoMoves: tierMoveOptions,
       })
     : undefined;
+  const tierWork = engineFront ? undefined : tierSniffer ?? new TierSnifferService({
+    installed: installedTierClassification,
+    stores: () => connectorStores,
+    classificationLedgerPath: resolveClassificationLedgerPath(process.env),
+    intervalMs: snifferEnv.intervalMs,
+    autoMoves: tierMoveOptions,
+    log: (line) => console.log(line),
+  });
   if (tierSniffer && snifferResource) {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
@@ -6995,12 +7034,12 @@ export async function main(): Promise<void> {
     if (overPrivate) tierOverPrivate = () => overPrivate.status();
     archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   }
-  tierSniffer?.start();
+  tierWork?.start();
   // The split's background: its private command socket, then the status
   // snapshot, then ready. The front waits for ready before it serves.
   const currentMemoryActivity = () => engineRole === 'front'
     ? memoryActivity(false, false, engineFront?.backgroundActivity() ?? 'idle')
-    : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
+    : memoryActivity(tierWork?.passRunning ?? false, statusRecount?.health().counting ?? false);
   const memoryDiagnostic = createMemoryDiagnostic({
     role: engineRole, activity: currentMemoryActivity, readers: readPoolMemoryCounts,
     workerPayloads: modelWorkerMemoryPayloads,
@@ -7053,6 +7092,7 @@ export async function main(): Promise<void> {
         built_in_serving_pid: servingModelPid?.(),
       }) } : {}),
       handlers: {
+        revoke_reads: ({ source, reason }) => applySourceReadRevocation(source, reason),
         model_prepare: () => {
           if (workerBuiltInModel) void workerBuiltInModel.model.prepare();
           return { preparing: workerBuiltInModel !== undefined };
@@ -7138,6 +7178,7 @@ export async function main(): Promise<void> {
           try { return await runForwarded(request); }
           finally { deleteFromFront = undefined; }
         },
+        archive_remove: ({ request }) => runForwarded(request),
         tier_override: ({ request }) => runForwarded(request),
         storage_registry: ({ request }) => runForwarded(request),
         capture: ({ request }) => runForwarded(request),
@@ -7165,7 +7206,7 @@ export async function main(): Promise<void> {
     const rssRestart = startEngineRssRestart({
       memory: memoryDiagnostic,
       thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,
-      batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
+      batchRunning: () => (tierWork?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
       restart: () => requestModelReload(),
       record: () => status.publish(),
       previous: engineRssRestartsFrom(readEngineStatusSnapshot(engineStatusSnapshotPath(process.env))),
@@ -7310,7 +7351,7 @@ export async function main(): Promise<void> {
     stopSupersededSweep();
     stopCpuSampleLog?.();
     stopCreditRecovery();
-    tierSniffer?.stop();
+    tierWork?.stop();
     localPacer.stop();
     archiveImportDashboard.close();
     installedTierClassification.close({ checkpoint: true });

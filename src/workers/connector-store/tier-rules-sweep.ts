@@ -17,7 +17,8 @@
 // (a bounded list in the ledger) until the rule can act on it.
 //
 // What a store keeps is what is matched: the title, a path-shaped locator,
-// the stored scope and chat keys, and the sender. Labels are not kept, and a
+// the stored scope and chat keys, and the sender. The mover can also use a label snapshot for a provider
+// that lists labels with the item. For mutable server labels a
 // mailbox provider never lists an item it already holds again, so a label rule
 // cannot wait for "the next listing": the provider's own lane applies it by
 // asking which items carry the label (sweepLabelRuleRaises, below). That pass
@@ -25,6 +26,7 @@
 // for every page; the stored-names pass above never completes one.
 
 import { randomUUID } from 'node:crypto';
+import { connectorLabelCapability } from '../../core/source-connector-labels.ts';
 import {
   classifyItemTiers,
   maxTier,
@@ -47,6 +49,7 @@ import { leastPrivateDomain } from './tier-override-settle.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import {
+  applicableProviderLabelRules,
   currentTierRulePolicy,
   labelEvidenceItemKey,
   labelSweepHasPolicy,
@@ -96,6 +99,32 @@ interface SweepState {
   } | undefined;
 }
 
+/** A lowering waits for all applicable raising rules, including provider-only label walks. */
+export function ownerRuleSweepsComplete(set: TieredStoreSet): boolean {
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason) return false;
+  const raising = (classification.rules ?? []).filter(isRaisingRule);
+  if (!raising.length) return true;
+  const ledger = set.ledger;
+  const stored = readState(ledger.readMeta(SWEEP_META_KEY));
+  const outstanding = raising.filter(rule => isLabelRule(rule) || !stored.done.includes(ruleKey(rule)));
+  if (!outstanding.length) return true;
+  for (const { provider, accountScope } of ledger.storedAccounts()) {
+    const applicable = outstanding.filter(rule => !isLabelRule(rule)
+      && (rule.source === undefined || rule.source === provider));
+    if (connectorLabelCapability(provider)?.proof === 'provider_walk') {
+      applicable.push(...applicableProviderLabelRules(outstanding, provider));
+    }
+    if (!applicable.length) continue;
+    const labels = readLabelState(ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
+    for (const rule of applicable) {
+      const key = ruleKey(rule);
+      if (!isLabelRule(rule) || !labels.done.includes(key) || labels.walks?.[key]) return false;
+    }
+  }
+  return true;
+}
+
 /** The sweep on its caller's connection (a direct caller, not the engine's loop). */
 export function sweepOwnerRuleRaises(options: { set: TieredStoreSet; limit?: number }): TierRulesSweepReport {
   return runPassHere(ownerRuleRaisesPass(options));
@@ -114,8 +143,8 @@ function* ownerRuleRaisesPass(options: { set: TieredStoreSet; limit?: number }):
   // nothing is judged from rules that cannot be trusted.
   if (!classification || classification.unavailableReason) return report;
   const ledger = set.ledger;
-  // Label rules are not decidable from what a store keeps: they never count
-  // as swept here (sweepLabelRuleRaises owns them).
+  // This sweep records completion for field rules. Per-item label proof
+  // does not complete a provider walk.
   const raising = (classification.rules ?? []).filter((rule) => isRaisingRule(rule) && !isLabelRule(rule));
   const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
   const state = readState(ledger.readMeta(SWEEP_META_KEY));
@@ -404,6 +433,8 @@ export async function sweepLabelRuleRaises(options: {
     let pageToken = resumed?.pageToken;
     let deferred = resumed?.deferred === true;
     report.rules += 1;
+    // A recheck is pending while the provider request is in flight, including its first page.
+    if (done.delete(key)) save();
     let finished = false;
     if (!applyCurrent(() => {
       done.delete(key);

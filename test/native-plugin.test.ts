@@ -759,10 +759,11 @@ describe('native OpenClaw plugin adapter', () => {
     }
   });
 
-  const searchCorpora = createPublicSourceCorpusRegistry().list('search');
-  for (const sourceId of new Set(searchCorpora.map(corpus => corpus.sourceId))) {
+  // Take the fixtures from the shipped roster so a missing search capability fails this test.
+  const shippedCorpora = createPublicSourceCorpusRegistry().list();
+  for (const sourceId of new Set(shippedCorpora.map(corpus => corpus.sourceId))) {
     test(`all-sources search releases only Personal names from ${sourceId}'s Private store`, async () => {
-      const corpora = searchCorpora.filter(corpus => corpus.sourceId === sourceId);
+      const corpora = shippedCorpora.filter(corpus => corpus.sourceId === sourceId);
       const ledger = new TierLedger({ dbPath: ':memory:' });
       const stores = corpora.map(corpus => new LocalConnectorStore({ ...corpus, dbPath: ':memory:', tierLedger: ledger }));
       try {
@@ -806,7 +807,7 @@ describe('native OpenClaw plugin adapter', () => {
         const tools = new Map<string, NativeTool>();
         const pluginConfig = {
           email: { enabled: true, baseUrl: workerTestOrigin },
-          sourceIndex: { enabled: true, corpusRegistry: { schemaVersion: 1, corpora } },
+          sourceIndex: { enabled: true, corpusRegistry: { schemaVersion: 2, corpora } },
         };
         plugin.register({
           pluginConfig,
@@ -834,7 +835,11 @@ describe('native OpenClaw plugin adapter', () => {
           caller: { surface: 'remote', displayName: 'ChatGPT' },
         }));
         expect(privateMatch.evidence).toContainEqual(expect.objectContaining({
-          selected_item: expect.objectContaining({ title: privateTitle }),
+          selected_item: expect.objectContaining({
+            title: privateTitle,
+            provider_item_id: items[0]!.identity.providerItemId,
+            local_item_id: items[0]!.identity.localItemId,
+          }),
         }));
       } finally {
         stores.forEach(store => store.close());
@@ -844,7 +849,7 @@ describe('native OpenClaw plugin adapter', () => {
   }
 
   test('all-sources search rechecks names after the slowest source finishes', async () => {
-    const privateCorpora = searchCorpora.filter(corpus => corpus.trustDomain === 'secure_local');
+    const privateCorpora = createPublicSourceCorpusRegistry().list('search').filter(corpus => corpus.trustDomain === 'secure_local');
     const corpora = [privateCorpora[0]!, privateCorpora.find(corpus => corpus.sourceId !== privateCorpora[0]!.sourceId)!];
     const ledger = new TierLedger({ dbPath: ':memory:' });
     const stores = corpora.map(corpus => new LocalConnectorStore({ ...corpus, dbPath: ':memory:', tierLedger: ledger }));

@@ -1,4 +1,7 @@
+import { SNIFFER_NAMES_MAX_CHARS } from '../classification/tier-classifier.ts';
+import { connectorLabelCapability, legacyCappedTagProviders, listedLabelObservation, storedLabelProviders } from '../../core/source-connector-labels.ts';
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
+import { tierSetForLedger } from './tier-set-registry.ts';
 import { embedsOnThisComputer } from '../local-pacing.ts';
 import { EMBEDDING_HOLD_REASONS, type EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
 import { trackSqliteStoreMemory, untrackSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
@@ -301,6 +304,7 @@ export const CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXIST
   ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
 const CONNECTOR_STORE_RECENCY_INDEX = 'idx_connector_store_items_recent_live';
 const CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = 'idx_connector_store_items_recent_account_live';
+const CONNECTOR_STORE_PERSONAL_BODY_INDEX = 'idx_connector_store_personal_body_order';
 // Distinct partial predicates let each bounded read use just its own index.
 // The ordinary tombstoned = 0 queries can use neither. A reverse scan also
 // reverses the implicit rowid (item_pk), so the index keys need no extra column.
@@ -312,6 +316,14 @@ const CONNECTOR_STORE_RECENCY_INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX}
     ON items(account_scope, COALESCE(authored_at, updated_at, indexed_at)) WHERE ${ACCOUNT_RECENCY_LIVE_SQL};
 `;
+// Valid ISO source dates compare by instant. The prefix guard excludes SQLite's
+// nondeterministic date keywords. Undated rows share a key and sort by item_pk.
+const PERSONAL_BODY_DATE_SQL = `COALESCE(
+  CASE WHEN authored_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(authored_at) END,
+  CASE WHEN updated_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(updated_at) END,
+  0)`;
+const CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+  ON items(${PERSONAL_BODY_DATE_SQL}, item_pk) WHERE ${RECENCY_LIVE_SQL};`;
 // The most query concepts a keyword match must contain (see searchItemsDetailed).
 const MAX_REQUIRED_CONCEPTS = 3;
 // Or the share of the query's concept weight (IDF) a keyword match must carry.
@@ -395,7 +407,7 @@ const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`)
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
 export { SQLITE_STORE_ID as CONNECTOR_STORE_SQLITE_STORE_ID };
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 17;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 18;
 /** The `sync_runs` connector id of a strip of picture content outside Private stores. */
 export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
 /** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
@@ -579,6 +591,9 @@ export function connectorStoreMigrations() {
     additiveMigration(17, 'connector_store_on_demand_grant_epoch', [
       'CREATE TABLE IF NOT EXISTS on_demand_grant_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)',
       'CREATE TABLE IF NOT EXISTS on_demand_grant_acquisitions (local_item_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL)',
+    ]),
+    additiveMigration(18, 'connector_store_classification_labels', [
+      'ALTER TABLE items ADD COLUMN classification_labels_json TEXT',
     ]),
   ];
 }
@@ -1635,7 +1650,8 @@ export interface ConnectorStoreTierRouting {
  */
 export interface ConnectorStoreItemCopy {
   identity: SourceItemIdentity;
-  columns: Readonly<Record<(typeof CONNECTOR_STORE_COPY_ITEM_COLUMNS)[number], string | number | null>>;
+  columns: Readonly<Record<Exclude<(typeof CONNECTOR_STORE_COPY_ITEM_COLUMNS)[number], 'classification_labels_json'>, string | number | null>
+    & { classification_labels_json?: string }>;
   trustTier: SourceTrustTier;
   owners: ReadonlyArray<{ connectorId: string; ownershipKind: ConnectorStoreOwnershipKind; firstSeenAt: string; lastSeenAt: string }>;
   chunks: ReadonlyArray<{
@@ -1676,6 +1692,50 @@ export interface ConnectorStoreMigrationItem {
   fingerprint: string;
   /** Whether the store's exclusion gate admits the row today. */
   admitted: boolean;
+}
+
+export interface PersonalBodyCursor {
+  date: number;
+  itemPk: number;
+}
+
+// A normal page carries up to 25 items. Even one long document must yield
+// after this many stored chunks (normally 4,000 characters each).
+export const PERSONAL_BODY_CHUNKS_PER_PAGE = 128;
+
+const PERSONAL_BODY_WATCH_EVENTS = [
+  ['insert', 'INSERT ON chunks', 'NEW.item_pk'],
+  ['delete', 'DELETE ON chunks', 'OLD.item_pk'],
+  ['update', 'UPDATE OF item_pk, chunk_index, bounded_text, content_hash ON chunks', 'OLD.item_pk, NEW.item_pk'],
+  ['item_insert', 'INSERT ON items', 'NEW.item_pk'],
+  ['item_update', 'UPDATE ON items', 'OLD.item_pk, NEW.item_pk'],
+  ['item_delete', 'DELETE ON items', 'OLD.item_pk'],
+] as const;
+
+export type PersonalBodyCandidate = ({ watch: string; fingerprint?: never } | { watch?: never; fingerprint: string }) & {
+  chunkCount: number;
+  identity: SourceItemIdentity;
+  mimeType?: string;
+  text: string;
+};
+
+interface PersonalBodyPage {
+  items: PersonalBodyCandidate[];
+  next?: PersonalBodyCursor;
+  partial?: true;
+}
+
+interface PersonalBodyRow {
+  item_pk: number;
+  source_date: number;
+  family: SourceFamily;
+  provider: string;
+  account_scope: string;
+  provider_item_id: string;
+  provider_conversation_id: string | null;
+  local_item_id: string;
+  mime_type: string | null;
+  content_hash: string | null;
 }
 
 export interface ConnectorStoreEmbeddingAuthoritySnapshot {
@@ -3204,6 +3264,50 @@ export interface ConnectorStoreLocalContent {
   providerConversationId?: string;
 }
 
+// Case-folded membership in an older capped note cannot distinguish a short list
+// from a truncated list whose spellings collapse. A fresh listing resolves the gap.
+const LEGACY_CAPPED_TAGS = `provider IN (${legacyCappedTagProviders.map(provider => `'${provider}'`).join(', ')})
+  AND CASE WHEN json_valid(classification_labels_json) THEN json_array_length(classification_labels_json) > 0 ELSE 0 END`;
+const RECOVERABLE_LABEL_SET = `(classification_labels_json IS NULL OR (${LEGACY_CAPPED_TAGS}))`;
+const KNOWN_LABEL_SET = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN 0 WHEN json_valid(classification_labels_json)
+  THEN json_type(classification_labels_json) = 'array' OR json_type(classification_labels_json, '$.labels') = 'array' ELSE 0 END`;
+
+// Also used by the writer's keyed recheck when another connection changed this store.
+const STORED_LABEL_FIELDS = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN classification_labels_json END AS legacyObservation, i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN NULL
+        WHEN ${KNOWN_LABEL_SET} THEN 'known' ELSE 'null' END AS observed,
+      i.title, COALESCE(i.sender_label, i.sender_id) AS sender, i.locator_uri AS locator,
+      CASE WHEN json_valid(i.source_scope_folder_keys_json) THEN i.source_scope_folder_keys_json END AS folderKeys,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN substr(i.search_text, -?1) END AS searchTail,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} AND i.mime_type LIKE 'text/markdown%' THEN
+        (SELECT substr(c.bounded_text, 1, ?1) FROM chunks c WHERE c.item_pk = i.item_pk AND c.chunk_index = 0) END AS opening,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN
+        EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.first_seen_sync_run_id = i.sync_run_id)
+        AND NOT EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND
+          (o.first_seen_sync_run_id <> i.sync_run_id OR o.last_seen_sync_run_id <> i.sync_run_id OR o.first_seen_at <> o.last_seen_at))
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk)
+      END AS originalListing`;
+
+export interface StoredLabelRow {
+  legacyObservation: string | null;
+  itemPk: number;
+  provider: string;
+  accountScope: string;
+  providerItemId: string;
+  providerConversationId: string;
+  observed: string | null;
+  version: string | null;
+  run: string;
+  indexedAt: string;
+  originalListing: number | null;
+  title: string | null;
+  sender: string | null;
+  locator: string | null;
+  searchTail: string | null;
+  opening: string | null;
+  folderKeys: string | null;
+}
+
 export interface ConnectorStoreItemPresence {
   active: boolean;
   sourceVersion?: string;
@@ -3937,7 +4041,8 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
 };`;
 }
 
-function connectorRecencyIndexWorkerSource(): string {
+function connectorRecencyIndexWorkerSource(includePersonalBodyIndex: boolean): string {
+  const sql = CONNECTOR_STORE_RECENCY_INDEX_SQL + (includePersonalBodyIndex ? CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL : '');
   return `
 import { Database } from 'bun:sqlite';
 ${INLINE_CLOSE_SQLITE_STORE}
@@ -3946,7 +4051,7 @@ self.onmessage = ({ data: [path] }) => {
   let result;
   try {
     db.exec('PRAGMA busy_timeout = 0; PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0;');
-    db.transaction(() => db.exec(${JSON.stringify(CONNECTOR_STORE_RECENCY_INDEX_SQL)})).immediate();
+    db.transaction(() => db.exec(${JSON.stringify(sql)})).immediate();
     result = { done: true };
   } catch (error) {
     result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
@@ -4057,6 +4162,7 @@ export class LocalConnectorStore {
   private reactionsColumnPresent = false;
   /** Whether the v15 child-item columns are here (a read-only open of an older store has none). */
   private childItemColumnsPresent = false;
+  private classificationLabelsPresent = false;
   /** The tier set this store belongs to, for judging a child by its parent (`useChildVisibility`). */
   private childLane: ChildVisibilityLane | undefined;
   /** Whether `chunks` carries the v13 media columns (a read-only open of an older store does not). */
@@ -4080,6 +4186,8 @@ export class LocalConnectorStore {
   private tierLedgerHandle: TierLedger | undefined;
   private tierLedgerOwned: boolean | undefined;
   private tierLedgerDisabled: boolean | undefined;
+  private preRoutingLedger: TierLedger | undefined;
+  private preRoutingReadLedger: TierLedger | undefined;
   private boundLedgerHandle: TierLedger | undefined;
   /**
    * Items a sync handed to this store's embedding sweep instead of embedding
@@ -4183,10 +4291,12 @@ export class LocalConnectorStore {
       // each one's 6 minutes to ready (ops#151, 2026-11-12).
       const schemaTarget = options.restoreSchemaVersion ?? CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       const migrating = options.readOnly !== true && versionAtOpen < schemaTarget;
+      // Adding the nullable observation and its invalidation trigger changes no existing rows or references.
+      const checkRows = migrating && !(versionAtOpen === 17 && schemaTarget === 18);
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
       // The checks that read every row are part of the update; the heartbeat
       // says so while they hold the loop.
-      if (migrating) {
+      if (checkRows) {
         setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
         validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
         setEngineStep(undefined);
@@ -4218,10 +4328,16 @@ export class LocalConnectorStore {
           && (this.db.query('PRAGMA user_version').get() as { user_version: number }).user_version === connectorStoreOpenStamp(this.db);
         if (!current) {
           applyConnectorStoreOpenSchema(this.db);
-          if (creatingFile) this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
+          if (creatingFile) {
+            this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
+            if (this.trustDomain === 'internal') {
+              this.db.exec(CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL);
+              this.personalBodyIndexReady = true;
+            }
+          }
           if (this.dbPath !== ':memory:') this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
         }
-        if (migrating) {
+        if (checkRows) {
           setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
           validateConnectorStoreRows(this.db, 'v15');
           validateConnectorStoreForeignKeys(this.db);
@@ -4237,7 +4353,9 @@ export class LocalConnectorStore {
         .get(JSON.stringify(CONNECTOR_STORE_VISIBILITY_TRIGGERS)) as { present: number }).present
         === 3 + CONNECTOR_STORE_VISIBILITY_TRIGGERS.length;
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
-      this.childItemColumnsPresent = tableColumns(this.db, 'items', false).includes('parent_local_item_id');
+      const itemColumns = tableColumns(this.db, 'items', false);
+      this.childItemColumnsPresent = itemColumns.includes('parent_local_item_id');
+      this.classificationLabelsPresent = itemColumns.includes('classification_labels_json');
       this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
       this.imageMediaReadsPresent = this.db.query(
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'",
@@ -4263,10 +4381,8 @@ export class LocalConnectorStore {
         const model = (this.db.query('SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1').get() as { model_id: string } | null)?.model_id;
         if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
-      if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile && (this.db.query(
-        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
-      ).get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n < 2) {
-        if (admitRecencyIndexBuild) this.scheduleRecencyIndexBuild();
+      if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile) {
+        if (!this.recencyIndexesReady() && admitRecencyIndexBuild) this.scheduleRecencyIndexBuild();
       }
       // The split front's start moves one store at a time; the upgrade's wait reads it (#1563).
       reportFrontStoreOpened();
@@ -4279,6 +4395,19 @@ export class LocalConnectorStore {
   }
 
   private recencyIndexTimer: ReturnType<typeof setTimeout> | undefined;
+  private personalBodyIndexReady = false;
+  // Keep an unfinished body in memory only. The durable cursor always points
+  // before it, so closing the store simply restarts that item.
+  private partialPersonalBody?: { itemPk: number; contentHash: string | null; lastChunk: number;
+    count: number; text: string; watch: string } | undefined;
+
+  private recencyIndexesReady(): boolean {
+    const indexes = this.db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)")
+      .all(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX, CONNECTOR_STORE_PERSONAL_BODY_INDEX) as Array<{ name: string }>;
+    this.personalBodyIndexReady = indexes.some(index => index.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX);
+    const recencyIndexes = indexes.length - Number(this.personalBodyIndexReady);
+    return recencyIndexes === 2 && (this.trustDomain !== 'internal' || this.personalBodyIndexReady);
+  }
 
   private scheduleRecencyIndexBuild(delayMs = 0): void {
     this.recencyIndexTimer = setTimeout(() => {
@@ -4292,8 +4421,7 @@ export class LocalConnectorStore {
     const admit = admitRecencyIndexBuild;
     if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved()) return;
     // Another process (the background role, seen from the front) may have built them since.
-    if ((this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)")
-      .get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n >= 2) return;
+    if (this.recencyIndexesReady()) return;
     if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
       this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
       return;
@@ -4307,7 +4435,7 @@ export class LocalConnectorStore {
         // Existing store maintenance writers stand back from the child.
         assertWritableStoreOpenAllowed('connector store recency index', this.dbPath);
         const buildStarted = Date.now();
-        const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
+        const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource(this.trustDomain === 'internal'));
         this.reclaimProcess = child;
         child.unref();
         try {
@@ -4450,6 +4578,8 @@ export class LocalConnectorStore {
       // can retry on a later close; close must not race it with another write.
       if (!this.readOnly && !reclaiming) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
+      this.preRoutingLedger?.close();
+      this.preRoutingReadLedger?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
     } finally {
@@ -4582,17 +4712,25 @@ export class LocalConnectorStore {
 
   /** Batch current item verdicts, independent of placement; unreadable ledgers hold Private. */
   effectiveItemTiers(identities: readonly TierLedgerIdentity[], layer?: 'names'): ReleaseInputVerdict['tier'][] {
+    return this.effectiveStoreVerdicts(identities, layer).map(verdict => verdict.tier);
+  }
+
+  private effectiveStoreVerdicts(identities: readonly TierLedgerIdentity[], layer?: 'names'): ReleaseInputVerdict[] {
     try {
       const ledger = this.governingTierLedger();
       return visibilityHere(effectiveItemVerdicts(
-        () => ledger ? [{ ledger, corpusIds: new Set([this.corpusId]) }] : [],
+        () => ledger ? [{
+          ledger,
+          corpusIds: new Set([this.corpusId]),
+          preRoutingLedger: () => this.preRoutingReadLedgerFor(ledger),
+        }] : [],
         identities.map(identity => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...(layer ? { layer } : {}) })),
         // An item the release check calls gone (routed, no current copy here)
         // is never eligible for a remote exit: held Private unless Secret.
-      )).map(verdict => (verdict.gone && verdict.tier !== 'secret' ? 'private' : verdict.tier));
+      )).map(verdict => verdict.gone && verdict.tier !== 'secret' ? { ...verdict, tier: 'private' } : verdict);
     } catch {
       // An unreadable governing ledger never authorizes this exit.
-      return identities.map(() => 'private');
+      return identities.map(() => ({ tier: 'private', gone: true }));
     }
   }
 
@@ -4607,6 +4745,22 @@ export class LocalConnectorStore {
       provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
       ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
     }])[0]!;
+  }
+
+  /** A live tier set can have inherited items decided beside this store before routing. */
+  preRoutingLedgerFor(setLedger: TierLedger): TierLedger | undefined {
+    const path = tierLedgerPathForStore(this.dbPath);
+    if (path === ':memory:' || path === setLedger.dbPath) return undefined;
+    if (!this.preRoutingLedger && existsSync(path)) this.preRoutingLedger = new TierLedger({ dbPath: path });
+    return this.preRoutingLedger;
+  }
+
+  /** Read the old Personal ledger from an egress path, including a read-only front. */
+  preRoutingReadLedgerFor(setLedger: TierLedger): TierLedger | undefined {
+    if (this.trustDomain !== 'internal') return undefined;
+    const path = tierLedgerPathForStore(this.dbPath);
+    if (path === ':memory:' || path === setLedger.dbPath || !existsSync(path)) return undefined;
+    return this.preRoutingReadLedger ??= new TierLedger({ dbPath: path, readOnly: true, allowWalLessRead: true });
   }
 
   /** The ledger this store records tier decisions in, opening the default one on first use. */
@@ -6024,20 +6178,25 @@ export class LocalConnectorStore {
    * row's version moves to it, so the intake lookup reports the newest Secret version and an older record can
    * not bring the item back. Only the version changes; no names, text or chunks are written.
    */
-  advanceItemVersion(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId' | 'sourceVersion'>, options: { onlyTombstoned?: boolean } = {}): void {
-    if (identity.sourceVersion === undefined) return;
-    // A live row is moved only with its own tombstone (`tombstoneItem`), never ahead of it.
-    this.db.query(`
-      UPDATE items SET source_version = ?
+  advanceItemVersion(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId' | 'sourceVersion'>,
+    options: { onlyTombstoned?: boolean; observedLabels?: string } = {},
+  ): void {
+    if (identity.sourceVersion === undefined && (options.onlyTombstoned
+      || connectorLabelCapability(identity.provider)?.proof !== 'stored')) return;
+    const params = [identity.sourceVersion ?? null, identity.provider, identity.accountScope,
+      normalizeConversationId(identity.providerConversationId), identity.providerItemId] as const;
+    const update = `UPDATE items SET source_version = COALESCE(?, source_version)
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-        ${options.onlyTombstoned === true ? 'AND tombstoned = 1' : ''}
-    `).run(
-      identity.sourceVersion,
-      identity.provider,
-      identity.accountScope,
-      normalizeConversationId(identity.providerConversationId),
-      identity.providerItemId,
-    );
+        ${options.onlyTombstoned ? 'AND tombstoned = 1' : ''}`;
+    if (this.classificationLabelsPresent && options.observedLabels !== undefined) {
+      // Write the explicit listing after the version update's invalidation trigger.
+      this.db.transaction(() => {
+        const row = this.db.query(`${update} RETURNING item_pk`).get(...params) as { item_pk: number } | null;
+        if (row) this.writeLabelObservation(row.item_pk, options.observedLabels);
+      })();
+    } else {
+      this.db.query(update).run(...params);
+    }
   }
 
   hasItemRow(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): boolean {
@@ -7213,9 +7372,13 @@ export class LocalConnectorStore {
   ): { itemPk: number; names: ConnectorStoreItemNames } | undefined {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS
-        .map((column) => (this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column)
-          ? column
-          : `NULL AS ${column}`))
+        .map(column => {
+          if (column === 'classification_labels_json') return this.classificationLabelsPresent
+            ? "CASE WHEN json_valid(classification_labels_json) THEN CASE WHEN (json_type(classification_labels_json) = 'array' OR json_type(classification_labels_json, '$.labels') = 'array') THEN classification_labels_json END END AS classification_labels_json"
+            : 'NULL AS classification_labels_json';
+          return this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column)
+            ? column : `NULL AS ${column}`;
+        })
         .join(', ')}
       FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
@@ -7228,7 +7391,9 @@ export class LocalConnectorStore {
     ) as (Record<string, string | number | null> & { item_pk: number; trust_tier: string }) | null;
     if (!row) return undefined;
     const columns = Object.fromEntries(
-      CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => [column, row[column] ?? null]),
+      // A row with no observation retains its pre-v18 move fingerprint.
+      CONNECTOR_STORE_COPY_ITEM_COLUMNS.filter(column => column !== 'classification_labels_json' || row[column] != null)
+        .map(column => [column, row[column] ?? null]),
     ) as ConnectorStoreItemCopy['columns'];
     const optional = (column: (typeof CONNECTOR_STORE_COPY_ITEM_COLUMNS)[number]): string | undefined =>
       columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
@@ -7374,19 +7539,22 @@ export class LocalConnectorStore {
           items_indexed, started_at, completed_at
         ) VALUES (?, ?, ?, 'completed', NULL, 1, 1, ?, ?)
       `).run(syncRunId, this.corpusId, options.syncConnectorId, now, now);
-      const columnList = CONNECTOR_STORE_COPY_ITEM_COLUMNS.join(', ');
-      const updates = CONNECTOR_STORE_COPY_ITEM_COLUMNS
+      // The row write invalidates any previous label observation, including on a build
+      // rolled back to v17. Reattach the source observation in this transaction.
+      const rowColumns = CONNECTOR_STORE_COPY_ITEM_COLUMNS.filter(column => column !== 'classification_labels_json');
+      const columnList = rowColumns.join(', ');
+      const updates = rowColumns
         .filter((column) => column !== 'provider' && column !== 'account_scope' && column !== 'provider_item_id')
         .map((column) => `${column} = excluded.${column}`)
         .join(', ');
       this.db.query(`
         INSERT INTO items (${columnList}, indexed_at, trust_tier, tombstoned, deleted_at, sync_run_id)
-        VALUES (${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map(() => '?').join(', ')}, ?, ?, 0, NULL, ?)
+        VALUES (${rowColumns.map(() => '?').join(', ')}, ?, ?, 0, NULL, ?)
         ON CONFLICT(provider, account_scope, normalized_conversation, provider_item_id) DO UPDATE SET
           ${updates}, indexed_at = excluded.indexed_at, trust_tier = excluded.trust_tier,
           tombstoned = 0, deleted_at = NULL, sync_run_id = excluded.sync_run_id
       `).run(
-        ...CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => copy.columns[column] ?? null),
+        ...rowColumns.map((column) => copy.columns[column] ?? null),
         now,
         sensitivity.trustTier,
         syncRunId,
@@ -7400,6 +7568,7 @@ export class LocalConnectorStore {
         normalizeConversationId(copy.identity.providerConversationId),
         copy.identity.providerItemId,
       ) as { item_pk: number }).item_pk;
+      this.writeLabelObservation(itemPk, copy.columns.classification_labels_json);
       for (const owner of copy.owners) {
         this.db.query(`
           INSERT INTO item_owners (
@@ -7832,6 +8001,170 @@ export class LocalConnectorStore {
     return { items, ...(rows.length === limit ? { nextAfterItemPk: rows[rows.length - 1]!.item_pk } : {}) };
   }
 
+  // An oversized body spans snapshots. Watch just that item's writes, from
+  // every connection, until its final slice has been placed. These temporary
+  // repair objects live in main so other writers invalidate the same token.
+  // They carry no content and are removed before the walker retires.
+  private watchPersonalBody(itemPk: number): string {
+    const token = randomUUID();
+    return this.db.transaction(() => {
+      this.db.exec('CREATE TABLE IF NOT EXISTS legacy_body_watch (item_pk INTEGER PRIMARY KEY, token TEXT NOT NULL)');
+      for (const [name, event, keys] of PERSONAL_BODY_WATCH_EVENTS) {
+        this.db.exec(`CREATE TRIGGER IF NOT EXISTS legacy_body_watch_${name} AFTER ${event}
+          BEGIN DELETE FROM legacy_body_watch WHERE item_pk IN (${keys}); END`);
+      }
+      this.db.exec('DELETE FROM legacy_body_watch');
+      this.db.query('INSERT INTO legacy_body_watch (item_pk, token) VALUES (?, ?)').run(itemPk, token);
+      return token;
+    }).immediate();
+  }
+
+  personalBodyWatchCurrent(token: string): boolean {
+    return this.db.transaction(() => {
+      const triggers = this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'legacy_body_watch_*'")
+        .get() as { n: number };
+      return triggers.n === PERSONAL_BODY_WATCH_EVENTS.length
+        && !!this.db.query('SELECT 1 FROM legacy_body_watch WHERE token = ?').get(token);
+    })();
+  }
+
+  finishPersonalBodyWalk(): void {
+    this.preRoutingLedger?.close();
+    this.preRoutingLedger = undefined;
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'legacy_body_watch'").get()) return;
+    this.db.transaction(() => {
+      for (const [name] of PERSONAL_BODY_WATCH_EVENTS) this.db.exec(`DROP TRIGGER IF EXISTS legacy_body_watch_${name}`);
+      this.db.exec('DROP TABLE IF EXISTS legacy_body_watch');
+    }).immediate();
+  }
+
+  /** Vector-only remnants have no text to classify. Never remove a newly written body or its vectors. */
+  clearOrphanPersonalVectors(identity: SourceItemIdentity): void {
+    this.db.query(`DELETE FROM chunk_embeddings WHERE item_pk IN (
+      SELECT item_pk FROM items i WHERE provider = ? AND account_scope = ? AND normalized_conversation = ?
+        AND provider_item_id = ? AND tombstoned = 0 AND NOT EXISTS (SELECT 1 FROM chunks WHERE item_pk = i.item_pk)
+    )`).run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+  }
+
+  /**
+   * The one-time Personal body walk. Advance by the last item examined even
+   * when the page has no text. On an older store, the recency-index worker
+   * builds the order index before the first page so a lap never sorts the store.
+   */
+  personalBodyPageFinder(after: PersonalBodyCursor | undefined, limit: number, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE): LoopFinder<PersonalBodyPage | undefined> {
+    return {
+      here: () => this.readHere(this.personalBodyPageSteps(after, limit, chunkLimit)),
+      offThread: () => this.readStepsInBackground(this.personalBodyPageSteps(after, limit, chunkLimit)),
+    };
+  }
+
+  private *personalBodyPageSteps(after: PersonalBodyCursor | undefined, limit: number, chunkLimit: number): Generator<StoreRead, PersonalBodyPage | undefined, unknown> {
+    if (!this.personalBodyIndexReady) {
+      this.personalBodyIndexReady = Boolean(yield {
+        mode: 'get',
+        sql: "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+        params: [CONNECTOR_STORE_PERSONAL_BODY_INDEX],
+      });
+      if (!this.personalBodyIndexReady) return undefined;
+    }
+    const pageSize = Math.max(1, Math.floor(limit));
+    const select = `
+      SELECT item_pk, ${PERSONAL_BODY_DATE_SQL} AS source_date, family, provider, account_scope, provider_item_id,
+        provider_conversation_id, local_item_id, mime_type, content_hash
+      FROM items INDEXED BY ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+      WHERE ${RECENCY_LIVE_SQL}`;
+    const order = `ORDER BY ${PERSONAL_BODY_DATE_SQL} DESC, item_pk DESC LIMIT ?`;
+    // SQLite can seek both keys when the date is fixed. A tuple comparison
+    // over the date expression would scan the index again from the top.
+    const sameDate = after ? (yield {
+      mode: 'all',
+      sql: `${select} AND ${PERSONAL_BODY_DATE_SQL} = ? AND item_pk < ? ORDER BY item_pk DESC LIMIT ?`,
+      params: [after.date, after.itemPk, pageSize],
+    }) as PersonalBodyRow[] : [];
+    const older = sameDate.length < pageSize && after?.date !== 0 ? (yield {
+      mode: 'all',
+      sql: `${select} AND ${PERSONAL_BODY_DATE_SQL} ${after ? '< ?' : '>= 0'} ${order}`,
+      params: after ? [after.date, pageSize - sameDate.length] : [pageSize],
+    }) as PersonalBodyRow[] : [];
+    const rows = [...sameDate, ...older];
+    return yield* this.readPersonalBodyRows(rows, after, pageSize, chunkLimit);
+  }
+
+  /** An exact ledger identity, using the same bounded body reader as the recency walk. */
+  personalBodyForIdentityFinder(identity: TierLedgerIdentity, chunkLimit: number): LoopFinder<PersonalBodyPage> {
+    const steps = () => this.personalBodyForIdentitySteps(identity, chunkLimit);
+    return { here: () => this.readHere(steps()), offThread: () => this.readStepsInBackground(steps()) };
+  }
+
+  private *personalBodyForIdentitySteps(identity: TierLedgerIdentity, chunkLimit: number): Generator<StoreRead, PersonalBodyPage, unknown> {
+    const rows = (yield {
+      sql: `SELECT item_pk, 0 AS source_date, family, provider, account_scope, provider_item_id,
+          provider_conversation_id, local_item_id, mime_type, content_hash FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`,
+      params: [identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId],
+      mode: 'all',
+    }) as PersonalBodyRow[];
+    return yield* this.readPersonalBodyRows(rows, undefined, 1, chunkLimit);
+  }
+
+  private *readPersonalBodyRows(rows: PersonalBodyRow[], after: PersonalBodyCursor | undefined, pageSize: number,
+    chunkLimit: number): Generator<StoreRead, PersonalBodyPage, unknown> {
+    const items: PersonalBodyCandidate[] = [];
+    let next = after;
+    let remaining = Math.max(1, Math.min(PERSONAL_BODY_CHUNKS_PER_PAGE, Math.floor(chunkLimit)));
+    for (const row of rows) {
+      const saved = this.partialPersonalBody;
+      const prefix = saved?.itemPk === row.item_pk && saved.contentHash === row.content_hash
+        && this.personalBodyWatchCurrent(saved.watch) ? saved : undefined;
+      // Both the bounded read and concatenation run on the background SQL
+      // worker. The final EXISTS probes only the next index key.
+      const part = (yield {
+        mode: 'get',
+        sql: `WITH slice AS (
+          SELECT chunk_index, bounded_text, content_hash FROM chunks
+          WHERE item_pk = ? AND chunk_index > ? ORDER BY chunk_index LIMIT ?
+        ), body AS (
+          SELECT COUNT(*) AS n, MAX(chunk_index) AS lastChunk,
+            group_concat(bounded_text, '' ORDER BY chunk_index) AS text,
+            group_concat(content_hash, char(0) ORDER BY chunk_index) AS hashes FROM slice
+        ) SELECT body.*, EXISTS(SELECT 1 FROM chunks WHERE item_pk = ? AND chunk_index > body.lastChunk) AS more,
+          CASE WHEN body.n = 0 THEN EXISTS(SELECT 1 FROM chunk_embeddings WHERE item_pk = ?) ELSE 0 END AS orphanVectors FROM body`,
+        params: [row.item_pk, prefix?.lastChunk ?? -1, remaining, row.item_pk, row.item_pk],
+      }) as { n: number; lastChunk: number; text: string | null; hashes: string | null; more: number; orphanVectors: number };
+      const text = (prefix?.text ?? '') + (part.text ?? '');
+      const count = (prefix?.count ?? 0) + part.n;
+      remaining -= part.n;
+      if (part.more) {
+        // Give the item a full page before installing a cross-tick watch.
+        if (!prefix && next !== after) return { items, next: next! };
+        // The first snapshot predates the watch. Start again under the token.
+        this.partialPersonalBody = prefix ? { ...prefix, lastChunk: part.lastChunk, count, text } : {
+          itemPk: row.item_pk, contentHash: row.content_hash, watch: this.watchPersonalBody(row.item_pk),
+          lastChunk: -1, count: 0, text: '',
+        };
+        return { items, ...(next ? { next } : {}), partial: true };
+      }
+      this.partialPersonalBody = undefined;
+      next = { date: row.source_date, itemPk: row.item_pk };
+      if (count || part.orphanVectors) items.push({
+        ...(prefix ? { watch: prefix.watch } : { fingerprint: migrationFingerprintParts(row.content_hash, count, part.hashes ?? '') }),
+        identity: {
+          family: row.family,
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          localItemId: row.local_item_id,
+          ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+        },
+        ...(row.mime_type ? { mimeType: row.mime_type } : {}),
+        text, chunkCount: count,
+      });
+      if (!remaining || prefix) return { items, next };
+    }
+    this.partialPersonalBody = undefined;
+    return { items, ...(rows.length === pageSize && next ? { next } : {}) };
+  }
+
   /**
    * The same fingerprint `migrationItemsPage` reports, for one item's ACTIVE
    * row; undefined when the store holds no active row for it. A migration
@@ -7839,6 +8172,7 @@ export class LocalConnectorStore {
    */
   itemMigrationFingerprint(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    chunkLimit = -1,
   ): string | undefined {
     const row = this.db.query(`
       SELECT item_pk, content_hash FROM items
@@ -7851,8 +8185,8 @@ export class LocalConnectorStore {
       identity.providerItemId,
     ) as { item_pk: number; content_hash: string | null } | null;
     if (!row) return undefined;
-    const hashes = (this.db.query('SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index')
-      .all(row.item_pk) as Array<{ content_hash: string }>).map((chunk) => chunk.content_hash);
+    const hashes = (this.db.query('SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index LIMIT ?')
+      .all(row.item_pk, chunkLimit) as Array<{ content_hash: string }>).map((chunk) => chunk.content_hash);
     return migrationFingerprint(row.content_hash, hashes);
   }
 
@@ -9449,15 +9783,20 @@ export class LocalConnectorStore {
     this.notifyOnDemandGrantChange();
   }
 
+  private revokeDeletedItemReads(id: string, requireActiveRow = false): void {
+    const set = tierSetForLedger(this.tierLedgerPathInUse());
+    const stores = set?.store(this.trustDomain) === this ? set.openStores() : [this];
+    if (requireActiveRow && !stores.some(store => store.activeLocalItemRow(id))) return;
+    for (const store of stores) store.revokeOnDemandRead(id);
+  }
+
+  onDemandGrantIds(): string[] {
+    return this.db.query<{ local_item_id: string }, []>('SELECT local_item_id FROM on_demand_item_reads')
+      .all().map(row => row.local_item_id);
+  }
+
   revokeOnDemandRead(localItemId: string): void {
-    const previous = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
-    this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
-    try {
-      const removed = this.db.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run(localItemId);
-      if (removed.changes > 0) this.notifyOnDemandGrantChange();
-    } finally {
-      this.db.exec(`PRAGMA busy_timeout = ${previous}`);
-    }
+    if (deleteOnDemandGrant(this.db, localItemId)) this.notifyOnDemandGrantChange();
   }
 
   onDemandGrantEpoch(): number | undefined {
@@ -12188,6 +12527,10 @@ export class LocalConnectorStore {
           // deleted, rejected, or indexed — shares the same fairness bound.
           await this.controlPath.ingestionTurn();
 
+          if (item.metadata['deleted'] === true) {
+            this.revokeDeletedItemReads(item.identity.localItemId, item.metadata['deletedIdentityResolved'] === false);
+          }
+
           // FIRST, before content is fetched, before classification, before
           // any scope or allowlist is consulted. Enforcing here is what makes
           // the saving real rather than cosmetic: an excluded item costs one
@@ -12278,6 +12621,7 @@ export class LocalConnectorStore {
           if (route.kind === 'store' && route.sensitivity.trustDomain !== this.trustDomain) {
             throw new Error('A tier route must place an item only in the store that asked.');
           }
+          const listedItem = itemForStorage;
           const routedLayer = route.kind === 'store' ? route.layer : undefined;
           const sensitivity = route.kind === 'store' ? route.sensitivity : legacySensitivity;
           if (route.kind === 'legacy' && itemForStorage.metadata['deleted'] !== true
@@ -12414,6 +12758,8 @@ export class LocalConnectorStore {
               (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === 'metadata_only',
               sourceScopeObservation,
               routedLayer && routedLayer !== 'metadata' ? 'content' : undefined,
+              options?.ownerObservation !== 'local_write' && routedLayer !== 'content'
+                ? listedLabelObservation(connector, listedItem) : undefined,
             );
           } catch (error) {
             if (!(error instanceof ConnectorStoreTierWriteRefusedError)) throw error;
@@ -12674,6 +13020,50 @@ export class LocalConnectorStore {
     };
   }
 
+  /** Page by primary key before filtering, so even a store with one old row at the end costs one page per tick. */
+  async storedLabelPage(after: number, limit: number, checkKnown: boolean): Promise<{ rows: StoredLabelRow[]; last: number; end: boolean }> {
+    if (!this.classificationLabelsPresent) return { rows: [], last: after, end: true };
+    const sql = `WITH page AS MATERIALIZED (SELECT item_pk FROM items WHERE item_pk > ?2 ORDER BY item_pk LIMIT ?3)
+      SELECT page.item_pk AS cursor, i.item_pk AS itemPk, i.provider, i.account_scope AS accountScope,
+      i.normalized_conversation AS providerConversationId, i.provider_item_id AS providerItemId,
+      ${STORED_LABEL_FIELDS}
+      FROM page LEFT JOIN items i ON i.item_pk = page.item_pk AND i.tombstoned = 0
+        AND i.provider IN (SELECT value FROM json_each(?4))
+        AND (?5 OR ${RECOVERABLE_LABEL_SET} OR i.classification_labels_json = 'null') ORDER BY page.item_pk`;
+    const params = [SNIFFER_NAMES_MAX_CHARS * 2, after, limit, JSON.stringify(storedLabelProviders), Number(checkKnown)];
+    const rows = (offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params, mode: 'all' })
+      : this.db.query(sql).all(...params)) as Array<StoredLabelRow & { cursor: number }>;
+    return { rows: rows.filter(row => row.itemPk != null), last: rows.at(-1)?.cursor ?? after, end: rows.length < limit };
+  }
+
+  /** Called with the write lock. Unrelated writes must not starve recovery of a quiet archive row. */
+  labelRowUnchanged(row: StoredLabelRow): boolean {
+    const current = this.db.query(`SELECT ${STORED_LABEL_FIELDS} FROM items i WHERE i.item_pk = ?2 AND i.tombstoned = 0
+      AND i.provider = ?3 AND i.account_scope = ?4 AND i.normalized_conversation = ?5 AND i.provider_item_id = ?6`)
+      .get(SNIFFER_NAMES_MAX_CHARS * 2, row.itemPk, row.provider, row.accountScope, row.providerConversationId, row.providerItemId) as Partial<StoredLabelRow> | null;
+    return current !== null && (Object.keys(current) as Array<keyof StoredLabelRow>).every(key => current[key] === row[key]);
+  }
+
+  /** Undefined if this store has no active row for the item. */
+  hasListedLabels(identity: TierLedgerIdentity): boolean | undefined {
+    if (!this.classificationLabelsPresent) return undefined;
+    const row = this.db.query(`SELECT ${KNOWN_LABEL_SET} AS known
+      FROM items WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`)
+      .get(identity.provider, identity.accountScope, identity.providerConversationId ?? '', identity.providerItemId) as { known: number } | null;
+    return row ? Boolean(row.known) : undefined;
+  }
+
+  recordRecoveredLabels(row: StoredLabelRow, labels: string): void {
+    this.db.query('UPDATE items SET classification_labels_json = ? WHERE item_pk = ? AND tombstoned = 0 AND classification_labels_json IS ?')
+      .run(labels, row.itemPk, row.legacyObservation);
+  }
+
+  private writeLabelObservation(itemPk: number, labels: string | undefined): void {
+    if (this.classificationLabelsPresent && typeof labels === 'string') {
+      this.db.query('UPDATE items SET classification_labels_json = ? WHERE item_pk = ?').run(labels, itemPk);
+    }
+  }
+
   private upsertItem(
     item: RawItem,
     sensitivity: SourceSensitivity,
@@ -12898,10 +13288,18 @@ export class LocalConnectorStore {
     preserveStoredContentHash = false,
     sourceScopeObservation?: { accountGeneration: string; scopeRevision: string; folderKeys: readonly string[] },
     requiredLayer: TierSearchLayer = textFromRawItem(item) === undefined ? 'metadata' : 'content',
+    observedLabels?: string,
   ): { itemPk: number; ftsMetadataChanged: boolean; contentChanged: boolean } {
     const tierLedgerForWrite = this.visibilityLedger();
     const written = this.db.transaction(() => {
       if (!this.tierWriteAllowed(item.identity, requiredLayer, tierLedgerForWrite)) throw new ConnectorStoreTierWriteRefusedError();
+      // Enriching the same version supplies no new names. Only a provider listing
+      // observes label membership (including the empty list).
+      const previous = observation === 'local_write' && this.classificationLabelsPresent
+        && connectorLabelCapability(item.identity.provider)?.proof === 'stored'
+        ? this.exportItemNames(item.identity) : undefined;
+      const labels = observedLabels ?? (previous && previous.identity.sourceVersion === item.identity.sourceVersion
+        ? previous.columns.classification_labels_json : undefined);
       const upsert = this.upsertItem(
         item,
         sensitivity,
@@ -12911,6 +13309,7 @@ export class LocalConnectorStore {
         preserveStoredContentHash,
         sourceScopeObservation,
       );
+      this.writeLabelObservation(upsert.itemPk, labels);
       // Ownership time is the actual application observation, not sync-run
       // start. A provider call can be slow; stamping the earlier start time
       // would let a concurrent snapshot incorrectly remove a newly seen item.
@@ -13034,6 +13433,7 @@ export class LocalConnectorStore {
             deferred.push(localItemId);
             break;
           }
+          this.revokeDeletedItemReads(localItemId);
           this.db.query(`
             UPDATE items
             SET tombstoned = 1, deleted_at = ?, indexed_at = ?, sync_run_id = ?
@@ -13076,7 +13476,7 @@ export class LocalConnectorStore {
       for (const scope of scopes) {
       const rows = currentMembershipAuthority === 'provider_account_snapshot'
         ? this.db.query(`
-            SELECT DISTINCT i.item_pk, i.tombstoned
+            SELECT DISTINCT i.item_pk, i.tombstoned, i.local_item_id
             FROM items i
             WHERE (i.tombstoned = 0 OR i.trust_tier = 'S5')
               AND i.provider = ?
@@ -13101,9 +13501,9 @@ export class LocalConnectorStore {
             scope.accountScope,
             syncRunId,
             snapshotObservedAt ?? '',
-          ) as Array<{ item_pk: number; tombstoned: number }>
+          ) as Array<{ item_pk: number; tombstoned: number; local_item_id: string }>
         : this.db.query(`
-            SELECT DISTINCT i.item_pk, i.tombstoned
+            SELECT DISTINCT i.item_pk, i.tombstoned, i.local_item_id
             FROM items i
             JOIN item_owners owner
               ON owner.item_pk = i.item_pk
@@ -13117,9 +13517,10 @@ export class LocalConnectorStore {
                 WHERE preservation.item_pk = i.item_pk
                   AND preservation.ownership_kind = 'preservation'
               )
-          `).all(connectorId, syncRunId, scope.provider, scope.accountScope) as Array<{ item_pk: number; tombstoned: number }>;
+          `).all(connectorId, syncRunId, scope.provider, scope.accountScope) as Array<{ item_pk: number; tombstoned: number; local_item_id: string }>;
 
         for (const row of rows) {
+          this.revokeDeletedItemReads(row.local_item_id);
           // A Secret kept as a location only that the provider no longer lists: it is deleted like any
           // other item, so the location row becomes an ordinary tombstone (and is not counted as one).
           if (row.tombstoned === 1) {
@@ -14174,14 +14575,15 @@ export class LocalConnectorStore {
    * from the store and one batched ledger read: a row whose item is now
    * Private by its stored tier or effective text verdict (unknown included)
    * is counted `privateTier`; one deleted, Secret, or kept out of view by the
-   * ledger is counted `notVisible`. With no `embeddableTiers` (an embedder
-   * approved for Private content), Private text remains eligible. Synchronous, so the caller can dispatch
-   * with no await in between. Visibility is looked up for the batch's items
-   * alone, not by rebuilding the store's whole hidden-copy set.
+   * ledger is counted `notVisible`. An unrouted Private verdict holds the
+   * body from every cloud embedder until placement. Synchronous, so the
+   * caller can dispatch with no await in between. Visibility is looked up for
+   * the batch's items alone, not by rebuilding the whole hidden-copy set.
    */
   private embeddingBatchRecheck<T extends { item_pk: number }>(
     batch: readonly T[],
     embeddableTiers: readonly SourceTrustTier[] | undefined,
+    cloud: boolean,
     allowHeld: boolean,
     scope: ReturnType<typeof statusScopeContentFilter>,
   ): { kept: T[]; privateTier: number; notVisible: number } {
@@ -14200,20 +14602,22 @@ export class LocalConnectorStore {
     }>;
     const current = new Map(currentRows.map((row) => [row.item_pk, row] as const));
     const hidden = this.embeddingHiddenAmong(currentRows, allowHeld);
-    const verdicts = this.effectiveItemTiers(currentRows.map(item => ({
+    const verdicts = this.effectiveStoreVerdicts(currentRows.map(item => ({
       provider: item.provider, accountScope: item.account_scope, providerItemId: item.provider_item_id,
       ...(item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}),
     })));
-    const tiers = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]]));
+    const verdictByPk = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]!]));
     const kept: T[] = [];
     let privateTier = 0;
     let notVisible = 0;
     for (const row of batch) {
       const item = current.get(row.item_pk);
-      if (!item || item.tombstoned !== 0 || item.trust_tier === 'S5' || tiers.get(row.item_pk) === 'secret' || hidden.has(row.item_pk)) {
+      const verdict = verdictByPk.get(row.item_pk);
+      if (!item || item.tombstoned !== 0 || item.trust_tier === 'S5' || verdict?.tier === 'secret' || hidden.has(row.item_pk)) {
         notVisible += 1;
-      } else if (embeddableTiers !== undefined && (!(embeddableTiers as readonly string[]).includes(item.trust_tier)
-        || tiers.get(row.item_pk) === 'private' || tiers.get(row.item_pk) === 'unknown')) {
+      } else if ((cloud && (verdict?.gone || verdict?.unroutedPrivate))
+        || (embeddableTiers !== undefined && (!(embeddableTiers as readonly string[]).includes(item.trust_tier)
+          || verdict?.tier === 'private' || verdict?.tier === 'unknown'))) {
         privateTier += 1;
       } else {
         kept.push(row);
@@ -14695,7 +15099,7 @@ export class LocalConnectorStore {
       // Item and classification writes are not serialized by the embedding
       // lease. Recheck after any imageSupport await, immediately before dispatch.
       {
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === 'cloud', allowHeld(), dispatchScope);
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
@@ -14765,7 +15169,7 @@ export class LocalConnectorStore {
         staleSkipped += failedRows.size;
         batch = batch.filter((row) => !failedRows.has(row));
         if (batch.length === 0) continue;
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === 'cloud', allowHeld(), dispatchScope);
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
@@ -14786,7 +15190,7 @@ export class LocalConnectorStore {
       const writtenItemPks: number[] | undefined = options.onBatchWritten ? [] : undefined;
       this.db.transaction(() => {
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
-        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope).kept);
+        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === 'cloud', allowHeld(), dispatchScope).kept);
         for (let index = 0; index < batch.length; index += 1) {
           const row = batch[index]!;
           if (!stillEligible.has(row)) continue;
@@ -17869,8 +18273,12 @@ export class LocalConnectorStore {
     // A scope that says only "older than this is names only" narrows no
     // population, so it must not switch on the file-scope counts below: those
     // belong to a store whose scope picks WHICH files to read.
-    const fileScoped = policyHolds.size > 0 || Object.entries(scope ?? {})
-      .some(([key, value]) => key !== 'contentNotBefore' && key !== 'embedding' && value !== undefined);
+    // The sweep's embedding population rides along on the scope but picks no
+    // files: a scope carrying only that counts as no scope at all.
+    const ownScope = Object.entries(scope ?? {}).filter(([key]) => key !== 'embedding');
+    const embeddingOnly = scope?.embedding !== undefined && ownScope.every(([, value]) => value === undefined);
+    const fileScoped = policyHolds.size > 0 || (scope !== undefined && !embeddingOnly && !(scope.contentNotBefore !== undefined
+      && ownScope.every(([key, value]) => key === 'contentNotBefore' || value === undefined)));
     // Rows dated before the window that hold no text. julianday reads any ISO
     // form (Z, fractional seconds, offsets), and COALESCE keeps an unparseable
     // date a plain "not outside" instead of a NULL that NOT would swallow.
@@ -20722,7 +21130,7 @@ const CONNECTOR_STORE_COPY_ITEM_COLUMNS = [
   'source_version', 'title', 'search_text', 'reactions_json', 'source_scope_generation',
   'source_scope_revision', 'source_scope_folder_keys_json', 'sender_id', 'sender_label',
   'sender_is_owner', 'locator_uri', 'mime_type', 'authored_at', 'updated_at', 'fetched_at',
-  'content_hash', 'parent_local_item_id', 'deferred_locator', 'bytes_available', 'size_bytes',
+  'content_hash', 'parent_local_item_id', 'deferred_locator', 'bytes_available', 'size_bytes', 'classification_labels_json',
 ] as const;
 
 const CONNECTOR_STORE_CHILD_ITEM_COLUMNS: readonly string[] = [
@@ -20770,12 +21178,16 @@ function namesOnlyKeptCount(n: number): { namesOnlyKeptChunks?: number } {
 
 /** Content-free fingerprint of an item's stored text: its content hash and its chunks' hashes. */
 function migrationFingerprint(contentHash: string | null, chunkHashes: readonly string[]): string {
+  return migrationFingerprintParts(contentHash, chunkHashes.length, chunkHashes.join('\u0000'));
+}
+
+function migrationFingerprintParts(contentHash: string | null, count: number, hashes: string): string {
   return createHash('sha256')
     .update(contentHash ?? '')
     .update('\u0000')
-    .update(String(chunkHashes.length))
+    .update(String(count))
     .update('\u0000')
-    .update(chunkHashes.join('\u0000'))
+    .update(hashes)
     .digest('hex');
 }
 
@@ -22347,6 +22759,8 @@ const CONNECTOR_STORE_V15_ITEM_COLUMNS = [
   'size_bytes',
 ] as const;
 
+const CONNECTOR_STORE_V18_ITEM_COLUMNS = [...CONNECTOR_STORE_V15_ITEM_COLUMNS, 'classification_labels_json'] as const;
+
 const CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS = [
   'item_pk', 'claim_scope', 'claim_authority', 'claim_ordinal', 'claim_holder',
   'claim_generation', 'accepted_at',
@@ -22388,7 +22802,8 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
     validateConnectorStoreV12Schema(db, 'v14', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   }
   if (version >= 15) {
-    validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+    validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS,
+      version >= 18 ? CONNECTOR_STORE_V18_ITEM_COLUMNS : CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   }
   if (version >= 16) validateVectorDigestSchema(db);
@@ -22433,7 +22848,9 @@ function validateVectorDigestSchema(db: Database): void {
 }
 
 function validateConnectorStoreSchema(db: Database, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION): void {
-  validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS,
+    version >= 18 ? CONNECTOR_STORE_V18_ITEM_COLUMNS : CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  if (version >= 18) assertTriggerExists(db, 'connector_store_invalidate_label_observation', 'v18');
   if (version >= 16) validateVectorDigestSchema(db);
   if (version >= 17) {
     assertExactTableColumns(db, 'on_demand_grant_epoch', ['id', 'epoch'], false, 'v17');
@@ -22694,6 +23111,17 @@ const ON_DEMAND_GRANT_EPOCH_TRIGGERS = [
   'on_demand_grant_delete', 'on_demand_grant_update', 'on_demand_item_delete', 'on_demand_item_update', 'on_demand_grant_insert',
 ] as const;
 
+export function deleteOnDemandGrant(db: Database, localItemId: string): boolean {
+  const previous = (db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+  db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+  try {
+    const removed = db.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run(localItemId);
+    return removed.changes > 0;
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${previous}`);
+  }
+}
+
 function createOnDemandReads(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
     local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
@@ -22764,6 +23192,14 @@ function applyConnectorStoreOpenSchema(db: Database, version = CONNECTOR_STORE_S
   createConnectorStorePeopleIndex(db);
   createOnDemandReads(db);
   if (version >= 17) createOnDemandGrantEpoch(db);
+  if (version >= 18) {
+    // Older writers also fire this trigger. Re-listing, withdrawing names, or
+    // replacing a row cannot leave a stale nonmatch attached to it.
+    db.exec(`CREATE TRIGGER IF NOT EXISTS connector_store_invalidate_label_observation
+      AFTER UPDATE OF sync_run_id, source_version, tombstoned, title ON items
+      WHEN OLD.classification_labels_json IS NOT NULL
+      BEGIN UPDATE items SET classification_labels_json = NULL WHERE item_pk = NEW.item_pk; END`);
+  }
   validateConnectorStoreSchema(db, version);
 }
 
@@ -22810,7 +23246,8 @@ export function connectorStoreOpenStamp(db: Database): number {
   let hash = connectorStoreOpenShape() >>> 0;
   for (const row of rows) {
     // These optional indexes commit off-thread, independently of open.
-    if (row.type === 'index' && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX)) continue;
+    if (row.type === 'index' && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX
+      || row.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX)) continue;
     const text = `${row.type}\u0000${row.name}\u0000${row.tbl_name}\u0000${row.sql ?? ''}\n`;
     for (let index = 0; index < text.length; index += 1) {
       hash ^= text.charCodeAt(index);

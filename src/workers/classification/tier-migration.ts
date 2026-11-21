@@ -1939,6 +1939,7 @@ function rollbackRetainedCopies(set: TieredStoreSet, identity: TierLedgerIdentit
             const currentNames = original?.exportItemNames(identity);
             const restoredNames = retained?.exportItemNames(identity);
             if (!currentNames || !restoredNames
+              || currentNames.columns.classification_labels_json !== restoredNames.columns.classification_labels_json
               || JSON.stringify(storedSignals(currentNames)) !== JSON.stringify(storedSignals(restoredNames))) return false;
           }
         }

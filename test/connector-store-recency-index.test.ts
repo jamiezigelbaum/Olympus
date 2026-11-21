@@ -11,12 +11,13 @@ import {
   setConnectorStoreRecencyIndexAdmission,
   type ConnectorStoreSearchFilters,
 } from '../src/workers/connector-store/local-index.ts';
-import { readOnPool, type StoreRead } from '../src/workers/connector-store/off-thread-reads.ts';
+import { readOnPool, setReadPoolObserverForTests, type StoreRead } from '../src/workers/connector-store/off-thread-reads.ts';
 import { waitFor } from './helpers/test-clock.ts';
 import { tempDir } from './helpers/tier-fixtures.ts';
 
 const GLOBAL_INDEX = 'idx_connector_store_items_recent_live';
 const ACCOUNT_INDEX = 'idx_connector_store_items_recent_account_live';
+const PERSONAL_BODY_INDEX = 'idx_connector_store_personal_body_order';
 const TIE = '2026-11-19T09:02:00.000Z';
 const EARLIER = '2026-11-19T09:01:00.000Z';
 const LATER = '2026-11-19T09:03:00.000Z';
@@ -74,6 +75,66 @@ function indexSql(db: Database, index: string): string | undefined {
   return db.query<{ sql: string }, [string]>("SELECT sql FROM main.sqlite_master WHERE type = 'index' AND name = ?").get(index)?.sql;
 }
 
+test('Personal body pages seek through source-date ties before reaching undated rows by insertion order', async () => {
+  const { dir, cleanup } = tempDir('olympus-personal-body-pages-');
+  const options = { dbPath: join(dir, 'chat.sqlite'), corpusId: 'internal.fixture.chat', family: 'chat', trustDomain: 'internal', tierLedger: null } as const;
+  const store = new LocalConnectorStore(options);
+  const db = new Database(options.dbPath);
+  try {
+    await store.syncFromConnector(chatFixture(), { fetchContent: true });
+    db.exec("UPDATE items SET authored_at = NULL WHERE local_item_id IN ('m3', 'm4', 'm6')");
+    db.query("UPDATE items SET updated_at = ? WHERE local_item_id = 'm3'").run(LATER);
+    db.query("UPDATE items SET indexed_at = ? WHERE local_item_id = 'm4'").run(LATER);
+    db.query("UPDATE items SET indexed_at = ? WHERE local_item_id = 'm6'").run(EARLIER);
+    db.exec("UPDATE items SET authored_at = '2026-11-19T08:04:00-01:00' WHERE local_item_id = 'm5'");
+    db.exec("UPDATE items SET tombstoned = 1 WHERE local_item_id = 'm7'");
+    db.exec("DELETE FROM chunks WHERE item_pk = (SELECT item_pk FROM items WHERE local_item_id = 'm8')");
+
+    const reads: StoreRead[] = [];
+    setReadPoolObserverForTests((path, read) => { if (path === options.dbPath) reads.push(read); }, { snapshots: true });
+    const first = (await store.personalBodyPageFinder(undefined, 2).offThread())!;
+    expect(first.items.map((item) => item.identity.providerItemId)).toEqual(['m5', 'm3']);
+    const second = (await store.personalBodyPageFinder(first.next, 2).offThread())!;
+    expect(second.items.map((item) => item.identity.providerItemId)).toEqual(['m2']);
+    const third = (await store.personalBodyPageFinder(second.next, 2).offThread())!;
+    expect(third.items.map((item) => item.identity.providerItemId)).toEqual(['m1', 'm6']);
+    const last = (await store.personalBodyPageFinder(third.next, 2).offThread())!;
+    expect(last.items.map((item) => item.identity.providerItemId)).toEqual(['m4']);
+    expect(last.next).toBeUndefined();
+    // The read worker returns already grouped text. Each slice seeks the
+    // chunk index and stops at its budget before aggregating.
+    const slices = reads.filter(read => read.sql.includes('FROM chunks'));
+    expect(slices.length).toBeGreaterThan(0);
+    for (const slice of slices) {
+      expect(plan(db, slice)).toContainEqual(expect.stringMatching(/SEARCH chunks USING INDEX .*item_pk=.*chunk_index>/));
+      expect(slice.sql).toMatch(/ORDER BY chunk_index LIMIT \?/);
+      const group = db.query(slice.sql).get(...slice.params as SQLQueryBindings[]);
+      expect(group).toHaveProperty('text');
+      expect(group).toHaveProperty('n');
+    }
+    const orderReads = reads.filter(read => read.sql.includes(`INDEXED BY ${PERSONAL_BODY_INDEX}`));
+    expect(orderReads.length).toBeGreaterThan(1);
+    const firstPlan = plan(db, orderReads[0]!);
+    expect(firstPlan).toEqual([`SEARCH items USING INDEX ${PERSONAL_BODY_INDEX} (<expr>>?)`]);
+    const resumedPlans = orderReads.slice(1).flatMap(read => plan(db, read));
+    expect(resumedPlans).toEqual(expect.arrayContaining([
+      expect.stringContaining(`SEARCH items USING INDEX ${PERSONAL_BODY_INDEX} (<expr>=? AND item_pk<?)`),
+      expect.stringContaining(`SEARCH items USING INDEX ${PERSONAL_BODY_INDEX} (<expr><?)`),
+    ]));
+    expect(resumedPlans.every(detail => detail.startsWith('SEARCH '))).toBe(true);
+    const candidate = first.items[0]!;
+    expect(candidate.text).toBe('Fixture message m5');
+    expect(store.itemMigrationFingerprint(candidate.identity)).toBe(candidate.fingerprint);
+    db.exec("DELETE FROM chunks WHERE item_pk = (SELECT item_pk FROM items WHERE local_item_id = 'm5')");
+    expect(store.itemMigrationFingerprint(candidate.identity)).not.toBe(candidate.fingerprint);
+  } finally {
+    setReadPoolObserverForTests();
+    db.close();
+    store.close();
+    cleanup();
+  }
+});
+
 test('the bounded recency reads preserve order, filters, and neighbouring conversation reads', async () => {
   const { dir, cleanup } = tempDir('olympus-recency-test-');
   const options = { dbPath: join(dir, 'chat.sqlite'), corpusId: 'internal.fixture.chat', family: 'chat', trustDomain: 'internal', tierLedger: null } as const;
@@ -109,6 +170,7 @@ test('the bounded recency reads preserve order, filters, and neighbouring conver
       db.exec("DELETE FROM chunks WHERE item_pk = (SELECT item_pk FROM items WHERE local_item_id = 'm8')");
       db.exec(CONNECTOR_STORE_CONVERSATION_INDEX_SQL);
       indexes.forEach((index) => db.exec(`DROP INDEX ${index}`));
+      db.exec(`DROP INDEX ${PERSONAL_BODY_INDEX}`);
     })();
     const previous = reads.map((read) => readRows(db, read));
     expect(previous.map((rows) => rows.map((row) => row.provider_item_id))).toEqual([
@@ -138,22 +200,25 @@ test('the bounded recency reads preserve order, filters, and neighbouring conver
     expect(indexes.map((index) => indexSql(db, index))).toEqual([undefined, undefined]);
     const openStamp = db.query<{ user_version: number }, []>('PRAGMA user_version').get()!.user_version;
     const schemaVersion = (connection: Database) => connection.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get();
-    expect(schemaVersion(db)).toEqual({ version: 17 });
+    expect(schemaVersion(db)).toEqual({ version: 18 });
 
     // Ingest preempts the first build. An existing writer owns the WAL write
     // lock during the next attempt. The build defers and the
     // same warm read connection can answer before and after the schema commit.
     db.exec('BEGIN IMMEDIATE');
+    expect(await writer.personalBodyPageFinder(undefined, 4).offThread()).toBeUndefined();
     await waitFor(() => buildAttempts.length >= 2, { description: 'preempted and busy background build attempts' });
     expect(buildAttempts).toEqual([false, false]);
     db.exec('COMMIT');
     await waitFor(() => buildAttempts.includes(true), { description: 'background recency index commit' });
 
     using built = new Database(options.dbPath);
+    expect(indexSql(built, PERSONAL_BODY_INDEX)).toBeDefined();
+    expect((await writer.personalBodyPageFinder(undefined, 4).offThread())?.items).toHaveLength(3);
     expect(indexes.map((index) => indexSql(built, index))).toEqual(ddl);
     expect(built.query('PRAGMA user_version').get()).toEqual({ user_version: openStamp });
     expect(connectorStoreOpenStamp(built)).toBe(openStamp);
-    expect(schemaVersion(built)).toEqual({ version: 17 });
+    expect(schemaVersion(built)).toEqual({ version: 18 });
     for (const [i, read] of reads.entries()) {
       const details = plan(built, read);
       if (i === 0) expect(details).toContain(`SCAN i USING INDEX ${GLOBAL_INDEX}`);

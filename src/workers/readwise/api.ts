@@ -43,6 +43,7 @@ export interface ReadwiseReaderFetchResult {
 }
 
 export interface ReadwiseExportRequest {
+  bookId?: string;
   updatedAfter?: string;
   pageCursor?: string;
 }
@@ -158,6 +159,7 @@ export class ReadwiseApiClient {
 
   async exportBooks(request: ReadwiseExportRequest = {}): Promise<ReadwiseExportBookPage> {
     const params = new URLSearchParams();
+    appendParam(params, 'ids', request.bookId);
     appendParam(params, 'updatedAfter', request.updatedAfter);
     appendParam(params, 'pageCursor', request.pageCursor);
     const query = params.toString();

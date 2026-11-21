@@ -36,6 +36,17 @@ function statementsDuring(run: () => void): string[] {
 
 const scansRows = (sql: string): boolean => /foreign_key_check|COUNT\(\*\) FROM connector_store_fts\b/i.test(sql);
 
+test('the schema 17 to 18 upgrade adds label storage without scanning FTS or foreign keys', () => {
+  const { dir, cleanup } = tempDir('olympus-store-open-labels-');
+  cleanups.push(cleanup);
+  const options = { dbPath: join(dir, 'store.sqlite'), corpusId: DROPBOX_TIER_CORPUS_IDS.internal!,
+    family: 'file' as const, trustDomain: 'internal' as const, tierLedger: null };
+  new LocalConnectorStore({ ...options, restoreSchemaVersion: 17 }).close();
+  const upgrade = statementsDuring(() => new LocalConnectorStore(options).close());
+  expect(upgrade.some(sql => sql.includes('ADD COLUMN classification_labels_json'))).toBe(true);
+  expect(upgrade.filter(scansRows)).toEqual([]);
+});
+
 test('only an open that migrates reads every row: a reopen at this schema, read-only or writable, checks shape only', async () => {
   const { dir, cleanup } = tempDir('olympus-store-open-');
   cleanups.push(cleanup);

@@ -11,7 +11,7 @@ import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts
 import { classifyItemTiers, TIER_CLASSIFIER_VERSION } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
-import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const lane: SnifferLane = { kind: 'local', modelId: 'synthetic-judge', profileId: 'fixture',
   profile: { provider: 'local-openai-compatible', trust: 'local', model: 'synthetic-judge' } };
@@ -175,9 +175,10 @@ for (const ownerChanged of [false, true]) test(`service reports counts for owner
   await f.set.sync(fixtureConnector(() => [{ id: 'note', name: 'Picnic note', text: 'Bring apples to the picnic.' }]),
     { fetchContent: true, placement: FIXTURE_PLACEMENT });
   const id = snifferId(BUILT_IN_SNIFFER_LANE, ownerChanged ? `${oldPrompt}.o11111111` : oldPrompt);
-  const decision = classifyItemTiers({ signals: {}, text: 'Bring apples to the picnic.' });
+  const decision = classifyItemTiers({ signals: { title: 'Picnic note' }, text: 'Bring apples to the picnic.' },
+    { sniffer: { ...JUDGED_PERSONAL_SNIFFER, id } });
   f.ledger.recordRoutedPlacement(identityOf('note'), { ...decision, decidedBy: 'sniffer', reasons: [
-    `metadata:sniffer:${id}:ordinary:0.99`, `content:sniffer:${id}:ordinary:0.99`,
+    `metadata:sniffer:${id}:ordinary:0.99`, ...decision.reasons,
   ] }, f.set.placementFor(decision));
   registerInstalledTierClassification(installed);
   expect(await service.runOnce()).toMatchObject({ state: 'ran', rejudged: {

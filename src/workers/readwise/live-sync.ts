@@ -203,6 +203,7 @@ export function createReadwiseConnectorStoreSyncHandler(
   if (tierSet.legSpec('internal')?.store !== options.store) {
     throw new Error('The Readwise tier set\'s internal leg must be the lane\'s own store.');
   }
+  tierSet.readCurrentLabels = identity => buildConnector().readCurrentLabels(identity);
   // One traversal feeds every tier store. Existing items keep the lane's
   // placement in its own store; a NEW item is routed by its recorded tiers
   // (raised to Private, or Secrets, by what its text says).

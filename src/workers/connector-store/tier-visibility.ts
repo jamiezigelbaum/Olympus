@@ -20,12 +20,12 @@
 // ledger snapshot is taken, so a parent deleted while a search fanned out or
 // an answer was written is not cited.
 
-import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manifest.ts';
+import type { ReleaseCheck, ReleaseInput, ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import { releaseChunks, type ChunkReleaseOptions } from '../classification/chunk-release.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate, SourceIndexVisibilityGateReport } from '../../core/source-index/router.ts';
 import { contentHeldForJudgment } from '../classification/tier-classifier.ts';
-import { itemNamesHeldForJudgment, tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type TierVisibilityReads } from '../classification/tier-ledger.ts';
+import { itemNamesHeldForJudgment, tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type TierLedgerItemState, type TierVisibilityReads } from '../classification/tier-ledger.ts';
 import {
   hiddenChildKeysSteps, itemVerdictsSteps, childVisibilityUnchanged,
   ledgerVisibilityHere, ledgerVisibilityOffThread, itemStatesOffThread, memoVisibilityItemsHere,
@@ -43,7 +43,9 @@ export interface TierVisibilityScope {
    * other item and applies the copy rules alone; a composition root passes
    * them for every scope it builds.
    */
-  stores?: () => readonly (ChildVisibilityStore & Partial<Pick<LocalConnectorStore, 'releaseItemChunks'>>)[];
+  stores?: () => readonly (ChildVisibilityStore & Partial<Pick<LocalConnectorStore, 'releaseItemChunks' | 'preRoutingReadLedgerFor'>>)[];
+  /** Direct store exits can supply the historical ledger without resolving child visibility a second time. */
+  preRoutingLedger?: (corpusId: string) => TierLedger | undefined;
 }
 
 /** Owner raises acknowledged by the background, until each command settles. */
@@ -255,13 +257,48 @@ function interleaveByCorpus(hits: readonly SourceIndexRoutedSearchHit[]): Source
   return ordered;
 }
 
-/** One batched ledger snapshot per scope; shared by release checks and local exits. Throws on unreadable ledgers. */
+function* releaseStates(ledger: TierLedger, identities: readonly TierLedgerIdentity[]): Generator<VisibilityRead, Map<string, TierLedgerItemState>, unknown> {
+  // Deduplicate repeated citations against the same ledger snapshot.
+  return yield* visibilityRead(() => memoVisibilityItemsHere(ledger, 'states', () => ledger.changeMarker(), identities,
+    tierLedgerIdentityKey, missing => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, identities));
+}
+
+function releaseVerdict(input: ReleaseInput, state: TierLedgerItemState = { copies: [] }): ReleaseInputVerdict {
+  const { record, copies, override, hidingIntent } = state;
+  if (hidingIntent === 'secret') return { tier: 'secret', gone: false };
+  const pendingDeletion = hidingIntent === 'deletion';
+  if (!record) return { tier: 'legacy', gone: pendingDeletion, ...(pendingDeletion ? { pendingDeletion: true } : {}) };
+  // A names-only input reads only the names tier even when its content is Private.
+  const namesOnly = input.layer === 'names';
+  const tiers = namesOnly
+    ? [record.metadataTier, record.targetMetadataTier]
+    : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+  if (override?.kind === 'tier') tiers.push(override.tier);
+  const privateTier = tiers.includes('secure');
+  const held = namesOnly ? itemNamesHeldForJudgment(record, copies, input.corpusId)
+    : record.metadataPending || contentHeldForJudgment(record);
+  // Adoption records the source copy before the mover has purged its Personal text.
+  const movingPersonalBody = record.state === 'moving' && copies.some(copy => copy.trustDomain === 'internal'
+    && copy.layers !== 'metadata' && copy.state === 'superseded' && copy.supersededByGeneration === record.generation + 1);
+  const unroutedPrivate = state.pendingRaisePurge || (!record.routed && record.contentRead && privateTier)
+    || (movingPersonalBody && (privateTier || held));
+  return {
+    tier: tiers.includes('secrets') ? 'secret' : held || privateTier ? 'private' : 'public_or_personal',
+    gone: pendingDeletion || (record.routed && !copies.some(copy => copy.state === 'current'
+      && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata'))),
+    ...(!namesOnly && unroutedPrivate ? { unroutedPrivate: true } : {}),
+    ...(pendingDeletion ? { pendingDeletion: true } : {}),
+  };
+}
+
+/** Batched ledger snapshots, shared by release checks and local exits. Throws on unreadable ledgers. */
 export function* effectiveItemVerdicts(
   scopes: () => readonly TierVisibilityScope[],
   inputs: Parameters<ReleaseCheck['inputs']>[0],
 ): Generator<VisibilityRead, ReleaseInputVerdict[], unknown> {
   const verdicts: ReleaseInputVerdict[] = inputs.map(() => ({ tier: 'legacy', gone: false }));
   if (inputs.length === 0) return verdicts;
+  const unchanged: Array<() => boolean> = [];
   for (const scope of scopes()) {
     const governed: Array<{ index: number; identity: TierLedgerIdentity }> = [];
     inputs.forEach((input, index) => {
@@ -281,44 +318,35 @@ export function* effectiveItemVerdicts(
       });
     });
     if (governed.length === 0) continue;
-    // The same ledger snapshot now runs on the pool for Ask release. Deduplicate
-    // identities there so repeated citations do not reread the same rows.
-    const identities = governed.map(({ identity }) => identity);
-    const states = yield* visibilityRead(() => memoVisibilityItemsHere(scope.ledger, 'states', () => scope.ledger.changeMarker(), identities, tierLedgerIdentityKey, missing => scope.ledger.itemStatesForMany(missing)),
-      () => itemStatesOffThread(scope.ledger, identities));
-    for (const { index, identity } of governed) {
+    const states = yield* releaseStates(scope.ledger, governed.map(({ identity }) => identity));
+    const unrouted = new Map<string, typeof governed>();
+    for (const entry of governed) {
+      const { index, identity } = entry;
+      const input = inputs[index]!;
       const state = states.get(tierLedgerIdentityKey(identity));
-      if (!state) continue;
-      const { record, copies, override, hidingIntent } = state;
-      if (hidingIntent === 'secret') {
-        verdicts[index] = { tier: 'secret', gone: false };
-        continue;
+      const verdict = releaseVerdict(input, state);
+      verdicts[index] = verdict;
+      if (state?.record?.routed || verdict.gone || verdict.tier === 'secret') continue;
+      const entries = unrouted.get(input.corpusId);
+      if (entries) entries.push(entry);
+      else unrouted.set(input.corpusId, [entry]);
+    }
+    // The store's old ledger can already forbid release while its row in the
+    // set ledger is still unrouted (or absent). Only a routed placement can
+    // replace that protection. Read just the identities this exit would use.
+    const previousFor = scope.preRoutingLedger ?? ((corpusId: string) =>
+      scope.stores?.().find(store => store.corpusId === corpusId)?.preRoutingReadLedgerFor?.(scope.ledger));
+    for (const [corpusId, entries] of unrouted) {
+      const previous = previousFor(corpusId);
+      const marker = previous?.changeMarker();
+      unchanged.push(() => previousFor(corpusId) === previous && previous?.changeMarker() === marker);
+      if (!previous) continue;
+      const historical = yield* releaseStates(previous, entries.map(({ identity }) => identity));
+      for (const { index, identity } of entries) {
+        const prior = releaseVerdict(inputs[index]!, historical.get(tierLedgerIdentityKey(identity)));
+        if (prior.tier === 'secret' || prior.gone) verdicts[index] = prior;
+        else if (prior.tier === 'private') verdicts[index] = inputs[index]!.layer === 'names' ? prior : { ...prior, unroutedPrivate: true };
       }
-      const pendingDeletion = hidingIntent === 'deletion';
-      if (!record) {
-        if (pendingDeletion) verdicts[index] = { tier: 'legacy', gone: true, pendingDeletion: true };
-        continue;
-      }
-      // An input of the names layer (a child citation's parent label) is
-      // judged on the item's names alone: its content tier never limits an
-      // answer that carries only its names.
-      const namesOnly = inputs[index]!.layer === 'names';
-      const tiers = namesOnly
-        ? [record.metadataTier, record.targetMetadataTier]
-        : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
-      // Owner edits take effect before their queued placement settles.
-      if (override?.kind === 'tier') tiers.push(override.tier);
-      // What waits for its model question is held Private, as placement
-      // holds it, though its recorded tier is the Personal default: an
-      // answer read from it is Private until the model says otherwise.
-      const held = namesOnly ? itemNamesHeldForJudgment(record, copies, inputs[index]!.corpusId)
-        : record.metadataPending || contentHeldForJudgment(record);
-      verdicts[index] = {
-        tier: tiers.includes('secrets') ? 'secret' : held || tiers.includes('secure') ? 'private' : 'public_or_personal',
-        gone: pendingDeletion || (record.routed && !copies.some((copy) => copy.state === 'current'
-          && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata'))),
-        ...(pendingDeletion ? { pendingDeletion: true } : {}),
-      };
     }
     // A child whose parent is not served any more is gone, whatever its own
     // copies say, and the answer that drew on it is withheld whole.
@@ -342,6 +370,7 @@ export function* effectiveItemVerdicts(
       }
     }
   }
+  if (unchanged.some(check => !check())) throw new VisibilityChangedError();
   return verdicts;
 }
 

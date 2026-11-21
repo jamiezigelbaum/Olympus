@@ -152,7 +152,7 @@ describe('a failed child removal stays owed', () => {
 });
 
 describe('a restored legacy item keeps its lane placement', () => {
-  test('a newer record for an item a lane held and deleted stays the lane\'s; only a deletion of an unseen item routes afresh', async () => {
+  test('a newer record for an item a lane held and deleted keeps its body in Private until judged; only a deletion of an unseen item routes afresh', async () => {
     const h = onePipelineHarness(cleanups);
     h.connectLive();
     // A tombstone the lane itself left (the item was held, never routed, then deleted).
@@ -167,13 +167,16 @@ describe('a restored legacy item keeps its lane placement', () => {
     }
     const id = { provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a' };
     await h.importAll(await h.startImport('newer.mbox', [rec('a', 5, 'restored words')]));
-    expect(h.set.ledger.isRouted(id)).toBe(false);
+    // A body arriving for an item a store already holds is routed, and held in Private until judged:
+    // Personal gets its names only.
+    expect(h.rows().filter((row) => row.providerItemId === 'a' && row.domain === 'internal' && row.chunks > 0)).toEqual([]);
+    expect(h.rows().filter((row) => row.providerItemId === 'a' && row.domain === 'secure_local' && row.tombstoned === 0 && row.chunks > 0)).toHaveLength(1);
     // The lane's own tombstone is not an unseen deletion, however often the item is deleted and restored.
     await h.importAll(await h.startImport('gone2.mbox', [rec('a', 2, undefined, { deleted: true })]));
     expect(h.set.ledger.isUnseenDeletion(id)).toBe(false);
     await h.importAll(await h.startImport('newer2.mbox', [rec('a', 7, 'restored again')]));
-    expect(h.set.ledger.isRouted(id)).toBe(false);
-    expect(h.rows().filter((row) => row.providerItemId === 'a' && row.domain === 'internal' && row.tombstoned === 0)).toEqual([]);
+    expect(h.rows().filter((row) => row.providerItemId === 'a' && row.domain === 'internal' && row.chunks > 0)).toEqual([]);
+    expect(h.rows().filter((row) => row.providerItemId === 'a' && row.domain === 'secure_local' && row.tombstoned === 0 && row.chunks > 0)).toHaveLength(1);
     // A deletion of an item no store ever held is not a lane's: a newer record routes it.
     await h.importAll(await h.startImport('gone.mbox', [rec('b', 9, undefined, { deleted: true })]));
     await h.importAll(await h.startImport('newer-b.mbox', [rec('b', 10, 'routed words')]));

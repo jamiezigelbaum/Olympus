@@ -25,7 +25,7 @@
 import { createHash } from 'node:crypto';
 import type { SourceItemIdentity, SourceTrustDomain } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { contentDigestReason, contentHeldForJudgment, maxTier, personalContentAuthorized, tierRank, type ItemTierOverride, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import { contentDigestReason, contentReceiptRefusal, contentHeldForJudgment, LEGACY_PERSONAL_BODY_REASON, maxTier, personalContentAuthorized, tierRank, type ItemTierOverride, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
   loweredCopyLayers,
@@ -56,7 +56,7 @@ import { settleSecretsCopies, type SecretsDisposition } from './secrets-disposit
 import { jobLedgerPathsToVisit, oweExtractionRereadAfterTierMove } from '../file-extraction/job-names.ts';
 import { defaultStoreTrustTier } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
-import { currentTierRulePolicy, tierMoveRuleAuthorization, withTierRuleFence } from './tier-move-rule-policy.ts';
+import { currentTierRulePolicy, tierMoveRuleAuthorization, withCurrentMoveLabels, withTierRuleFence } from './tier-move-rule-policy.ts';
 
 export { TIER_MOVE_CONNECTOR_ID };
 
@@ -85,7 +85,7 @@ export class TierMoveRefusedError extends Error {
 }
 
 export type TierMoveRefusal = 'refused' | 'mixed_sets' | 'secrets_in_lowering' | 'raise_in_lowering' | 'resumed_raise_in_lowering'
-  | 'repair_not_settled_private' | 'secrets_in_repair' | 'repair_lower_destination' | 'superseded_copy_kept'
+  | 'conflicting_legacy_bodies' | 'repair_not_settled_private' | 'secrets_in_repair' | 'repair_lower_destination' | 'superseded_copy_kept'
   | 'secrets_identity' | 'content_changed' | 'content_no_copy' | 'content_no_receipt' | 'content_several_receipts'
   | 'content_receipt_mismatch' | 'content_still_pending' | 'content_no_authority' | 'rule_authority' | 'rule_policy_unavailable';
 
@@ -209,7 +209,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) throw new TierLedgerGenerationConflictError();
     return moveToSecrets(options, record.generation);
   }
-  const result = moveTieredItemNow(options);
+  const result = await withCurrentMoveLabels(options.set, options.identity, target, () => moveTieredItemNow(options));
   await flushTierMoveNotes(options.set.ledger, options.timings ? { timings: options.timings } : {});
   return result;
 }
@@ -413,7 +413,11 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
     && !sources.some(source => source.corpusId === copy.corpusId && layersCover(source.layers, copy.layers)))) {
     throw new TierMoveRefusedError('Repair cannot write a lower destination.', 'repair_lower_destination');
   }
-  const raise = !!repairSource || placementIsRaise(sources, placement.copies);
+  const contentDestination = copyServingLayer(placement.copies, 'content');
+  const heldPersonal = contentDestination?.trustDomain === 'secure_local' && contentHeldForJudgment(record)
+    && record.reasons.includes(LEGACY_PERSONAL_BODY_REASON)
+    ? sources.find(source => source.trustDomain === 'internal' && source.layers !== 'metadata') : undefined;
+  const raise = !!(repairSource || heldPersonal) || placementIsRaise(sources, placement.copies);
   if (loweringOnly && raise) throw new TierMoveRefusedError('Raises cannot enter a lowering batch.', 'raise_in_lowering');
   const exports = new Map<string, ConnectorStoreItemCopy | undefined>();
   const exportFrom = (copy: Pick<TierCopy, 'corpusId'>): ConnectorStoreItemCopy | undefined => {
@@ -423,8 +427,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
     }
     return exports.get(copy.corpusId);
   };
-  const contentSource = repairSource ?? copyServingLayer(sources, 'content');
-  const contentDestination = copyServingLayer(placement.copies, 'content');
+  const contentSource = repairSource ?? heldPersonal ?? copyServingLayer(sources, 'content');
   const loweredLayers = loweredCopyLayers(sources, placement.copies);
   const lowering = loweredLayers.length > 0 || tiersLower(record, target) || hasNewLowerLayer(sources, placement.copies);
   const policyRefusal = unavailableLoweringPolicy(set, lowering);
@@ -536,6 +539,15 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
           return policyRefusal ?? authorityRefusal(set, now, target, sources, placement.copies);
         }
         exports.clear();
+        if (now.reasons.includes(LEGACY_PERSONAL_BODY_REASON)) {
+          const bodies = heldPersonal ? sources : sources.filter(copy => copy.layers !== 'metadata');
+          if (bodies.length > 1) {
+            const texts = bodies.map(copy => exportFrom(copy)?.chunks.map(chunk => chunk.boundedText).join(''));
+            if (new Set(texts.filter(Boolean)).size > 1) {
+              throw new TierMoveRefusedError('The source stores hold different active bodies for the same item.', 'conflicting_legacy_bodies');
+            }
+          }
+        }
         if (contentDestination && needsContentMoveAuthority(contentSource, contentDestination)) {
           const refusal = contentMoveRefusal(decision ?? now, exportFrom(contentSource ?? sources[0]!), contentDestination.trustDomain, ledger.getOverride(identity));
           if (refusal) {
@@ -546,7 +558,8 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
         }
         for (const planned of placement.copies) {
           const kept = sources.find((source) => source.corpusId === planned.corpusId);
-          if (kept && layersCover(kept.layers, planned.layers)
+          const missingHeldBody = heldPersonal && kept && planned.layers !== 'metadata' && !exportFrom(kept)?.chunks.length;
+          if (kept && !missingHeldBody && layersCover(kept.layers, planned.layers)
             && !(repairSource && planned.layers !== 'metadata')) {
             const keptChunks = planned.layers === 'metadata' ? 0 : (exportFrom(kept)?.chunks.length ?? 0);
             destinations.push({
@@ -730,15 +743,11 @@ function contentMoveRefusal(
   if (destination === 'internal' && copy?.chunks.length === 0) return undefined;
   const text = copy?.chunks.map(chunk => chunk.boundedText).join('');
   const image = copy?.chunks.find(chunk => chunk.mediaJudgment)?.mediaJudgment;
-  const receipts = evidence.reasons.filter(reason => reason.startsWith('content:sha256:'));
   const code = text === undefined ? 'content_no_copy'
     : evidence.contentPending ? 'content_still_pending'
-    : receipts.length === 0 ? 'content_no_receipt'
-    : receipts.length > 1 ? 'content_several_receipts'
-    : receipts[0] !== contentDigestReason(text) ? 'content_receipt_mismatch'
-    : destination === 'internal' && !personalContentAuthorized(evidence, text, override?.kind === 'not_secret', override,
-      image && imageJudgmentSignal(image)) ? 'content_no_authority'
-    : undefined;
+    : contentReceiptRefusal(evidence.reasons, contentDigestReason(text))
+      ?? (destination === 'internal' && !personalContentAuthorized(evidence, text, override?.kind === 'not_secret', override,
+        image && imageJudgmentSignal(image)) ? 'content_no_authority' : undefined);
   return code && new TierMoveContentChangedError('Stored content requires a matching settled verdict before moving.', code);
 }
 

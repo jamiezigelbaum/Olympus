@@ -798,6 +798,7 @@ export class CachedTierSniffer implements TierSniffer {
           mapRevision,
           ...(request.conversationOrder !== undefined ? { conversationOrder: request.conversationOrder } : {}),
           flags: request.flags,
+          ...(request.legacyHoldOrder !== undefined ? { legacyHoldOrder: request.legacyHoldOrder } : {}),
           ...(request.priority !== undefined ? { priority: request.priority } : {}),
           ...(request.stillAsk ? { stillAsk: request.stillAsk } : {}),
         });

@@ -113,6 +113,25 @@ describe('a pass through the tier lane', () => {
     expect(third.counts).toMatchObject({ notes_deleted: 1, items_tombstoned: 1 });
   });
 
+  test('a live label read sees later tags and respects the current notebook choice', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Field work');
+    const note = fake.addNote({ title: 'Survey', created: day(2024), notebookId: book.id, tags: ['river'] });
+    const { sync, runtime } = await connected(fake);
+    await sync.pass();
+    let choice: 'ingest' | 'exclude' = 'ingest';
+    sync.bindNotebookChoice({ gate: () => () => choice, assertCurrent() {} });
+    const lane = runtime.existingLane()!;
+    const id = { family: 'note' as const, provider: 'evernote', accountScope: 'personal',
+      providerItemId: note.id, localItemId: `personal:${note.id}` };
+    note.tags = ['protected'];
+    expect(await lane.set.readCurrentLabels!(id)).toEqual(['protected']);
+    choice = 'exclude';
+    const calls = fake.calls.get_note;
+    expect(await lane.set.readCurrentLabels!(id)).toBeUndefined();
+    expect(fake.calls.get_note).toBe(calls);
+  });
+
   test('a pass whose listing cannot finish changes nothing and says so on the card', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     const book = fake.addNotebook('Field work');
