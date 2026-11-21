@@ -146,11 +146,11 @@ export function createSourceAnswerLanes(
     // Secret locations released beside the answer are confined to it.
     const selected = sourceAnswerCorpusIds(request);
     const ancestorPlans = new Map<string, SearchedSecretCorpus & { readScopeSignature: string }>();
-    const ancestorPlanFor = (id: string) => {
-      if (selected && !selected.includes(id)) return undefined;
+    const ownerPlanFor = (id: string) => {
       const plan = ancestorPlans.get(id);
       return plan && JSON.stringify(deps.readScope(plan.store)) === plan.readScopeSignature ? plan : undefined;
     };
+    const ancestorPlanFor = (id: string) => selected && !selected.includes(id) ? undefined : ownerPlanFor(id);
     // Each store's embedding provider for THIS request, memoized so the
     // vector lane and passage ranking embed the query once between them.
     // The memo is shared by every store on the same provider: a per-store
@@ -216,7 +216,7 @@ export function createSourceAnswerLanes(
       });
       const semanticRelevanceBar = deps.semanticRelevanceBar?.(store);
       return createConnectorStoreCorpusAdapter({
-        store, ancestorPlanFor,
+        store, ancestorPlanFor, ownerPlanFor,
         retrievalMode: request.retrieval_mode ?? 'keyword',
         // Trusted local/private consumers only; never a tool/HTTP request field.
         localKeywordFallback: mode === 'built_in_only' ? true : (mode === 'private_search' && store.trustDomain === 'secure_local' ? 'private_search' : false),
@@ -274,7 +274,7 @@ export function createSourceAnswerLanes(
         const passageEmbedding = request.retrieval_mode === 'hybrid' ? requestEmbedding(store) : undefined;
         return mandatoryScope.allowed
           ? [[store.corpusId, createConnectorStoreContentProvider({
-            store,
+            store, ancestorPlanFor: ownerPlanFor,
             ...(passageEmbedding ? { embeddingProvider: passageEmbedding } : {}),
             ...(mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : {}),
             ...(mandatoryScope.contentFilters ? { filters: mandatoryScope.contentFilters } : {}),

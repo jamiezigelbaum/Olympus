@@ -713,13 +713,20 @@ export function hiddenChildKeys(lane: ChildVisibilityLane, probes: readonly Chil
   return visibilityHere(hiddenChildKeysSteps(lane, probes));
 }
 
-export function* hiddenChildKeysSteps(lane: ChildVisibilityLane, probes: readonly ChildProbe[]): Generator<VisibilityRead, Set<string>, unknown> {
+export function* hiddenChildKeysSteps(
+  lane: ChildVisibilityLane, probes: readonly ChildProbe[],
+  excludedByScope?: (probes: readonly ChildProbe[], links: readonly ChildWithParent[]) => Generator<VisibilityRead, Set<string>, unknown>,
+): Generator<VisibilityRead, Set<string>, unknown> {
   if (probes.length === 0) return new Set();
   let links: ChildWithParent[];
   try {
     links = yield* childLinksSteps(lane, probes);
+    const hidden = yield* childrenWithHiddenParentsSteps(lane, links);
+    if (excludedByScope) {
+      for (const key of yield* excludedByScope(probes, links)) hidden.add(key);
+    }
+    return hidden;
   } catch {
     return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
   }
-  return yield* childrenWithHiddenParentsSteps(lane, links);
 }

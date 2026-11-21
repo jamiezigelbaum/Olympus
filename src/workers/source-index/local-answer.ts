@@ -186,6 +186,7 @@ export async function answerOnThisComputer(
     question,
     ...(explicitQuery ? { searchQuery: explicitQuery } : {}),
     ...(selectedItems.length > 0 ? { selectedItems } : {}),
+    ...(lanes.excludedCorpusIds ? { excludedCorpusIds: lanes.excludedCorpusIds } : {}),
     requireScopedSelection: Boolean(request.approved_scope_key),
     maxResults: LOCAL_MAX_RESULTS,
     // Personal and Private, and no query leaves this computer: a corpus that

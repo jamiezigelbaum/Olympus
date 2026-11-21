@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { SNIFFER_NAMES_MAX_CHARS } from '../classification/tier-classifier.ts';
 import { connectorLabelCapability, legacyCappedTagProviders, listedLabelObservation, storedLabelProviders } from '../../core/source-connector-labels.ts';
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
@@ -149,6 +150,7 @@ import {
   parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
   hiddenChildKeysSteps,
+  itemStatesOffThread,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
   ledgerReadOffThread,
@@ -158,6 +160,7 @@ import {
   parentKey,
   parentVerdicts,
   type ChildProbe,
+  type ChildWithParent,
   type ChildVisibilityLane,
   type ChildVisibilityStore,
   type ParentRef,
@@ -5124,8 +5127,9 @@ export class LocalConnectorStore {
     layerOf: (row: T) => TierSearchLayer,
     throwOnUnavailable = false,
     copiesAllowed?: (copies: readonly TierCopy[]) => boolean,
+    planFor = readAncestorPlans.getStore(),
   ): T[] {
-    return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable, copiesAllowed));
+    return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable, copiesAllowed, planFor));
   }
 
   private *tierVisibleRowsSteps<T>(
@@ -5134,6 +5138,7 @@ export class LocalConnectorStore {
     layerOf: (row: T) => TierSearchLayer,
     throwOnUnavailable = false,
     copiesAllowed?: (copies: readonly TierCopy[]) => boolean,
+    planFor = readAncestorPlans.getStore(),
   ): Generator<VisibilityRead, T[], unknown> {
     rows = rows.filter((row) => layerOf(row) !== 'content' || !this.onDemandContentHeld(identityOf(row)));
     if (rows.length === 0) return [];
@@ -5159,7 +5164,9 @@ export class LocalConnectorStore {
       : [...rows];
     // The Ask driver awaits parent links, standings and ledger states too;
     // pooling only the FTS statement still left these reads on its thread.
-    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf));
+    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf), planFor
+      ? (identities, links) => this.excludedAncestorKeys(identities, planFor, { kind: 'scope', links })
+      : undefined);
     return served.filter(row => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
   }
 
@@ -6386,6 +6393,10 @@ export class LocalConnectorStore {
     return { ...(title ? { title } : {}), ...(path ? { path } : {}), ...(sender ? { sender } : {}) };
   }
 
+  private scopedAncestorPlans(accountScope?: string, filters?: ConnectorStoreSearchFilters): SearchAncestorPlanFor | undefined {
+    return readAncestorPlans.getStore() ?? (accountScope || filters ? ancestorPlansForStore(this, accountScope, filters) : undefined);
+  }
+
   // ---- Child items: who may be seen ------------------------------------------
   // A child is visible only while its parent is (child-visibility.ts; the rule
   // is decided where it is read, so nothing is recorded when a parent goes).
@@ -6412,7 +6423,7 @@ export class LocalConnectorStore {
     locationLane?: ChildVisibilityLane,
   ): ReadonlySet<ChildProbe> {
     try {
-      const keys = this.withheldSearchIdentifierKeys(identities, includePrivateNames, planFor, locationLane);
+      const keys = visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: 'names', includePrivateNames }, locationLane));
       return new Set(identities.filter(identity => keys.has(tierLedgerIdentityKey(identity))));
     } catch {
       // Unreadable ancestry cannot authorize an identifier or locator.
@@ -6420,9 +6431,17 @@ export class LocalConnectorStore {
     }
   }
 
-  private withheldSearchIdentifierKeys(
-    identities: readonly ChildProbe[], includePrivateNames: boolean, planFor: SearchAncestorPlanFor, locationLane?: ChildVisibilityLane,
-  ): Set<string> {
+  // A Secret location can lack a store row. Its index supplies the same lane
+  // and owner plans as the ordinary candidate filter.
+  childrenOutsideAncestorScope(identities: readonly ChildProbe[], planFor: SearchAncestorPlanFor, lane?: ChildVisibilityLane): Set<string> {
+    return visibilityHere(this.excludedAncestorKeys(identities, planFor, { kind: 'scope' }, lane));
+  }
+
+  private *excludedAncestorKeys(
+    identities: readonly ChildProbe[], planFor: SearchAncestorPlanFor,
+    check: { kind: 'scope'; links?: readonly ChildWithParent[] } | { kind: 'names'; includePrivateNames: boolean },
+    locationLane?: ChildVisibilityLane,
+  ): Generator<VisibilityRead, Set<string>, unknown> {
     const withheld = new Set<string>();
     // A local link and an encoded provider id are independent evidence of ancestry.
     // Check both, including on intermediate rows whose stored link is missing.
@@ -6438,15 +6457,19 @@ export class LocalConnectorStore {
       pending.set(key, entry);
     };
     const lane = locationLane ?? this.childVisibilityLane();
-    const admittedPlans = () => childVisibilityStores(lane).flatMap(store => {
+    const admittedPlans = () => (check.kind === 'scope' ? lane.stores() : childVisibilityStores(lane)).flatMap(store => {
       const plan = planFor(store.corpusId);
       return plan?.store === store ? [plan] : [];
     });
     // A Secret location may have been written without a row in the secure store.
     // A local parent link in any admitted copy is still evidence of ancestry.
     const locationPlans = locationLane ? admittedPlans() : undefined;
-    for (const store of locationPlans?.map(plan => plan.store) ?? [this]) {
-      for (const [child, parent] of store.parentLinksOf(identities)) queue(parent, [child]);
+    if (check.kind === 'scope' && check.links) {
+      for (const { key, parent } of check.links) queue(parent, [key]);
+    } else {
+      for (const store of locationPlans?.map(plan => plan.store) ?? [this]) {
+        for (const [child, parent] of store.parentLinksOf(identities)) queue(parent, [child]);
+      }
     }
     for (const identity of identities) queue(parentIdentityOf(identity), [tierLedgerIdentityKey(identity)]);
     if (!pending.size) return withheld;
@@ -6463,35 +6486,56 @@ export class LocalConnectorStore {
         if ('parentLocalItemId' in parent) linked.push(parent);
         else encoded.push(parent);
       }
-      const rows = plans.flatMap(({ store, ancestorScope }) => {
-        const active = [
-          ...store.parentStandings(linked).map(row => ({ ...row, key: lookupKey(row) })),
-          ...Array.from(store.itemStandings(encoded).values(), row => ({ ...row, key: lookupKey(row.identity) })),
-        ].filter(row => row.active);
-        // Check the exact identities together against their own store's current rows.
-        // Keep excluded copies in the verdict so another copy cannot vouch for them.
+      const rows: Array<ParentStandingRow & { key: string; corpusId: string; inScope: boolean }> = [];
+      for (const { store, ancestorScope } of plans) {
+        const byLink = yield* visibilityRead(() => store.parentStandings(linked), () => store.parentStandingsOffThread(linked));
+        const byId = yield* visibilityRead(() => store.itemStandings(encoded), () => store.itemStandingsOffThread(encoded));
+        const present = [
+          ...byLink.map(row => ({ ...row, key: lookupKey(row) })),
+          ...Array.from(byId.values(), row => ({ ...row, key: lookupKey(row.identity) })),
+        ].filter(row => row.active || (check.kind === 'scope' && row.secret));
+        if (!present.length) continue;
         const account = normalizeOptionalAccountScope(ancestorScope.accountScope);
         const predicate = connectorStoreFilterSql(ancestorScope.filters);
-        const matches = predicate.sql ? new Set(store.itemRowsForIdentities(
-          active.map(row => row.identity), id => normalizeConversationId(id.providerConversationId), predicate,
-        ).map(row => row.idx)) : undefined;
-        return active.map((row, index) => ({
-          ...row, corpusId: store.corpusId,
+        // Standings already prove presence, including a listed Secret's
+        // location-only tombstone. Check just those rows against their grant.
+        let matches: Set<number> | undefined;
+        if (predicate.sql) {
+          const keys = present.map(({ identity }) => [identity.provider, identity.accountScope,
+            normalizeConversationId(identity.providerConversationId), identity.providerItemId]);
+          const matched = (yield* store.visibilityStoreRead({ mode: 'all',
+            sql: `SELECT CAST(j.key AS INTEGER) AS idx ${identityRowsFromSql(predicate.sql, check.kind === 'scope')}`,
+            params: [JSON.stringify(keys), ...predicate.params],
+          })) as Array<{ idx: number }>;
+          matches = new Set(matched.map(row => row.idx));
+        }
+        rows.push(...present.map((row, index) => ({ ...row, corpusId: store.corpusId,
           inScope: (!account || row.accountScope === account) && (!matches || matches.has(index)),
-        }));
-      });
-      const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map(row => ({
+        })));
+      }
+      const identities = rows.map(row => row.identity);
+      const states = check.kind === 'scope' && ledger ? yield* visibilityRead(
+        () => ledger.itemStatesForMany(identities), () => itemStatesOffThread(ledger, identities),
+      ) : undefined;
+      const verdicts = check.kind === 'names' ? visibilityHere(effectiveItemVerdicts(() => scopes, rows.map(row => ({
         ...row.identity, corpusId: row.corpusId, privateAtAnswer: false, layer: 'names' as const,
-      }))));
+      })))) : undefined;
       const allowed = new Map<string, typeof rows[number]>();
       const denied = new Set<string>();
       rows.forEach((row, index) => {
         const key = row.key;
-        const verdict = verdicts[index]!;
-        const canRelease = row.inScope && !row.secret && !verdict.gone && !verdict.pendingDeletion
+        const state = states?.get(tierLedgerIdentityKey(row.identity));
+        // A retained superseded row cannot establish the owner's grant for
+        // the current copy. An unrouted parent needs only its store row.
+        if (state && !row.secret && (state.copies.length || state.record?.routed)
+          && !state.copies.some(copy => copy.corpusId === row.corpusId && copy.state === 'current')) return;
+        const verdict = verdicts?.[index];
+        const includePrivateNames = check.kind === 'names' && check.includePrivateNames;
+        const namesAllowed = verdict && !row.secret && !verdict.gone && !verdict.pendingDeletion
           && (verdict.tier === 'public_or_personal'
-          || (verdict.tier === 'private' && includePrivateNames)
-          || (verdict.tier === 'legacy' && (row.legacyPrivateNames === false || includePrivateNames)));
+            || (verdict.tier === 'private' && includePrivateNames)
+            || (verdict.tier === 'legacy' && (row.legacyPrivateNames === false || includePrivateNames)));
+        const canRelease = row.inScope && (check.kind === 'scope' ? state?.hidingIntent !== 'deletion' : namesAllowed);
         const previous = allowed.get(key);
         if (!canRelease || (previous && (previous.grandparentLocalItemId !== row.grandparentLocalItemId
           || tierLedgerIdentityKey(previous.identity) !== tierLedgerIdentityKey(row.identity)))) {
@@ -16038,7 +16082,9 @@ export class LocalConnectorStore {
     const excludedItemPks = this.vectorScanExcludedItemPks();
     if (excludedItemPks) pageOptions.excludedItemPks = excludedItemPks;
     // Digest search also needs to count eligible winners before its ranked cut.
-    const eligiblePks: EligibleVectorItemPks | undefined = input.searchEligibility
+    // A standalone account-only scan already bounds both ends of every
+    // parent link to the same account. Routed siblings can have different grants.
+    const eligiblePks: EligibleVectorItemPks | undefined = input.searchEligibility || readAncestorPlans.getStore() || filters
       ? (pks, onDemandReadsTablePresent) => this.visibleVectorItemPks(pks, selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility)
       : undefined;
     // One pass. When the hidden set is ready, the scan skips items the store
@@ -16418,7 +16464,7 @@ export class LocalConnectorStore {
         ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
       });
       const current = this.tierVisibleRows(rows, identityOf, () => 'content', false, copies => !copies.some(copy => copy.corpusId === this.corpusId
-        && copy.state === 'current' && copy.embedHold));
+        && copy.state === 'current' && copy.embedHold), this.scopedAncestorPlans(accountScope, filters));
       const eligible = searchEligibility?.(current.map(row => ({ sourceItem: identityOf(row), trustTier: trustTierFromRow(row.trust_tier) })));
       current.forEach((row, index) => { if (!eligible || eligible[index]) visible.add(row.item_pk); });
     }
@@ -16877,6 +16923,7 @@ export class LocalConnectorStore {
         // A metadata-only FTS row carries no chunk. Chunk rows are the content
         // layer (they are seasoned with the names, as they always were).
         (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
+        false, undefined, this.scopedAncestorPlans(accountScope, filters),
       );
       const eligible = ftsOptions.searchEligibility?.(current.map(row => ({
         sourceItem: sourceItemFromRow(row),
@@ -17174,7 +17221,7 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters,
   ): ConnectorStoreSearchRow[] {
     const read = this.recentItemsRead(maxResults, accountScope, filters);
-    return this.visibleRecentRows(this.db.query(read.sql).all(...(read.params as Array<string | number>)) as ItemRow[]);
+    return this.visibleRecentRows(this.db.query(read.sql).all(...(read.params as Array<string | number>)) as ItemRow[], accountScope, filters);
   }
 
   /**
@@ -17201,7 +17248,7 @@ export class LocalConnectorStore {
       onCutShort?.();
       return [];
     }
-    return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows), this.childVisibilityLane())).map(row => searchRowFromItemRow(row));
+    return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows, accountScope, filters), this.childVisibilityLane())).map(row => searchRowFromItemRow(row));
   }
 
   private recentItemsRead(
@@ -17345,17 +17392,17 @@ export class LocalConnectorStore {
       if (before[index]) ordered.push(before[index]!);
       if (after[index]) ordered.push(after[index]!);
     }
-    return this.visibleRecentRows(ordered);
+    return this.visibleRecentRows(ordered, accountScope, filters);
   }
 
   private conversationIndexReady: boolean | undefined;
 
-  private visibleRecentRows(rows: ItemRow[]): ConnectorStoreSearchRow[] {
-    return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
+  private visibleRecentRows(rows: ItemRow[], accountScope?: string, filters?: ConnectorStoreSearchFilters): ConnectorStoreSearchRow[] {
+    return visibilityHere(this.visibleRecentRowsSteps(rows, accountScope, filters)).map((row) => searchRowFromItemRow(row));
   }
 
   // The recency lane's tier filter, for this thread and the awaited path alike.
-  private visibleRecentRowsSteps(rows: ItemRow[]): Generator<VisibilityRead, ItemRow[], unknown> {
+  private visibleRecentRowsSteps(rows: ItemRow[], accountScope?: string, filters?: ConnectorStoreSearchFilters): Generator<VisibilityRead, ItemRow[], unknown> {
     return this.tierVisibleRowsSteps(
       rows,
       (row) => ({
@@ -17364,7 +17411,7 @@ export class LocalConnectorStore {
         providerItemId: row.provider_item_id,
         ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
       }),
-      () => 'content',
+      () => 'content', false, undefined, this.scopedAncestorPlans(accountScope, filters),
     );
   }
 
@@ -17487,6 +17534,7 @@ export class LocalConnectorStore {
   /** Read Personal content only, with a fresh per-item gate around the shared release check. */
   async readItemPages(localItemId: string, options: {
     page?: number; pages?: number; releaseCheck?: ReleaseCheck | undefined; budgetMs?: number;
+    ancestorPlanFor?: SearchAncestorPlanFor;
     scope?: () => { allowed: boolean; accountScope?: string; filters?: ConnectorStoreSearchFilters;
       contentAllowed?: boolean; contentFilters?: ConnectorStoreSearchFilters };
   } = {}): Promise<SourceItemReadResult> {
@@ -17507,6 +17555,8 @@ export class LocalConnectorStore {
       if (currentRemoteReadAccess() !== 'active') return 'not_in_scope';
       const scope = options.scope?.();
       if (scope?.allowed === false || !this.itemMatchesSearchFilters(localItemId, scope?.accountScope, scope?.filters)) return 'not_in_scope';
+      const planFor = options.ancestorPlanFor ?? ancestorPlansForStore(this, scope?.accountScope, scope?.filters);
+      if (this.childrenOutsideAncestorScope([identity], planFor).size) return 'not_in_scope';
       const now = this.activeLocalItemRow(localItemId);
       if (!now || tierLedgerIdentityKey(now.identity) !== tierLedgerIdentityKey(identity)) return 'not_in_scope';
       const row = ledger?.getCurrent(identity);
@@ -18869,6 +18919,15 @@ export interface SearchAncestorPlan {
 }
 export type SearchAncestorPlanFor = (corpusId: string) => SearchAncestorPlan | undefined;
 
+// Carry owner grants through all store visibility reads of one request,
+// including selected items, conversation neighbours and content hydration.
+const readAncestorPlans = new AsyncLocalStorage<SearchAncestorPlanFor>();
+
+function ancestorPlansForStore(store: LocalConnectorStore, accountScope?: string, filters?: ConnectorStoreSearchFilters): SearchAncestorPlanFor {
+  const plan = { store, ancestorScope: searchAncestorScope(accountScope, filters) };
+  return id => id === store.corpusId ? plan : undefined;
+}
+
 /** Query match predicates apply to the hit. Keep its account, path and trusted admission filters for the ancestors. */
 export function searchAncestorScope(
   accountScope: string | undefined, filters: ConnectorStoreSearchFilters | undefined, owner?: ConnectorStoreSearchFilters,
@@ -18890,6 +18949,8 @@ export interface ConnectorStoreCorpusAdapterOptions {
   /** Message/store metadata filters applied in SQL in every retrieval lane. */
   filters?: ConnectorStoreSearchFilters;
   searchEligibility?: ConnectorStoreSearchEligibility;
+  /** Owner approvals also cover parents in tiers not selected for names release. */
+  ownerPlanFor?: SearchAncestorPlanFor;
   /** The per-store owner scopes a routed partial can use to prove cross-store ancestry. */
   ancestorPlanFor?: SearchAncestorPlanFor;
   /** Optional declared projection applied only to final eligible hits. */
@@ -19023,7 +19084,7 @@ export function createConnectorStoreCorpusAdapter(
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
   // A standalone adapter only knows its own store's admission filters.
-  const ownAncestorPlan = { store, ancestorScope: searchAncestorScope(options.accountScope, filters) };
+  const planFor = options.ancestorPlanFor ?? ancestorPlansForStore(store, options.accountScope, filters);
   // A composite search retains the grant receipt until its last store settles.
   // Standalone adapter calls release their results and prefixes to their own caller.
   const scopedSearch = (
@@ -19033,13 +19094,13 @@ export function createConnectorStoreCorpusAdapter(
     const publish = input.onPartialResponse;
     const request: GrantSearchRequest = {
       ...input,
-      ancestorPlanFor: options.ancestorPlanFor ?? (id => id === store.corpusId ? ownAncestorPlan : undefined),
+      ancestorPlanFor: planFor,
       ...(usesSearchGrants(filters) ? { startGrantEpoch: store.onDemandGrantEpoch() } : {}),
       ...(publish && !input[DEFER_SEARCH_DELIVERY] ? {
         onPartialResponse: (response, lane) => publish(deliverCorpusSearch([response], input.maxResults), lane),
       } : {}),
     };
-    const result = await search(request);
+    const result = await readAncestorPlans.run(options.ownerPlanFor ?? planFor, () => search(request));
     return input[DEFER_SEARCH_DELIVERY] ? result : deliverCorpusSearch([result]);
   };
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
@@ -19314,7 +19375,7 @@ export function createConnectorStoreCorpusAdapter(
   });
   expanded.metadataMatches = scopedSearch(request =>
     withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store));
-  expanded.selectedItemServable = (sourceItem, layer) => store.selectedItemServable(sourceItem, options.accountScope, filters, layer);
+  expanded.selectedItemServable = (sourceItem, layer) => readAncestorPlans.run(options.ownerPlanFor ?? planFor, () => store.selectedItemServable(sourceItem, options.accountScope, filters, layer));
   expanded.prepareKeywords = async (query) => {
     const status = { incomplete: false };
     await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: keywordPrepareWaitMs(), status });
@@ -20248,6 +20309,7 @@ function connectorStoreKeywordLaneAudit(
 // --- Local content provider ----------------------------------------------------
 
 export interface ConnectorStoreContentProviderOptions {
+  ancestorPlanFor?: SearchAncestorPlanFor;
   store: LocalConnectorStore;
   accountScope?: string;
   // The scope whose contents may be read.
@@ -20315,7 +20377,7 @@ export function createConnectorStoreContentProvider(
       return undefined;
     }
   };
-  return {
+  const provider = {
     contentServable(request) {
       if (request.trustDomain !== store.trustDomain) return false;
       const localItemId = request.provenance.sourceItem.localItemId.trim();
@@ -20423,6 +20485,12 @@ export function createConnectorStoreContentProvider(
       }, store);
       return releaseGranted && !releaseGranted() ? undefined : result;
     },
+  } satisfies ConnectorStoreContentProvider;
+  const planFor = options.ancestorPlanFor ?? ancestorPlansForStore(store, options.accountScope, options.metadataFilters ?? options.filters);
+  return {
+    contentServable: request => readAncestorPlans.run(planFor, () => provider.contentServable(request)),
+    conversationNeighbours: request => readAncestorPlans.run(planFor, () => provider.conversationNeighbours(request)),
+    fetchLocalContent: request => readAncestorPlans.run(planFor, () => provider.fetchLocalContent(request)),
   };
 }
 
@@ -22005,12 +22073,17 @@ function identityAmbiguous(
 export function identityRowsSql(extraSql: string): string {
   return `
       SELECT CAST(j.key AS INTEGER) AS idx, i.item_pk, i.local_item_id, i.title, i.source_version
-      FROM json_each(?) j
+      ${identityRowsFromSql(extraSql, false)}
+      ORDER BY j.key
+    `;
+}
+
+function identityRowsFromSql(extraSql: string, includeSecretPresence: boolean): string {
+  return `FROM json_each(?) j
       CROSS JOIN items i
       WHERE i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
         AND i.normalized_conversation = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
-        AND i.tombstoned = 0 ${extraSql}
-      ORDER BY j.key
+        AND ${includeSecretPresence ? "(i.tombstoned = 0 OR i.trust_tier = 'S5')" : 'i.tombstoned = 0'} ${extraSql}
     `;
 }
 
