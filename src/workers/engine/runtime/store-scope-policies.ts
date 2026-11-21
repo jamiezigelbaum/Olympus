@@ -65,7 +65,7 @@ export function createStoreScopes(input: {
       const read = input.readScope(store);
       const { scope, published, ref } = resolve(store, provider, () => read);
       const embedding = embeddingCountScope(store, provider, scope);
-      const counts = published ? published.readCounts(store.trustDomain, embedding, ref, input.authority) : readCountScope(read);
+      const counts = published ? published.readCounts(embedding, ref, input.authority) : readCountScope(read);
       return { ...counts, embedding };
     },
   };
