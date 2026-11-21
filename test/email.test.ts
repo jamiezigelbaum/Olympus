@@ -847,6 +847,7 @@ describe('EmailClient', () => {
       },
     });
     expect(await requests[0]?.json()).toEqual({
+      personal_names_only: true,
       query: 'dating profile',
       corpus_id: 'secure_local.dropbox.files',
       account: 'personal',
@@ -1353,6 +1354,7 @@ describe('EmailClient', () => {
     });
     expect(requests[0]?.url).toBe('http://127.0.0.1:8010/v1/source/index/search');
     expect(await requests[0]?.json()).toEqual({
+      personal_names_only: true,
       query: 'surface',
       corpus_id: 'secure_local.telegram.protected.messages',
       account: 'telegram.personal',
@@ -1360,6 +1362,12 @@ describe('EmailClient', () => {
       trust_domain: 'secure_local',
       attachment_type: 'file',
       max_results: 5,
+    });
+    await client.sourceIndexSearch({ corpusId: 'secure_local.telegram.messages', query: 'surface' }, 'private_answer');
+    expect(await requests[1]?.json()).toEqual({
+      include_private_names: true,
+      query: 'surface',
+      corpus_id: 'secure_local.telegram.protected.messages',
     });
   });
 });

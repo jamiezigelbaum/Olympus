@@ -836,7 +836,7 @@ export class EmailClient {
     return result;
   }
 
-  async sourceIndexSearch(options: SourceIndexSearchOptions): Promise<SourceIndexSearchResult> {
+  private async requestSourceIndexSearch(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError(
         'source_index_not_enabled',
@@ -853,44 +853,74 @@ export class EmailClient {
       );
     }
 
-    const corpusId = canonicalSourceCorpusId(options.corpusId);
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
+    const data = asRecord(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        query: options.query,
-        corpus_id: corpusId,
-        ...(options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {}),
-        ...(options.account ? { account: options.account } : {}),
-        ...(options.folderId ? { folder_id: options.folderId } : {}),
-        ...(options.folderName ? { folder_name: options.folderName } : {}),
-        ...(options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {}),
-        ...(options.chatScope ? { chat_scope: options.chatScope } : {}),
-        ...(options.trustDomain ? { trust_domain: options.trustDomain } : {}),
-        ...(options.conversationId ? { conversation_id: options.conversationId } : {}),
-        ...(options.senderId ? { sender_id: options.senderId } : {}),
-        ...(options.senderLabel ? { sender_label: options.senderLabel } : {}),
-        ...(options.authoredAfter ? { authored_after: options.authoredAfter } : {}),
-        ...(options.authoredBefore ? { authored_before: options.authoredBefore } : {}),
-        ...(options.participantId ? { participant_id: options.participantId } : {}),
-        ...(options.after ? { after: options.after } : {}),
-        ...(options.before ? { before: options.before } : {}),
-        ...(options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {}),
-        ...(options.attachmentType ? { attachment_type: options.attachmentType } : {}),
-        ...(options.maxResults !== undefined ? { max_results: options.maxResults } : {}),
-        ...(options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {}),
-        ...(options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}),
-      }),
-    });
-
-    const data = asRecord(response);
+      body: JSON.stringify(body),
+    }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
+    return data;
+  }
+
+  async sourceIndexSearch(
+    options: SourceIndexSearchOptions,
+    audience: 'calling_model' | 'private_answer' = 'calling_model',
+  ): Promise<SourceIndexSearchResult> {
+    const corpusId = canonicalSourceCorpusId(options.corpusId);
+    const data = await this.requestSourceIndexSearch({
+      query: options.query,
+      corpus_id: corpusId,
+      // Tool results go straight to the calling model, including searches of a named Private store.
+      ...(audience === 'private_answer' ? { include_private_names: true } : { personal_names_only: true }),
+      ...(options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {}),
+      ...(options.account ? { account: options.account } : {}),
+      ...(options.folderId ? { folder_id: options.folderId } : {}),
+      ...(options.folderName ? { folder_name: options.folderName } : {}),
+      ...(options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {}),
+      ...(options.chatScope ? { chat_scope: options.chatScope } : {}),
+      ...(options.trustDomain ? { trust_domain: options.trustDomain } : {}),
+      ...(options.conversationId ? { conversation_id: options.conversationId } : {}),
+      ...(options.senderId ? { sender_id: options.senderId } : {}),
+      ...(options.senderLabel ? { sender_label: options.senderLabel } : {}),
+      ...(options.authoredAfter ? { authored_after: options.authoredAfter } : {}),
+      ...(options.authoredBefore ? { authored_before: options.authoredBefore } : {}),
+      ...(options.participantId ? { participant_id: options.participantId } : {}),
+      ...(options.after ? { after: options.after } : {}),
+      ...(options.before ? { before: options.before } : {}),
+      ...(options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {}),
+      ...(options.attachmentType ? { attachment_type: options.attachmentType } : {}),
+      ...(options.maxResults !== undefined ? { max_results: options.maxResults } : {}),
+      ...(options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {}),
+      ...(options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}),
+    });
     return parseSourceIndexSearchResult(data, {
       config: this.config,
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true,
     });
+  }
+
+  /** The worker holds every source's hits until all reads finish, then releases their current names together. */
+  async sourceIndexSearchMany(corpusIds: string[], options: Pick<SourceIndexSearchOptions,
+    'query' | 'retrievalMode' | 'maxResults' | 'includeLocators'>): Promise<SourceIndexSearchResult[]> {
+    if (!corpusIds.length) throw new OperationError('invalid_params', 'No source is configured for search.');
+    const response = await this.requestSourceIndexSearch({
+      query: options.query,
+      corpus_ids: corpusIds,
+      personal_names_only: true,
+      retrieval_mode: options.retrievalMode,
+      max_results: options.maxResults,
+      include_locators: options.includeLocators,
+    });
+    if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
+      throw new OperationError('email_error', 'The worker did not return a search result for each requested source.');
+    }
+    return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord(value), {
+      config: this.config,
+      requestedCorpusId: corpusIds[index]!,
+      includeLocators: options.includeLocators === true,
+    })]);
   }
 
   async sourceWatchCreate(options: SourceWatchCreateOptions): Promise<SourceWatchResult> {

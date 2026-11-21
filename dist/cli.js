@@ -24745,6 +24745,8 @@ function adoptReleaseManifests(into, from) {
   into.manifests.push(...from.manifests);
 }
 function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
+  if (verdict.unroutedPrivate)
+    return false;
   const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
   const authorized = constraints.includeSecureLocalContent || postureNow === "allow";
   if (input.layer === "names")
@@ -24782,7 +24784,7 @@ function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
       if (verdict.tier === "secret")
         return ANSWER_RELEASE_UNVERIFIED;
       const { input, constraints } = entries[index];
-      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
+      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer || verdict.unroutedPrivate))
         return ANSWER_BECAME_PRIVATE;
       if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
         return "Olympus withheld this answer because current settings require approval for Private content.";
@@ -43042,8 +43044,8 @@ function listMovingRead(options) {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
-      ${options.legacyHoldsOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
-        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)
+      ${options.recordedOnly ? "AND (target_metadata_tier = 'secure' OR target_content_tier = 'secure') AND content_pending = 0 AND metadata_pending = 0" : ""}
+      ${options.legacyHoldsOnly || options.recordedOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
         AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
           AND c.account_scope = tier_items.account_scope AND c.conversation_key = tier_items.conversation_key
           AND c.provider_item_id = tier_items.provider_item_id AND c.trust_domain = 'internal' AND c.layers <> 'metadata'
@@ -43239,6 +43241,8 @@ class TierLedger {
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations().filter((migration) => restoredVersion === undefined || migration.version <= restoredVersion));
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
+      db.exec(`CREATE INDEX IF NOT EXISTS ${LEGACY_PROTECTED_INDEX}
+        ON tier_items (${LEGACY_PROTECTED_KEYS}) WHERE ${LEGACY_PROTECTED_ROWS}`);
       if (onDisk)
         restrictLedgerFiles(this.dbPath);
     } catch (error) {
@@ -43591,6 +43595,16 @@ class TierLedger {
   }
   movingDirectionClause(direction) {
     return tierMovingDirectionClause(direction);
+  }
+  *legacyProtectedRowsSteps(after, limit) {
+    const rows = yield {
+      sql: `SELECT ${LEGACY_PROTECTED_KEYS} FROM tier_items INDEXED BY ${LEGACY_PROTECTED_INDEX}
+        WHERE ${LEGACY_PROTECTED_ROWS} AND (${LEGACY_PROTECTED_KEYS}) > (?, ?, ?, ?)
+        ORDER BY ${LEGACY_PROTECTED_KEYS} LIMIT ?`,
+      params: [...after ? idParams(after) : ["", "", "", ""], limit],
+      mode: "all"
+    };
+    return rows.map(identityFromRow);
   }
   listMoving(options = {}) {
     const read = listMovingRead(options);
@@ -44487,7 +44501,7 @@ class TierLedger {
         }
       }
       const key = legacyPersonalBodyKey(identity);
-      if (result.raise && this.readMeta(key) === undefined) {
+      if (digest !== undefined && result.raise && this.readMeta(key) === undefined) {
         const order = this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_HELD);
         this.writeMeta(key, JSON.stringify({ digest, order }));
       }
@@ -44964,14 +44978,23 @@ class TierLedger {
       for (const row of rows)
         result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
       const copies = yield {
-        sql: `SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        sql: `SELECT c.*, CASE WHEN trust_domain = 'internal' AND (copy_state = 'superseded' OR layers = 'metadata')
+          THEN (SELECT json_array_length(value, '$.raisePurge') FROM tier_ledger_meta
+            WHERE key = 'tier-move-verified:' || c.provider || char(0) || c.account_scope || char(0)
+              || c.conversation_key || char(0) || c.provider_item_id AND value <> '') END AS pending_raise_purge
+          FROM tier_copies c WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
           ORDER BY corpus_id`,
         params,
         mode: "all"
       };
-      for (const row of copies)
-        result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+      for (const row of copies) {
+        const state = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+        if (state) {
+          state.copies.push(copyFromRow(row));
+          if (row.pending_raise_purge)
+            state.pendingRaisePurge = true;
+        }
+      }
       const overrides = yield {
         sql: `SELECT provider, account_scope, conversation_key, provider_item_id, override_json FROM tier_overrides
           WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
@@ -47316,7 +47339,7 @@ function overrideFromJson(json) {
     return parsed;
   return;
 }
-var TIER_LEDGER_SCHEMA_VERSION = 19, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2", LEGACY_PERSONAL_BODIES_WAITING = "legacy-personal-bodies:waiting", LEGACY_PERSONAL_BODY_PROGRESS_SQL, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
+var TIER_LEDGER_SCHEMA_VERSION = 19, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", LEGACY_PROTECTED_ROWS = "routed = 0 AND (metadata_tier IN ('secure', 'secrets') OR content_tier IN ('secure', 'secrets'))", LEGACY_PROTECTED_INDEX = "tier_items_legacy_protected", LEGACY_PROTECTED_KEYS = "provider, account_scope, conversation_key, provider_item_id", LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2", LEGACY_PERSONAL_BODIES_WAITING = "legacy-personal-bodies:waiting", LEGACY_PERSONAL_BODY_PROGRESS_SQL, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
@@ -66976,10 +66999,36 @@ function interleaveByCorpus(hits) {
   }
   return ordered;
 }
+function* releaseStates(ledger, identities) {
+  return yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, identities));
+}
+function releaseVerdict(input, state = { copies: [] }) {
+  const { record, copies, override, hidingIntent } = state;
+  if (hidingIntent === "secret")
+    return { tier: "secret", gone: false };
+  const pendingDeletion = hidingIntent === "deletion";
+  if (!record)
+    return { tier: "legacy", gone: pendingDeletion, ...pendingDeletion ? { pendingDeletion: true } : {} };
+  const namesOnly = input.layer === "names";
+  const tiers = namesOnly ? [record.metadataTier, record.targetMetadataTier] : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+  if (override?.kind === "tier")
+    tiers.push(override.tier);
+  const privateTier = tiers.includes("secure");
+  const held = namesOnly ? itemNamesHeldForJudgment(record, copies, input.corpusId) : record.metadataPending || contentHeldForJudgment(record);
+  const movingPersonalBody = record.state === "moving" && copies.some((copy) => copy.trustDomain === "internal" && copy.layers !== "metadata" && copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1);
+  const unroutedPrivate = state.pendingRaisePurge || !record.routed && record.contentRead && privateTier || movingPersonalBody && (privateTier || held);
+  return {
+    tier: tiers.includes("secrets") ? "secret" : held || privateTier ? "private" : "public_or_personal",
+    gone: pendingDeletion || record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata")),
+    ...!namesOnly && unroutedPrivate ? { unroutedPrivate: true } : {},
+    ...pendingDeletion ? { pendingDeletion: true } : {}
+  };
+}
 function* effectiveItemVerdicts(scopes, inputs) {
   const verdicts = inputs.map(() => ({ tier: "legacy", gone: false }));
   if (inputs.length === 0)
     return verdicts;
+  const unchanged = [];
   for (const scope of scopes()) {
     const governed = [];
     inputs.forEach((input, index) => {
@@ -67001,33 +67050,37 @@ function* effectiveItemVerdicts(scopes, inputs) {
     });
     if (governed.length === 0)
       continue;
-    const identities = governed.map(({ identity }) => identity);
-    const states = yield* visibilityRead(() => memoVisibilityItemsHere(scope.ledger, "states", () => scope.ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => scope.ledger.itemStatesForMany(missing)), () => itemStatesOffThread(scope.ledger, identities));
-    for (const { index, identity } of governed) {
+    const states = yield* releaseStates(scope.ledger, governed.map(({ identity }) => identity));
+    const unrouted = new Map;
+    for (const entry of governed) {
+      const { index, identity } = entry;
+      const input = inputs[index];
       const state = states.get(tierLedgerIdentityKey(identity));
-      if (!state)
+      const verdict = releaseVerdict(input, state);
+      verdicts[index] = verdict;
+      if (state?.record?.routed || verdict.gone || verdict.tier === "secret")
         continue;
-      const { record, copies, override, hidingIntent } = state;
-      if (hidingIntent === "secret") {
-        verdicts[index] = { tier: "secret", gone: false };
+      const entries = unrouted.get(input.corpusId);
+      if (entries)
+        entries.push(entry);
+      else
+        unrouted.set(input.corpusId, [entry]);
+    }
+    const previousFor = scope.preRoutingLedger ?? ((corpusId) => scope.stores?.().find((store) => store.corpusId === corpusId)?.preRoutingReadLedgerFor?.(scope.ledger));
+    for (const [corpusId, entries] of unrouted) {
+      const previous = previousFor(corpusId);
+      const marker = previous?.changeMarker();
+      unchanged.push(() => previousFor(corpusId) === previous && previous?.changeMarker() === marker);
+      if (!previous)
         continue;
+      const historical = yield* releaseStates(previous, entries.map(({ identity }) => identity));
+      for (const { index, identity } of entries) {
+        const prior = releaseVerdict(inputs[index], historical.get(tierLedgerIdentityKey(identity)));
+        if (prior.tier === "secret" || prior.gone)
+          verdicts[index] = prior;
+        else if (prior.tier === "private")
+          verdicts[index] = inputs[index].layer === "names" ? prior : { ...prior, unroutedPrivate: true };
       }
-      const pendingDeletion = hidingIntent === "deletion";
-      if (!record) {
-        if (pendingDeletion)
-          verdicts[index] = { tier: "legacy", gone: true, pendingDeletion: true };
-        continue;
-      }
-      const namesOnly = inputs[index].layer === "names";
-      const tiers = namesOnly ? [record.metadataTier, record.targetMetadataTier] : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
-      if (override?.kind === "tier")
-        tiers.push(override.tier);
-      const held = namesOnly ? itemNamesHeldForJudgment(record, copies, inputs[index].corpusId) : record.metadataPending || contentHeldForJudgment(record);
-      verdicts[index] = {
-        tier: tiers.includes("secrets") ? "secret" : held || tiers.includes("secure") ? "private" : "public_or_personal",
-        gone: pendingDeletion || record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata")),
-        ...pendingDeletion ? { pendingDeletion: true } : {}
-      };
     }
     const lane = childLane(scope);
     if (lane) {
@@ -67047,6 +67100,8 @@ function* effectiveItemVerdicts(scopes, inputs) {
       }
     }
   }
+  if (unchanged.some((check) => !check()))
+    throw new VisibilityChangedError;
   return verdicts;
 }
 function createReleaseTierCheck(scopes, secureDerivativeDefault, chunkOptions = {}, pending) {
@@ -69083,7 +69138,7 @@ function foldVectorScore(bestByItem, row, queryVector) {
   }
   return { mismatch: 0, qualified, score };
 }
-async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders) {
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders, eligiblePks) {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority), provider);
   if (after.skippedReason)
@@ -69102,7 +69157,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
   if (digestReady) {
-    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
+    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, eligiblePks);
     return "skippedReason" in scanned ? scanned : { ...scanned, onDemandReadsTablePresent };
   }
   const bestByItem = new Map;
@@ -69148,7 +69203,7 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
     return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
   return rows;
 }
-async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders) {
+async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, eligiblePks) {
   const work = sourceAnswerVectorWork();
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
@@ -69235,7 +69290,9 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
         return (readers?.[lane] ?? read)({ mode: "all", site: "vector_digest_rescore", ...page });
       }));
-      const rows = pages.flat();
+      const candidates = pages.flat();
+      const eligible = eligiblePks?.([...new Set(candidates.map((row) => row.item_pk))], options.onDemandReadsTablePresent === true);
+      const rows = eligible ? candidates.filter((row) => eligible.has(row.item_pk)) : candidates;
       const mismatchesBeforePage = dimensionMismatches;
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired()) {
@@ -69308,7 +69365,7 @@ function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECT
     ]
   };
 }
-async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
+async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, eligiblePks) {
   const side = [];
   const sideReaders = async () => {
     const opened = await Promise.all(Array.from({ length: READ_POOL_RESCORE_READERS }, () => openOffThreadSnapshot(dbPath, { lane: "rescore", noWait: true }).catch(() => {
@@ -69319,7 +69376,7 @@ async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector,
         side.push(reader);
     return side.map((reader) => reader.read);
   };
-  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders, eligiblePks), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
     if (error instanceof OffThreadReadBusyError)
       return { skippedReason: "vector_scan_store_busy" };
     throw error;
@@ -69549,16 +69606,17 @@ function defineConnectorCorpus(options) {
     description: "Shared connector-store corpus: generic local index over a Contract 1 SourceConnector."
   });
 }
-function publishPartialRows(store, request, rows, filters, score, projector, lane = "keyword") {
+function publishPartialRows(store, request, rows, filters, score, projector, lane = "keyword", searchEligibility) {
   if (!request.onPartialResponse)
     return;
-  const prefix = rows.slice(0, request.maxResults);
+  const eligible = searchEligibility?.(rows);
+  const prefix = (eligible ? rows.filter((_, index) => eligible[index]) : rows).slice(0, request.maxResults);
   const hits = prefix.map((row) => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
   const response = withSearchGrantDelivery(store, filters, request, { hits, latencyMs: 0, incomplete: true, rawExposed: false }, prefix);
   request.onPartialResponse(response, lane);
 }
-function partialKeywordRows(store, request, filters, projector) {
-  return request.onPartialResponse ? (rows, contentOnly) => publishPartialRows(store, request, rows, filters, (row) => -row.rank, projector, contentOnly ? "keyword_content" : "keyword") : undefined;
+function partialKeywordRows(store, request, filters, projector, searchEligibility) {
+  return request.onPartialResponse ? (rows, contentOnly) => publishPartialRows(store, request, rows, filters, (row) => -row.rank, projector, contentOnly ? "keyword_content" : "keyword", searchEligibility) : undefined;
 }
 function publishKeywordLane(emit, rows) {
   if (!emit)
@@ -69603,12 +69661,13 @@ function searchGrantIdentityKey(identity) {
     identity.sourceVersion
   ]);
 }
-async function withVectorMetadataFallbacks(store, request, rows, accountScope, filters) {
+async function withVectorMetadataFallbacks(store, request, rows, accountScope, filters, searchEligibility) {
   if (!usesSearchGrants(filters) || rows.length === 0)
     return [...rows];
   const metadata = await store.searchItemsDetailedOffThread(request.query, MAX_SEARCH_RESULTS, accountScope, filters, {
     prefix: false,
     locate: false,
+    searchEligibility,
     metadataCandidates: rows.map((row) => row.sourceItem)
   }, request.deadlineAtMs !== undefined ? { deadlineAtMs: request.deadlineAtMs } : {});
   const byVersion = new Map(metadata.rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
@@ -69649,18 +69708,19 @@ function createConnectorStoreCorpusAdapter(options) {
     if (!embeddingProvider || useHybrid !== "hybrid" || semanticSkippedReason)
       return (async () => {
         const markStage = startStoreStageClock(stages);
-        const emitPartial = partialKeywordRows(store, request, filters, options.resultProjector);
-        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: emitPartial }, request.deadlineAtMs);
+        const { searchEligibility } = options;
+        const emitPartial = partialKeywordRows(store, request, filters, options.resultProjector, searchEligibility);
+        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { searchEligibility, onPartialRows: emitPartial }, request.deadlineAtMs);
         markStage?.("keyword_lane_ms");
-        keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
+        keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, keywordLane, options.localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
         publishKeywordLane(emitPartial, keywordLane.rows);
         markStage?.("keyword_relaxation_ms");
         let recencyCut = false;
         const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => {
           recencyCut = true;
-        });
+        }, searchEligibility);
         markStage?.("recency_read_ms");
-        keywordLane = (await refreshSearchTierVisibility(store, keywordLane, [])).keyword;
+        keywordLane = (await refreshSearchTierVisibility(store, keywordLane, [], searchEligibility)).keyword;
         markStage?.("keyword_revalidation_ms");
         const rows = keywordLane.rows;
         if (recencyRows.length === 0) {
@@ -69720,7 +69780,7 @@ function createConnectorStoreCorpusAdapter(options) {
         markStage?.("finalize_ms");
         return withSearchGrantDelivery(store, filters, request, response, keywordLane.allRows);
       })();
-    return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, stages, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback);
+    return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, stages, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback, options.searchEligibility);
   };
   adapter.hybridAvailability = () => {
     if (!embeddingProvider) {
@@ -69751,7 +69811,7 @@ function createConnectorStoreCorpusAdapter(options) {
       return { hits: [], latencyMs: Date.now() - startedAt, matchCount: none, rawExposed: false };
     }
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
-    const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs);
+    const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { searchEligibility: options.searchEligibility });
     const response = {
       hits: lane.rows.map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, options.resultProjector, filters?.locatorPathScope)),
       latencyMs: Date.now() - startedAt,
@@ -69775,8 +69835,9 @@ function createConnectorStoreCorpusAdapter(options) {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.vectorLaneServable(embeddingProvider.modelId);
-    const emitPartial = partialKeywordRows(store, request, filters);
-    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, onPartialRows: emitPartial };
+    const { searchEligibility } = options;
+    const emitPartial = partialKeywordRows(store, request, filters, undefined, searchEligibility);
+    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, searchEligibility, onPartialRows: emitPartial };
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs), options.localKeywordFallback, ftsOptions, request.deadlineAtMs);
     publishKeywordLane(emitPartial, readKeywordLane.rows);
@@ -69785,16 +69846,16 @@ function createConnectorStoreCorpusAdapter(options) {
     if (meaningLane) {
       const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
       if (bar !== undefined) {
-        const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { locate: false });
+        const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { locate: false, searchEligibility });
         if (lane.skippedReason !== undefined)
           incomplete = true;
         const rows = lane.rows.filter((row) => row.bestCosine >= bar);
-        const matches = await withVectorMetadataFallbacks(store, request, rows, options.accountScope, filters);
+        const matches = await withVectorMetadataFallbacks(store, request, rows, options.accountScope, filters, searchEligibility);
         semanticRows.push(...matches);
-        publishPartialRows(store, request, matches, filters, (row) => -row.rank, undefined, "vector");
+        publishPartialRows(store, request, matches, filters, (row) => -row.rank, undefined, "vector", searchEligibility);
       }
     }
-    const { keyword: keywordLane, vectors } = await refreshSearchTierVisibility(store, readKeywordLane, semanticRows);
+    const { keyword: keywordLane, vectors } = await refreshSearchTierVisibility(store, readKeywordLane, semanticRows, searchEligibility);
     const visibleSemanticRows = vectors.filter((row) => !keywordLane.matchedItemIds.has(row.sourceItem.localItemId));
     const rows = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
@@ -69830,11 +69891,12 @@ function createConnectorStoreCorpusAdapter(options) {
   }
   return expanded;
 }
-async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs, onCutShort) {
+async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs, onCutShort, searchEligibility) {
   if (store.family !== "chat")
     return [];
   const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
-  return rows.map((row) => ({ ...row, contentMatched: true }));
+  const eligible = searchEligibility?.(rows);
+  return (eligible ? rows.filter((_, index) => eligible[index]) : rows).map((row) => ({ ...row, contentMatched: true }));
 }
 function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPathScope) {
   let locatorRead = false;
@@ -69910,16 +69972,16 @@ function startStoreStageClock(stages) {
     startedAt = now;
   };
 }
-async function hybridConnectorStoreSearch(store, provider, request, startedAt, stages, accountScope, filters, semanticRelevanceBar, resultProjector, localKeywordFallback) {
+async function hybridConnectorStoreSearch(store, provider, request, startedAt, stages, accountScope, filters, semanticRelevanceBar, resultProjector, localKeywordFallback, searchEligibility) {
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
   const markStage = startStoreStageClock(stages);
-  const emitPartial = partialKeywordRows(store, request, filters, resultProjector);
+  const emitPartial = partialKeywordRows(store, request, filters, resultProjector, searchEligibility);
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
-    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: emitPartial }, request.deadlineAtMs);
-    const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs)) : undefined;
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility, onPartialRows: emitPartial }, request.deadlineAtMs);
+    const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility }, request.deadlineAtMs)) : undefined;
     publishKeywordLane(emitPartial, lane.rows);
     if (stages)
       stages.keyword_lane_ms = performance.now() - laneStartedAt;
@@ -69928,11 +69990,11 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   const vectorWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const vectorStartedAt = Date.now();
-    const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
+    const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs, { searchEligibility });
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
     const vetted = bar === undefined ? [] : lane.rows.filter((row) => row.bestCosine >= bar);
-    const rows = await withVectorMetadataFallbacks(store, request, vetted, accountScope, filters);
-    publishPartialRows(store, request, rows, filters, (row) => row.bestCosine, resultProjector, "vector");
+    const rows = await withVectorMetadataFallbacks(store, request, vetted, accountScope, filters, searchEligibility);
+    publishPartialRows(store, request, rows, filters, (row) => row.bestCosine, resultProjector, "vector", searchEligibility);
     const byVersion = new Map(rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
     if (stages)
       stages.vector_lane_ms = performance.now() - laneStartedAt;
@@ -69963,7 +70025,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   }
   markStage?.("post_join_setup_ms");
   const relaxStartedAt = Date.now();
-  keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
   if (keywordLane !== keywordResult.lane)
     publishKeywordLane(emitPartial, keywordLane.rows);
   keywordElapsedMs += Date.now() - relaxStartedAt;
@@ -69971,9 +70033,9 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   let recencyCut = false;
   const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => {
     recencyCut = true;
-  });
+  }, searchEligibility);
   markStage?.("recency_read_ms");
-  const checked = await refreshSearchTierVisibility(store, keywordLane, vectorLane.rows);
+  const checked = await refreshSearchTierVisibility(store, keywordLane, vectorLane.rows, searchEligibility);
   keywordLane = checked.keyword;
   markStage?.("keyword_revalidation_ms");
   const scoredVectorRows = checked.vectors;
@@ -70182,9 +70244,11 @@ function keywordExpansionChangesSearch(query, ftsOptions) {
   const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
   return shape() !== withKeywordExpansionDisabled(shape);
 }
-async function refreshSearchTierVisibility(store, lane, vectors) {
+async function refreshSearchTierVisibility(store, lane, vectors, searchEligibility) {
   const candidates = [...lane.allRows, ...vectors];
-  const visible = new Set(await store.stillVisibleSearchRowsOffThread(candidates));
+  const current = await store.stillVisibleSearchRowsOffThread(candidates);
+  const eligible = searchEligibility?.(current);
+  const visible = new Set(eligible ? current.filter((_, index) => eligible[index]) : current);
   if (visible.size === candidates.length)
     return { keyword: lane, vectors: [...vectors] };
   const retained = lane.allRows.filter((row) => visible.has(row));
@@ -72897,6 +72961,7 @@ var init_local_index = __esm(() => {
     tierLedgerOwned;
     tierLedgerDisabled;
     preRoutingLedger;
+    preRoutingReadLedger;
     boundLedgerHandle;
     embeddingQueueState;
     embeddingFailureState;
@@ -73212,6 +73277,7 @@ var init_local_index = __esm(() => {
         if (this.tierLedgerOwned === true)
           this.tierLedgerHandle?.close();
         this.preRoutingLedger?.close();
+        this.preRoutingReadLedger?.close();
         this.boundLedgerHandle?.close();
         this.boundLedgerHandle = undefined;
       } finally {
@@ -73336,11 +73402,18 @@ var init_local_index = __esm(() => {
       return this.visibilityLedger();
     }
     effectiveItemTiers(identities, layer) {
+      return this.effectiveStoreVerdicts(identities, layer).map((verdict) => verdict.tier);
+    }
+    effectiveStoreVerdicts(identities, layer) {
       try {
         const ledger = this.governingTierLedger();
-        return visibilityHere(effectiveItemVerdicts(() => ledger ? [{ ledger, corpusIds: new Set([this.corpusId]) }] : [], identities.map((identity) => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...layer ? { layer } : {} })))).map((verdict) => verdict.gone && verdict.tier !== "secret" ? "private" : verdict.tier);
+        return visibilityHere(effectiveItemVerdicts(() => ledger ? [{
+          ledger,
+          corpusIds: new Set([this.corpusId]),
+          preRoutingLedger: () => this.preRoutingReadLedgerFor(ledger)
+        }] : [], identities.map((identity) => ({ ...identity, corpusId: this.corpusId, privateAtAnswer: false, ...layer ? { layer } : {} })))).map((verdict) => verdict.gone && verdict.tier !== "secret" ? { ...verdict, tier: "private" } : verdict);
       } catch {
-        return identities.map(() => "private");
+        return identities.map(() => ({ tier: "private", gone: true }));
       }
     }
     effectiveLocalItemTier(localItemId) {
@@ -73364,6 +73437,14 @@ var init_local_index = __esm(() => {
       if (!this.preRoutingLedger && existsSync39(path))
         this.preRoutingLedger = new TierLedger({ dbPath: path });
       return this.preRoutingLedger;
+    }
+    preRoutingReadLedgerFor(setLedger) {
+      if (this.trustDomain !== "internal")
+        return;
+      const path = tierLedgerPathForStore(this.dbPath);
+      if (path === ":memory:" || path === setLedger.dbPath || !existsSync39(path))
+        return;
+      return this.preRoutingReadLedger ??= new TierLedger({ dbPath: path, readOnly: true, allowWalLessRead: true });
     }
     tierLedger() {
       if (this.tierLedgerDisabled === true)
@@ -74580,6 +74661,51 @@ var init_local_index = __esm(() => {
         stores: () => [this]
       };
     }
+    childrenWithWithheldSearchIdentifiers(identities, includePrivateNames) {
+      const withheld = new Set;
+      let pending = [...this.parentLinksOf(identities)].map(([child, parent]) => ({ child, parent }));
+      if (pending.length === 0)
+        return withheld;
+      const lane = this.childVisibilityLane();
+      const ledger = lane.ledger();
+      const stores = lane.stores();
+      const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }] : [];
+      for (let depth = 0;pending.length > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
+        const refs = [...new Map(pending.map(({ parent }) => [parentKey(parent), parent])).values()];
+        const rows = stores.flatMap((store) => store.parentStandings(refs).filter((row) => row.active).map((row) => ({ ...row, corpusId: store.corpusId })));
+        const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map((row) => ({
+          ...row.identity,
+          corpusId: row.corpusId,
+          privateAtAnswer: false,
+          layer: "names"
+        }))));
+        const allowed = new Map;
+        const denied = new Set;
+        rows.forEach((row, index) => {
+          const key = parentKey(row);
+          const verdict = verdicts[index];
+          const canRelease = !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
+          const previous = allowed.get(key);
+          if (!canRelease || previous && previous.grandparentLocalItemId !== row.grandparentLocalItemId) {
+            denied.add(key);
+          } else {
+            allowed.set(key, row);
+          }
+        });
+        pending = pending.flatMap(({ child, parent }) => {
+          const key = parentKey(parent);
+          const row = denied.has(key) ? undefined : allowed.get(key);
+          if (!row)
+            withheld.add(child);
+          if (!row?.grandparentLocalItemId)
+            return [];
+          return [{ child, parent: { provider: row.provider, accountScope: row.accountScope, parentLocalItemId: row.grandparentLocalItemId } }];
+        });
+      }
+      for (const { child } of pending)
+        withheld.add(child);
+      return withheld;
+    }
     hasChildItems() {
       if (!this.childItemColumnsPresent)
         return false;
@@ -74681,6 +74807,7 @@ var init_local_index = __esm(() => {
             },
             active: row.tombstoned === 0,
             secret: row.trust_tier === "S5",
+            legacyPrivateNames: isSecureSensitivity({ trustDomain: this.trustDomain, trustTier: trustTierFromRow(row.trust_tier) }),
             ...row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}
           });
         }
@@ -75803,6 +75930,23 @@ ${parentKey(ref)}`, { ref, origin });
         params: after ? [after.date, pageSize - sameDate.length] : [pageSize]
       } : [];
       const rows = [...sameDate, ...older];
+      return yield* this.readPersonalBodyRows(rows, after, pageSize, chunkLimit);
+    }
+    personalBodyForIdentityFinder(identity, chunkLimit) {
+      const steps = () => this.personalBodyForIdentitySteps(identity, chunkLimit);
+      return { here: () => this.readHere(steps()), offThread: () => this.readStepsInBackground(steps()) };
+    }
+    *personalBodyForIdentitySteps(identity, chunkLimit) {
+      const rows = yield {
+        sql: `SELECT item_pk, 0 AS source_date, family, provider, account_scope, provider_item_id,
+          provider_conversation_id, local_item_id, mime_type, content_hash FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`,
+        params: [identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId],
+        mode: "all"
+      };
+      return yield* this.readPersonalBodyRows(rows, undefined, 1, chunkLimit);
+    }
+    *readPersonalBodyRows(rows, after, pageSize, chunkLimit) {
       const items = [];
       let next = after;
       let remaining = Math.max(1, Math.min(PERSONAL_BODY_CHUNKS_PER_PAGE, Math.floor(chunkLimit)));
@@ -79906,24 +80050,29 @@ ${parentKey(ref)}`, { ref, origin });
     async embeddingBacklogEstimateOffThread(modelId, embedder, scope, options = {}) {
       if (!offThreadReadsSupported(this.dbPath))
         return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
-      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, false);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, false);
       const excluded = tierExclusion.params.length > 0 ? JSON.parse(tierExclusion.params[0]) : [];
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
-      const scoped = statusScopeContentFilter(scope);
+      const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
+      const failed = this.embeddingFailureExclusionFilter();
       const sql = `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM items i
       CROSS JOIN chunks c ON c.item_pk = i.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
-        ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}
+        ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter} ${failed.filter}
     `;
       let missingChunks = 0;
       let chars = 0;
       await this.walkItemKeys(async (lo, hi) => {
         const page = excluded.length > 0 ? [JSON.stringify(excluded.filter((pk) => pk > lo && pk <= hi))] : [];
-        const row = await readInBackground(this.dbPath, { sql, params: [modelId, lo, hi, ...page, ...privateTier.params, ...scoped.params], mode: "get" });
+        const row = await readInBackground(this.dbPath, {
+          sql,
+          params: [modelId, lo, hi, ...page, ...privateTier.params, ...scoped.params, ...failed.params],
+          mode: "get"
+        });
         missingChunks += Number(row.missing);
         chars += Number(row.chars);
       });
@@ -79935,19 +80084,24 @@ ${parentKey(ref)}`, { ref, origin });
         await page(lo, Math.min(lo + statusPageKeys, end));
     }
     embeddingBacklogRead(modelId, embedder, scope, options, connectionLocal) {
-      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, connectionLocal);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, connectionLocal);
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
-      const scoped = statusScopeContentFilter(scope);
-      const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
-      return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
+      const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
+      const failed = this.embeddingFailureExclusionFilter();
+      const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter} ${failed.filter}`;
+      return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params, ...failed.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
     ` };
+    }
+    embeddingFailureExclusionFilter() {
+      const failed = this.embeddingFailureState;
+      return failed?.size ? { filter: "AND i.local_item_id NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify([...failed.keys()])] } : { filter: "", params: [] };
     }
     pdfExtractionBacklog() {
       return pdfBacklogFromRow(this.db.query(PDF_EXTRACTION_BACKLOG_SQL).get());
@@ -79980,7 +80134,7 @@ ${parentKey(ref)}`, { ref, origin });
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held.filter((pk) => !eligibleHeld?.has(pk)), ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
-    embeddingBatchRecheck(batch, embeddableTiers, allowHeld, scope) {
+    embeddingBatchRecheck(batch, embeddableTiers, cloud, allowHeld, scope) {
       const itemPks = [...new Set(batch.map((row) => row.item_pk))];
       const currentRows = this.db.query(`
       SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items i
@@ -79988,21 +80142,22 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(JSON.stringify(itemPks), ...scope.params);
       const current = new Map(currentRows.map((row) => [row.item_pk, row]));
       const hidden = this.embeddingHiddenAmong(currentRows, allowHeld);
-      const verdicts = this.effectiveItemTiers(currentRows.map((item) => ({
+      const verdicts = this.effectiveStoreVerdicts(currentRows.map((item) => ({
         provider: item.provider,
         accountScope: item.account_scope,
         providerItemId: item.provider_item_id,
         ...item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}
       })));
-      const tiers = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]]));
+      const verdictByPk = new Map(currentRows.map((item, index) => [item.item_pk, verdicts[index]]));
       const kept = [];
       let privateTier = 0;
       let notVisible = 0;
       for (const row of batch) {
         const item = current.get(row.item_pk);
-        if (!item || item.tombstoned !== 0 || item.trust_tier === "S5" || tiers.get(row.item_pk) === "secret" || hidden.has(row.item_pk)) {
+        const verdict = verdictByPk.get(row.item_pk);
+        if (!item || item.tombstoned !== 0 || item.trust_tier === "S5" || verdict?.tier === "secret" || hidden.has(row.item_pk)) {
           notVisible += 1;
-        } else if (embeddableTiers !== undefined && (!embeddableTiers.includes(item.trust_tier) || tiers.get(row.item_pk) === "private" || tiers.get(row.item_pk) === "unknown")) {
+        } else if (cloud && (verdict?.gone || verdict?.unroutedPrivate) || embeddableTiers !== undefined && (!embeddableTiers.includes(item.trust_tier) || verdict?.tier === "private" || verdict?.tier === "unknown")) {
           privateTier += 1;
         } else {
           kept.push(row);
@@ -80061,7 +80216,7 @@ ${parentKey(ref)}`, { ref, origin });
       if (tiers === undefined)
         return { items: 0, chunks: 0, reason };
       const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
-      const scoped = statusScopeContentFilter(scope);
+      const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
       const filter = `${tierExclusion.filter} ${scoped.filter}`;
       const params = [...tierExclusion.params, ...scoped.params];
       const row = this.db.query(`
@@ -80069,7 +80224,7 @@ ${parentKey(ref)}`, { ref, origin });
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         AND i.trust_tier NOT IN (SELECT value FROM json_each(?))
         ${filter}
@@ -80278,7 +80433,7 @@ ${parentKey(ref)}`, { ref, origin });
           }
         }
         {
-          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
+          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === "cloud", allowHeld(), dispatchScope);
           privateTierWithheldChunks += recheck.privateTier;
           staleSkipped += recheck.notVisible + recheck.privateTier;
           batch = recheck.kept;
@@ -80339,7 +80494,7 @@ ${parentKey(ref)}`, { ref, origin });
           batch = batch.filter((row) => !failedRows.has(row));
           if (batch.length === 0)
             continue;
-          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
+          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === "cloud", allowHeld(), dispatchScope);
           privateTierWithheldChunks += recheck.privateTier;
           staleSkipped += recheck.notVisible + recheck.privateTier;
           batch = recheck.kept;
@@ -80361,7 +80516,7 @@ ${parentKey(ref)}`, { ref, origin });
         const writtenItemPks = options.onBatchWritten ? [] : undefined;
         this.db.transaction(() => {
           this.assertEmbeddingWriteAuthority(provider, providerEpoch);
-          const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope).kept);
+          const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider.backend === "cloud", allowHeld(), dispatchScope).kept);
           for (let index = 0;index < batch.length; index += 1) {
             const row = batch[index];
             if (!stillEligible.has(row))
@@ -80760,7 +80915,8 @@ ${parentKey(ref)}`, { ref, origin });
         ...accountScope !== undefined ? { accountScope } : {},
         ...vectorFilters ? { filters: vectorFilters } : {},
         ...deadlineAtMs !== undefined ? { deadlineAtMs } : {},
-        locate: laneOptions.locate !== false
+        locate: laneOptions.locate !== false,
+        searchEligibility: laneOptions.searchEligibility
       });
     }
     async scoreVectorLaneSnapshot(input) {
@@ -80786,7 +80942,8 @@ ${parentKey(ref)}`, { ref, origin });
       const excludedItemPks = this.vectorScanExcludedItemPks();
       if (excludedItemPks)
         pageOptions.excludedItemPks = excludedItemPks;
-      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
+      const eligiblePks = input.searchEligibility ? (pks, onDemandReadsTablePresent) => this.visibleVectorItemPks(pks, selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility) : undefined;
+      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks);
       if ("skippedReason" in scanned)
         return { rows: [], skippedReason: scanned.skippedReason };
       const { bestByItem, dimensionMismatches, onDemandReadsTablePresent } = scanned;
@@ -80806,13 +80963,13 @@ ${parentKey(ref)}`, { ref, origin });
           if (visibleInBatch.length === 0) {
             const batch = candidates.slice(candidateOffset, candidateOffset + VECTOR_VISIBILITY_BATCH_SIZE);
             candidateOffset += batch.length;
-            const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
+            const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility);
             visibleInBatch = batch.filter(([itemPk]) => visible.has(itemPk));
           }
           rankedItems.push(...visibleInBatch.splice(0, limit - rankedItems.length));
           continue;
         }
-        const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
+        const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility);
         rankedItems = rankedItems.filter(([itemPk]) => stillVisible.has(itemPk));
         if (!canFill())
           break;
@@ -80869,7 +81026,7 @@ ${parentKey(ref)}`, { ref, origin });
       return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
     }
     vectorScanExclusion;
-    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
+    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, eligiblePks) {
       const scanDb = this.dbPath === ":memory:" ? this.db : new Database9(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;
       try {
@@ -80882,7 +81039,7 @@ ${parentKey(ref)}`, { ref, origin });
           const params = query.params;
           return query.mode === "all" ? statement.all(...params) : statement.get(...params);
         };
-        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit);
+        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, undefined, eligiblePks);
       } finally {
         try {
           scanDb.exec("ROLLBACK;");
@@ -81016,23 +81173,28 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...tierExclusion.params, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
-    visibleVectorItemPks(itemPks, accountScope, filters, onDemandReadsTablePresent = false) {
+    visibleVectorItemPks(itemPks, accountScope, filters, onDemandReadsTablePresent = false, searchEligibility) {
       const visible = new Set;
       const selectedFilters = connectorStoreFilterSql(filters);
       const metadataOnly = connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent);
       for (let offset = 0;offset < itemPks.length; offset += VECTOR_VISIBILITY_BATCH_SIZE) {
         const batch = itemPks.slice(offset, offset + VECTOR_VISIBILITY_BATCH_SIZE);
-        const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id, i.trust_tier
         FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
         ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}
         ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ""}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params, ...metadataOnly.params);
-        for (const row of this.tierVisibleRows(rows, (row) => ({
+        const identityOf = (row) => ({
           provider: row.provider,
           accountScope: row.account_scope,
           providerItemId: row.provider_item_id,
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-        }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold)))
-          visible.add(row.item_pk);
+        });
+        const current = this.tierVisibleRows(rows, identityOf, () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold));
+        const eligible = searchEligibility?.(current.map((row) => ({ sourceItem: identityOf(row), trustTier: trustTierFromRow(row.trust_tier) })));
+        current.forEach((row, index) => {
+          if (!eligible || eligible[index])
+            visible.add(row.item_pk);
+        });
       }
       return visible;
     }
@@ -81313,12 +81475,17 @@ ${parentKey(ref)}`, { ref, origin });
             return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
           });
         }
-        const visible = yield* this.tierVisibleRowsSteps(signalled, (row) => ({
+        const current = yield* this.tierVisibleRowsSteps(signalled, (row) => ({
           provider: row.provider,
           accountScope: row.account_scope,
           providerItemId: row.provider_item_id,
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
         }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
+        const eligible = ftsOptions.searchEligibility?.(current.map((row) => ({
+          sourceItem: sourceItemFromRow(row),
+          trustTier: trustTierFromRow(row.trust_tier)
+        })));
+        const visible = eligible ? current.filter((_, index) => eligible[index]) : current;
         selected.push(...visible);
         if (ftsOptions.prepareGrantFallbacks && visible.length > 0) {
           const pageBodies = visible.filter((row) => row.chunk_pk != null);
@@ -82308,7 +82475,8 @@ ${parentKey(ref)}`, { ref, origin });
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
       const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
-      const kept = this.totals();
+      const embedding = scope?.embedding;
+      const kept = embedding?.accountScope || embedding?.contentFilters || embedding?.contentAllowed === false ? undefined : this.totals();
       const countedTotals = kept ? storeTotalsFromRows(yield { sql: "SELECT name, n FROM store_totals", params: [], mode: "all" }, kept.reconciledAt) : undefined;
       const currentTier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
       const tier = {
@@ -82319,7 +82487,9 @@ ${parentKey(ref)}`, { ref, origin });
         metadataLayerContentUnread: currentTier.metadataLayerContentUnread.slice()
       };
       const hiddenNotIn = tier.hidden.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
-      const heldNotIn = tier.held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const heldForJudgment = scope?.embedding?.includeHeldForJudgment ? new Set(tier.heldForJudgment) : undefined;
+      const held = heldForJudgment ? tier.held.filter((pk) => !heldForJudgment.has(pk)) : tier.held;
+      const heldNotIn = held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const namesOnlyWithText = tier.metadataLayer.length > 0 ? (yield { sql: `
           SELECT j.value AS pk FROM json_each(?) j
           WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = j.value)
@@ -82339,7 +82509,9 @@ ${parentKey(ref)}`, { ref, origin });
       ${accountScope ? "AND i.account_scope = ?" : ""}
       ${contentFilters.sql}
       ${hiddenNotIn}`;
-      const parityWhere = `${contentWhere}
+      const embeddingFilter = statusScopeContentFilter(scope?.embedding ?? scope);
+      const parityWhere = `AND i.trust_tier <> 'S5' ${embeddingFilter.filter}
+      ${hiddenNotIn} ${namesOnlyNotIn}
       ${heldNotIn}`;
       const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
       const policyHolds = new Set(unreadHolds.policyPks);
@@ -82362,7 +82534,12 @@ ${parentKey(ref)}`, { ref, origin });
           ...pageList(tier.hidden, lo, hi),
           ...pageList(namesOnlyWithText, lo, hi)
         ];
-        const parityParams = [...contentParams, ...pageList(tier.held, lo, hi)];
+        const parityParams = [
+          ...embeddingFilter.params,
+          ...pageList(tier.hidden, lo, hi),
+          ...pageList(namesOnlyWithText, lo, hi),
+          ...pageList(held, lo, hi)
+        ];
         const fileScopeParams = [
           ...accountScope ? [accountScope] : [],
           ...contentFilters.params,
@@ -82371,7 +82548,9 @@ ${parentKey(ref)}`, { ref, origin });
         ];
         return { itemParams, contentParams, parityParams, fileScopeParams };
       };
-      const fileScoped = policyHolds.size > 0 || scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key, value]) => key === "contentNotBefore" || value === undefined));
+      const ownScope = Object.entries(scope ?? {}).filter(([key]) => key !== "embedding");
+      const embeddingOnly = scope?.embedding !== undefined && ownScope.every(([, value]) => value === undefined);
+      const fileScoped = policyHolds.size > 0 || scope !== undefined && !embeddingOnly && !(scope.contentNotBefore !== undefined && ownScope.every(([key, value]) => key === "contentNotBefore" || value === undefined));
       const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
       const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
@@ -82521,7 +82700,7 @@ ${parentKey(ref)}`, { ref, origin });
           SELECT DISTINCT emb.model_id
           FROM items i
           CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk
-          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${contentWhere}
+          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${parityWhere}
         ) m
       `, params: [
           lo,
@@ -82532,7 +82711,7 @@ ${parentKey(ref)}`, { ref, origin });
           ...parityParams,
           lo,
           hi,
-          ...contentParams
+          ...parityParams
         ], mode: "all" };
         for (const row of pageByModel) {
           const total = modelTotals.get(row.model_id) ?? { embedded_chunks: 0, items_embedded: 0 };
@@ -109643,7 +109822,9 @@ var init_filter_capabilities = __esm(() => {
     "after",
     "before",
     "trust_domain",
-    "all_tiers"
+    "all_tiers",
+    "personal_names_only",
+    "include_private_names"
   ];
   CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
     "approved_scope_key",
@@ -143297,7 +143478,8 @@ function createSourceIndexStatusHandler(options = {}) {
           availability.backend ?? null,
           availability.provider ?? null
         ],
-        statusScope ?? null
+        statusScope ?? null,
+        store?.embeddingFailedItemCount?.() ?? 0
       ]);
       const cached = maxAgeMs > 0 ? cache.get(cacheKey) : undefined;
       if (cached && snapshot.countsMaxAgeMs !== 0 && cached.counted === counted && nowMs() - cached.recordedAtMs <= maxAgeMs)
@@ -143608,17 +143790,12 @@ function bringCountsForward(corpus, live) {
     const total = floor(parity.chunks + chunks);
     const embedded = Math.min(total, floor(parity.embedded_chunks + vectors));
     const missing = parity.required ? floor(parity.missing_chunks + chunks - vectors) : 0;
-    const withheld = parity.private_tier_withheld?.chunks ?? 0;
     return {
       ...parity,
       chunks: total,
       embedded_chunks: embedded,
       missing_chunks: missing,
-      refresh_needed: parity.required && missing > withheld,
-      ...parity.backlog_estimate ? { backlog_estimate: {
-        ...parity.backlog_estimate,
-        missing_chunks: Math.min(missing, floor(parity.backlog_estimate.missing_chunks + chunks - vectors))
-      } } : {}
+      refresh_needed: parity.backlog_estimate ? parity.refresh_needed : parity.required && missing > 0
     };
   })();
   return {
@@ -143665,7 +143842,7 @@ function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
   const chunks = counts?.chunks ?? 0;
   const retrieval = counts !== undefined && chunks === 0 && assessed.reason === "no_current_embedding_artifacts" ? { ...assessed, servableMode: "hybrid", health: "ready", reason: undefined } : assessed;
   const noCurrentArtifacts = retrieval.reason === "no_current_embedding_artifacts";
-  const embeddedChunks = noCurrentArtifacts ? 0 : counts?.embedded_chunks ?? 0;
+  const embeddedChunks = noCurrentArtifacts && hybridAvailability?.modelId === undefined ? 0 : counts?.embedded_chunks ?? 0;
   const currentCounts = counts !== undefined && noCurrentArtifacts && ITEMS_EMBEDDED_COUNT_KEY in counts ? { counts: { ...counts, [ITEMS_EMBEDDED_COUNT_KEY]: 0 } } : {};
   const embeddingRequired = corpus.embeddingPolicy !== "disabled" && corpus.activationMode !== "lexical_only";
   return {
@@ -143694,17 +143871,16 @@ function withEmbeddingBacklogEstimate(status, store, modelId, availability, scop
   if (!parity?.required)
     return status;
   const embedder = availability.backend !== undefined && availability.provider !== undefined ? { modelId, provider: availability.provider, backend: availability.backend } : undefined;
-  const backlog = reused(countsMaxAgeMs, ["embedding-backlog", store.corpusId, modelId, embedder ?? null, scope ?? null], () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }), typeof store.embeddingBacklogEstimateOffThread === "function" ? { read: () => store.embeddingBacklogEstimateOffThread(modelId, embedder, scope, { countsMaxAgeMs }), empty: { missingChunks: 0, estimatedTokens: 0 } } : undefined);
+  const failedCount = store.embeddingFailedItemCount?.() ?? 0;
+  const backlog = reused(countsMaxAgeMs, ["embedding-backlog", store.corpusId, modelId, embedder ?? null, scope ?? null, failedCount], () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }), typeof store.embeddingBacklogEstimateOffThread === "function" ? { read: () => store.embeddingBacklogEstimateOffThread(modelId, embedder, scope, { countsMaxAgeMs }), empty: { missingChunks: 0, estimatedTokens: 0 } } : undefined);
   const withheld = embedder ? reused(countsMaxAgeMs, ["private-withheld", store.corpusId, embedder, scope ?? null], () => store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs })) : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,
     embedding_parity: {
       ...parity,
-      ...withheld && withheld.chunks > 0 ? {
-        refresh_needed: parity.refresh_needed && parity.missing_chunks > withheld.chunks,
-        private_tier_withheld: { chunks: withheld.chunks, reason: withheld.reason }
-      } : {},
+      refresh_needed: backlog.missingChunks > 0,
+      ...withheld && withheld.chunks > 0 ? { private_tier_withheld: { chunks: withheld.chunks, reason: withheld.reason } } : {},
       backlog_estimate: {
         model_id: modelId,
         missing_chunks: backlog.missingChunks,
@@ -150967,50 +151143,74 @@ class EmailClient {
       });
     return result;
   }
-  async sourceIndexSearch(options) {
+  async requestSourceIndexSearch(body) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index search.");
     }
-    const corpusId = canonicalSourceCorpusId(options.corpusId);
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
+    const data = asRecord15(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: options.query,
-        corpus_id: corpusId,
-        ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.folderId ? { folder_id: options.folderId } : {},
-        ...options.folderName ? { folder_name: options.folderName } : {},
-        ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
-        ...options.chatScope ? { chat_scope: options.chatScope } : {},
-        ...options.trustDomain ? { trust_domain: options.trustDomain } : {},
-        ...options.conversationId ? { conversation_id: options.conversationId } : {},
-        ...options.senderId ? { sender_id: options.senderId } : {},
-        ...options.senderLabel ? { sender_label: options.senderLabel } : {},
-        ...options.authoredAfter ? { authored_after: options.authoredAfter } : {},
-        ...options.authoredBefore ? { authored_before: options.authoredBefore } : {},
-        ...options.participantId ? { participant_id: options.participantId } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
-        ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
-        ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
-        ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
-        ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
-      })
-    });
-    const data = asRecord15(response);
+      body: JSON.stringify(body)
+    }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
+    return data;
+  }
+  async sourceIndexSearch(options, audience = "calling_model") {
+    const corpusId = canonicalSourceCorpusId(options.corpusId);
+    const data = await this.requestSourceIndexSearch({
+      query: options.query,
+      corpus_id: corpusId,
+      ...audience === "private_answer" ? { include_private_names: true } : { personal_names_only: true },
+      ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
+      ...options.account ? { account: options.account } : {},
+      ...options.folderId ? { folder_id: options.folderId } : {},
+      ...options.folderName ? { folder_name: options.folderName } : {},
+      ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
+      ...options.chatScope ? { chat_scope: options.chatScope } : {},
+      ...options.trustDomain ? { trust_domain: options.trustDomain } : {},
+      ...options.conversationId ? { conversation_id: options.conversationId } : {},
+      ...options.senderId ? { sender_id: options.senderId } : {},
+      ...options.senderLabel ? { sender_label: options.senderLabel } : {},
+      ...options.authoredAfter ? { authored_after: options.authoredAfter } : {},
+      ...options.authoredBefore ? { authored_before: options.authoredBefore } : {},
+      ...options.participantId ? { participant_id: options.participantId } : {},
+      ...options.after ? { after: options.after } : {},
+      ...options.before ? { before: options.before } : {},
+      ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
+      ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
+      ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
+      ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
+      ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
+    });
     return parseSourceIndexSearchResult(data, {
       config: this.config,
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true
     });
+  }
+  async sourceIndexSearchMany(corpusIds, options) {
+    if (!corpusIds.length)
+      throw new OperationError("invalid_params", "No source is configured for search.");
+    const response = await this.requestSourceIndexSearch({
+      query: options.query,
+      corpus_ids: corpusIds,
+      personal_names_only: true,
+      retrieval_mode: options.retrievalMode,
+      max_results: options.maxResults,
+      include_locators: options.includeLocators
+    });
+    if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
+      throw new OperationError("email_error", "The worker did not return a search result for each requested source.");
+    }
+    return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord15(value), {
+      config: this.config,
+      requestedCorpusId: corpusIds[index],
+      includeLocators: options.includeLocators === true
+    })]);
   }
   async sourceWatchCreate(options) {
     this.requireSourceWatchSurface();
@@ -152897,18 +153097,63 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   const previousLedger = walk?.previousLedger;
   const movesAvailable = walk?.movesAvailable ?? true;
   const previous = previousLedger?.getCurrent(identity);
+  if (walk?.recordedOnly && current?.routed)
+    return "unchanged";
+  const recorded = mode === "walk" && !current?.routed ? [current, previous].filter((record) => protectedUnroutedReceipt(record)) : [];
+  if (walk?.recordedOnly && !recorded.length)
+    return "unchanged";
+  if (recorded.length && ledger.writeIntent(identity))
+    return "retry";
   const readOverride = (source) => movesAvailable ? source.observeOverrideText(identity) : source.getOverride(identity);
   const override = readOverride(ledger);
-  const effectiveOverride = override ?? (!current?.routed && previousLedger ? readOverride(previousLedger) : undefined);
+  const previousOverride = !override && !current?.routed && previousLedger ? readOverride(previousLedger) : undefined;
+  const effectiveOverride = override ?? previousOverride;
+  const authorityUnchanged = () => JSON.stringify(ledger.getCurrent(identity)) === JSON.stringify(current) && JSON.stringify(ledger.getOverride(identity)) === JSON.stringify(override) && (!previousLedger || JSON.stringify(previousLedger.getCurrent(identity)) === JSON.stringify(previous) && (override !== undefined || JSON.stringify(previousLedger.getOverride(identity)) === JSON.stringify(previousOverride)));
   const copies = ledger.copies(identity);
   const copy = copies.find((copy) => copy.corpusId === personal.corpusId && (mode === "walk" || copy.layers !== "metadata"));
-  if (effectiveOverride?.kind !== "not_secret" && (effectiveOverride?.tier === "secrets" || [current, current?.routed ? undefined : previous].some((record) => record && [
-    record.metadataTier,
-    record.contentTier,
-    record.targetMetadataTier,
-    record.targetContentTier
-  ].includes("secrets")))) {
-    if (!movesAvailable)
+  const digest = recorded.length ? contentDigestReason(text) : "";
+  const matching = recorded.filter((record) => record.state === "current" && record.contentRead && !record.contentPending && !record.metadataPending && record.decidedBy !== "override" && contentReceiptRefusal(record.reasons, digest) === undefined);
+  const knownSecret = matching.find(secretDecision);
+  const known = knownSecret ?? (recorded.some(secretDecision) ? undefined : matching[0]);
+  const conflictingPhysicalBody = () => set.openStores().some((store) => store.corpusId !== personal.corpusId && differentStoredBody(store, identity, text));
+  const conflictingSecret = knownSecret && conflictingPhysicalBody();
+  if (known && !effectiveOverride && !conflictingSecret) {
+    const decision = {
+      ...known,
+      metadataTier: matching.reduce((tier, record) => maxTier(tier, record.metadataTier), known.metadataTier),
+      contentTier: knownSecret ? "secrets" : matching.reduce((tier, record) => maxTier(tier, record.contentTier), known.contentTier),
+      decidedBy: known.decidedBy,
+      reasons: knownSecret ? known.reasons : [...known.reasons, LEGACY_PERSONAL_BODY_REASON],
+      state: "current",
+      snifferId: "ledger"
+    };
+    if (knownSecret) {
+      const names = personal.exportItemNames(identity);
+      if (!names)
+        return "retry";
+      return settleLegacySecret(set, identity, decision, names, text, override, authorityUnchanged);
+    }
+    const settled = ledger.withMoveBatch(() => {
+      if (!authorityUnchanged())
+        return false;
+      const adopted = set.adoptLegacyItem(identity);
+      if (!adopted)
+        return false;
+      const { outcome } = ledger.recordLegacyPersonalHold(identity, decision, set.placementFor(decision), undefined, { generation: adopted.generation, override });
+      if (outcome !== "queued_move")
+        throw new OperationError("config_error", "A recorded Private body could not be queued.");
+      const sniffer = set.classification()?.sniffer;
+      if (sniffer)
+        ledger.markRejudged(identity, { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: sniffer.id });
+      return true;
+    });
+    if (!settled)
+      return "retry";
+    queue?.deleteItemQuestions(identity);
+    return "settled";
+  }
+  if (effectiveOverride?.kind !== "not_secret" && (effectiveOverride?.tier === "secrets" || [current, current?.routed ? undefined : previous].some((record) => record && !(mode === "walk" && protectedUnroutedReceipt(record)) && (secretDecision(record) || record.targetMetadataTier === "secrets" || record.targetContentTier === "secrets")))) {
+    if (!movesAvailable && !recorded.length)
       return "waiting";
     const record = set.adoptLegacyItem(identity);
     const { copies: hidden } = ledger.flipToSecrets(identity, {
@@ -152945,15 +153190,21 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   const photo = isImageMediaType(item.mimeType) ? personal.imageJudgmentForItem(identity) : undefined;
   const image = photo && imageJudgmentSignal(photo);
   const currentAllowsPersonal = !current || current.state !== "moving" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public");
-  if (currentAllowsPersonal && ownerTier !== "secure" && [current, previous].some((record) => record && exactPersonalReceipt(record, text, effectiveOverride, image)))
+  if (recorded.length === 0 && currentAllowsPersonal && ownerTier !== "secure" && [current, previous].some((record) => record && exactPersonalReceipt(record, text, effectiveOverride, image)))
     return "unchanged";
-  if (!movesAvailable)
+  if (current && recorded.length && ownerTier !== "secure" && ownerTier !== "secrets" && recorded.every((record) => contentReceiptRefusal(record.reasons, digest) === "content_receipt_mismatch") && exactPersonalReceipt(current, text, effectiveOverride, image) && !conflictingPhysicalBody()) {
+    return ledger.withMoveBatch(() => {
+      if (!authorityUnchanged() || ledger.writeIntent(identity) || previousLedger?.writeIntent(identity))
+        return "retry";
+      return set.adoptLegacyItem(identity)?.routed ? "settled" : "retry";
+    });
+  }
+  if (!movesAvailable && !recorded.length)
     return "waiting";
   const conflict = () => ledger.copies(identity).some((other) => {
     if (other.corpusId === personal.corpusId || other.state !== "current" || mode === "restore" && (other.trustDomain !== "secure_local" || other.layers === "metadata"))
       return false;
-    const otherText = set.store(other.trustDomain)?.exportItemCopy(identity)?.chunks.map((chunk) => chunk.boundedText).join("");
-    return !!otherText && otherText !== text;
+    return differentStoredBody(set.store(other.trustDomain), identity, text);
   });
   let record;
   if (mode === "restore") {
@@ -152967,51 +153218,121 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   const scanned = names ? classifyItemTiers({ signals: storedSignals(names), text }, effectiveOverride ? { override: effectiveOverride } : {}) : undefined;
   if (mode === "walk" && !names)
     return "retry";
-  record ??= set.adoptLegacyItem(identity);
-  if (mode === "walk" && names && scanned?.contentTier === "secrets" && !conflict()) {
-    const settled = settleRoutedSecrets(set, identity, { ...scanned, metadataTier: maxTier(record.metadataTier, scanned.metadataTier) }, names, {
-      text,
-      findingKinds: contentSecretFindingKinds(scanned.reasons)
-    }, { guard: { generation: record.generation, override } });
-    return settled ? "secrets" : "retry";
+  const recordedWalk = mode === "walk" && recorded.length > 0;
+  const basis = recordedWalk ? current ?? recorded[0] : record ??= set.adoptLegacyItem(identity);
+  if (mode === "walk" && names && scanned?.contentTier === "secrets") {
+    const decision = { ...scanned, metadataTier: maxTier(basis.metadataTier, scanned.metadataTier) };
+    if (recordedWalk && !conflictingPhysicalBody()) {
+      return settleLegacySecret(set, identity, decision, names, text, override, authorityUnchanged);
+    }
+    if (!recordedWalk && !conflict()) {
+      const settled = settleRoutedSecrets(set, identity, decision, names, {
+        text,
+        findingKinds: contentSecretFindingKinds(decision.reasons)
+      }, { guard: { generation: basis.generation, override } });
+      return settled ? "secrets" : "retry";
+    }
   }
   if (mode === "walk")
     queue?.deleteItemQuestions(identity);
   const floor = ownerTier === "secure" ? "secure" : "public";
   const decision = scanned && ownerOverrideSecretReview(scanned.reasons) ? {
     ...scanned,
-    metadataTier: maxTier(record.metadataTier, scanned.metadataTier)
+    metadataTier: maxTier(basis.metadataTier, scanned.metadataTier)
   } : {
-    metadataTier: heldTier(floor, record.metadataTier, record.targetMetadataTier),
-    contentTier: heldTier(floor, record.contentTier, record.targetContentTier),
+    metadataTier: heldTier(floor, basis.metadataTier, basis.targetMetadataTier),
+    contentTier: heldTier(floor, basis.contentTier, basis.targetContentTier),
     decidedBy: "default",
     reasons: [
-      ...record.reasons.filter((reason) => !reason.startsWith("content:") && !reason.startsWith("override:")),
+      ...basis.reasons.filter((reason) => !reason.startsWith("content:") && !reason.startsWith("override:")),
       HELD_UNTIL_JUDGED_REASON,
       "content:sniffer:undecided:undecided"
     ],
     state: "pending",
     contentRead: true,
-    metadataPending: record.metadataPending,
+    metadataPending: basis.metadataPending,
     contentPending: true,
-    metadataForced: record.metadataForced && record.decidedBy !== "override",
-    metadataFlagged: record.metadataFlagged,
+    metadataForced: basis.metadataForced && basis.decidedBy !== "override",
+    metadataFlagged: basis.metadataFlagged,
     engineVersion: TIER_CLASSIFIER_VERSION,
     mapRevision: TIER_MAP_REVISION,
     snifferId: "undecided"
   };
   const placement = set.placementFor(decision);
   if (mode === "walk") {
-    const digest = contentDigestReason(text);
+    const bodyDigest = digest || contentDigestReason(text);
     decision.reasons.push(LEGACY_PERSONAL_BODY_REASON);
-    if (!decision.reasons.includes(digest))
-      decision.reasons.push(digest);
-    const { outcome } = ledger.recordLegacyPersonalHold(identity, decision, placement, digest, { generation: record.generation, override }, copy?.layers === "metadata" ? personal.corpusId : undefined);
-    return outcome === "queued_move" ? "held" : "retry";
+    if (!decision.reasons.includes(bodyDigest))
+      decision.reasons.push(bodyDigest);
+    const hold = () => {
+      if (recordedWalk && !authorityUnchanged())
+        return "retry";
+      const base = current && !current.routed && protectedUnroutedReceipt(current) && secretDecision(current) ? ledger.recordDecision(identity, decision).record : current;
+      const adopted = record ?? (base?.routed ? base : set.adoptLegacyItem(identity));
+      if (!adopted)
+        return "retry";
+      const { outcome } = ledger.recordLegacyPersonalHold(identity, decision, placement, bodyDigest, { generation: adopted.generation, override }, copy?.layers === "metadata" ? personal.corpusId : undefined);
+      if (recordedWalk && outcome !== "queued_move")
+        throw new OperationError("config_error", "A recorded body could not be held.");
+      return outcome === "queued_move" ? "held" : "retry";
+    };
+    return recordedWalk ? ledger.withMoveBatch(hold) : hold();
   }
   const pending = resuming ? record : ledger.recordRoutedPlacement(identity, decision, placement).record;
   moveRestoredItemToHold({ set, identity, decision, expectedGeneration: pending.generation });
   return "held";
+}
+function settleLegacySecret(set, identity, decision, names, text, override, authorityUnchanged) {
+  const { ledger } = set;
+  const recorded = ledger.withMoveBatch(() => {
+    if (!authorityUnchanged() || ledger.writeIntent(identity))
+      return;
+    const adopted = set.adoptLegacyItem(identity);
+    if (!adopted)
+      return;
+    const placed = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+      guard: { generation: adopted.generation, override }
+    });
+    if (placed.outcome !== "secrets")
+      throw new OperationError("config_error", "A recorded Secret could not be hidden.");
+    const sourceVersion = names.identity.sourceVersion;
+    ledger.putWriteIntent({
+      identity,
+      kind: "secret",
+      connectorId: TIER_MOVE_CONNECTOR_ID,
+      itemFamily: identity.family,
+      ...sourceVersion === undefined ? {} : { version: sourceVersion }
+    });
+    const locations = set.secrets();
+    if (locations)
+      recordSecretLocation(locations, decision, names, { text, findingKinds: contentSecretFindingKinds(decision.reasons) });
+    return placed;
+  });
+  if (!recorded)
+    return "retry";
+  settleSecretsCopies({
+    ledger,
+    identity,
+    copies: recorded.previousCopies,
+    connectorId: TIER_MOVE_CONNECTOR_ID,
+    storeFor: (corpusId) => {
+      const domain = set.domainForCorpus(corpusId);
+      return domain && set.store(domain);
+    }
+  });
+  const sourceVersion = names.identity.sourceVersion;
+  ledger.clearWriteIntent(identity, { kind: "secret", ...sourceVersion === undefined ? {} : { version: sourceVersion } });
+  return "secrets";
+}
+function protectedUnroutedReceipt(record) {
+  return !!record && !record.routed && [record.metadataTier, record.contentTier].some((tier) => tier === "secure" || tier === "secrets") && record.reasons.some((reason) => reason.startsWith("content:sha256:"));
+}
+function secretDecision(record) {
+  return record.contentTier === "secrets" || record.metadataTier === "secrets";
+}
+function differentStoredBody(store, identity, text) {
+  const otherText = store?.exportItemCopy(identity)?.chunks.map((chunk) => chunk.boundedText).join("");
+  return !!otherText && otherText !== text;
 }
 function exactPersonalReceipt(record, text, override, image) {
   return record.state === "current" && !record.metadataPending && (record.contentTier === "private" || record.contentTier === "public") && (record.metadataTier === "private" || record.metadataTier === "public") && (record.decidedBy !== "override" || override?.kind === "tier") && personalContentAuthorized(record, text, override?.kind === "not_secret", override, image);
@@ -167617,18 +167938,14 @@ async function searchEverySource(ctx, query, params) {
   for (const corpus of publicSourceCorpusRegistry(ctx.config).list("search"))
     if (!bySource.has(corpus.sourceId))
       bySource.set(corpus.sourceId, corpus.corpusId);
-  const settled = await Promise.allSettled([...bySource.values()].map((corpusId) => ctx.email.sourceIndexSearch({
+  const results = await ctx.email.sourceIndexSearchMany([...bySource.values()], {
     query,
-    corpusId,
     ...retrievalMode !== undefined ? { retrievalMode } : {},
     ...maxResults !== undefined ? { maxResults } : {},
     ...includeLocators !== undefined ? { includeLocators } : {}
-  })));
-  const results = settled.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
-  if (results.length === 0) {
-    const failed = settled.find((outcome) => outcome.status === "rejected");
-    throw failed?.reason ?? new OperationError("invalid_params", "No source is configured for search.");
-  }
+  });
+  if (!results.length)
+    throw new OperationError("email_error", "No source could be searched this time.");
   const limit = maxResults ?? Math.max(...results.map((result) => result.hits.length), 0);
   const hits = [];
   for (let rank = 0;hits.length < limit && results.some((result) => result.hits.length > rank); rank += 1) {
@@ -167639,7 +167956,7 @@ async function searchEverySource(ctx, query, params) {
   const domains = results.map((result) => result.policy.trust_domain);
   const secretLocations = results.flatMap((result) => result.secret_locations ?? []);
   const notes = [...new Set(results.flatMap((result) => result.coverage_notes ?? []))];
-  const unsearched = settled.length - results.length;
+  const unsearched = bySource.size - results.length;
   return {
     kind: "source_index_search",
     corpus_id: results[0].corpus_id,
@@ -229435,11 +229752,26 @@ function createEmailSourceWorker(options = {}) {
           }
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/search`) {
-          const record = await parseObjectBody(request);
+          const { corpus_ids: corpusIds, ...record } = await parseObjectBody(request);
           assertSourceIndexSearchQuery(record.query);
-          const corpusId = canonicalRequestCorpusId(record);
-          const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
-          if (connectorStore) {
+          if (record.personal_names_only !== undefined && record.personal_names_only !== true) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "personal_names_only must be true when provided.");
+          }
+          if (record.include_private_names !== undefined && (record.include_private_names !== true || record.personal_names_only === true || corpusIds !== undefined)) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names is only available for a single Private search.");
+          }
+          const personalNamesOnly = record.include_private_names !== true;
+          const prepare = async (record) => {
+            const corpusId = canonicalRequestCorpusId(record);
+            const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
+            if (!corpusId) {
+              throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
+            }
+            if (!connectorStore)
+              throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
+            if (!personalNamesOnly && connectorStore.trustDomain !== "secure_local") {
+              throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names requires a Private corpus.");
+            }
             const searchConnectorStore = async (store) => {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false)
@@ -229453,9 +229785,24 @@ function createEmailSourceWorker(options = {}) {
                 ...searchRequest.filters,
                 ...mandatoryScope?.filters
               }) : undefined;
+              const privateMatches = new Set;
               const adapter = createConnectorStoreCorpusAdapter({
                 store,
                 retrievalMode,
+                ...personalNamesOnly ? {
+                  searchEligibility(rows) {
+                    const tiers = store.effectiveItemTiers(rows.map((row) => row.sourceItem), "names");
+                    return rows.map((row, index) => {
+                      const tier = tiers[index];
+                      if (tier === "secret" || tier === "unknown" || row.trustTier === "S5")
+                        return false;
+                      if (tier === "public_or_personal" || tier === "legacy" && !isSecureSensitivity({ trustDomain: store.trustDomain, trustTier: row.trustTier }))
+                        return true;
+                      privateMatches.add(tierLedgerIdentityKey(row.sourceItem));
+                      return false;
+                    });
+                  }
+                } : {},
                 ...mandatoryScope?.allowed === true && mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {},
                 ...combinedFilters ? { filters: combinedFilters } : {},
                 ...searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {},
@@ -229480,6 +229827,7 @@ function createEmailSourceWorker(options = {}) {
                 store,
                 searchRequest,
                 result,
+                privateMatches,
                 readScopeSignature,
                 scope: {
                   corpusId: store.corpusId,
@@ -229514,120 +229862,171 @@ function createEmailSourceWorker(options = {}) {
               }]);
             })));
             const tagged = [...taggedByHit.values()];
-            const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
-            const verdictScopes = new Map;
-            const unreadCorpora = new Set;
-            for (const { store } of runs) {
-              try {
-                const ledger = store.governingTierLedger();
-                if (!ledger)
-                  continue;
-                const scope = verdictScopes.get(ledger.dbPath);
-                if (scope)
-                  scope.corpusIds.add(store.corpusId);
-                else
-                  verdictScopes.set(ledger.dbPath, { ledger, corpusIds: new Set([store.corpusId]) });
-              } catch {
-                unreadCorpora.add(store.corpusId);
+            return () => {
+              const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
+              const verdictScopes = new Map;
+              const unreadCorpora = new Set;
+              for (const { store } of runs) {
+                try {
+                  const ledger = store.governingTierLedger();
+                  if (!ledger)
+                    continue;
+                  const scope = verdictScopes.get(ledger.dbPath);
+                  if (scope)
+                    scope.corpusIds.add(store.corpusId);
+                  else
+                    verdictScopes.set(ledger.dbPath, { ledger, corpusIds: new Set([store.corpusId]) });
+                } catch {
+                  unreadCorpora.add(store.corpusId);
+                }
               }
-            }
-            const privateNames = new Set;
-            const hiddenNames = new Set(tagged.filter((hit) => unreadCorpora.has(hit.corpusId)));
-            for (const scope of verdictScopes.values()) {
-              const governed = tagged.filter((hit) => scope.corpusIds.has(hit.corpusId));
-              try {
-                const verdicts = visibilityHere(effectiveItemVerdicts(() => [scope], governed.map((hit) => ({
-                  ...hit.sourceItem,
-                  corpusId: hit.corpusId,
-                  privateAtAnswer: false,
-                  layer: "names"
-                }))));
-                governed.forEach((hit, index) => {
-                  const verdict = verdicts[index];
-                  if (verdict.tier === "secret" || verdict.tier === "unknown" || verdict.pendingDeletion)
+              const privateNames = new Set(tagged.filter((hit) => hit.trustTier === undefined || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier })));
+              const hiddenNames = new Set(tagged.filter((hit) => unreadCorpora.has(hit.corpusId)));
+              for (const scope of verdictScopes.values()) {
+                const governed = tagged.filter((hit) => scope.corpusIds.has(hit.corpusId));
+                try {
+                  const verdicts = visibilityHere(effectiveItemVerdicts(() => [scope], governed.map((hit) => ({
+                    ...hit.sourceItem,
+                    corpusId: hit.corpusId,
+                    privateAtAnswer: false,
+                    layer: "names"
+                  }))));
+                  governed.forEach((hit, index) => {
+                    const verdict = verdicts[index];
+                    if (verdict.tier === "secret" || verdict.tier === "unknown" || verdict.pendingDeletion || personalNamesOnly && verdict.gone)
+                      hiddenNames.add(hit);
+                    else if (verdict.tier === "private")
+                      privateNames.add(hit);
+                    else if (personalNamesOnly && verdict.tier === "public_or_personal" && hit.trustTier !== undefined && hit.trustTier !== "S5")
+                      privateNames.delete(hit);
+                  });
+                } catch {
+                  for (const hit of governed)
                     hiddenNames.add(hit);
-                  else if (verdict.tier === "private")
-                    privateNames.add(hit);
-                });
-              } catch {
-                for (const hit of governed)
-                  hiddenNames.add(hit);
+                }
               }
-            }
-            const hitIsPrivate = (hit) => privateNames.has(hit) || hit.trustTier === undefined || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier });
-            const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
-            const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
-            const pendingPrivacy = readPendingPrivacyItems(options);
-            const released = runs.map((run) => deliverCorpusSearch([run.result]));
-            let privateTierWithheld = 0;
-            const perRun = released.map((result) => result.hits.flatMap((hit) => {
-              const taggedHit = taggedByHit.get(hit);
-              if (!visible.has(taggedHit) || hiddenNames.has(taggedHit))
-                return [];
-              if (!searchedSecureLocal && hitIsPrivate(taggedHit)) {
-                privateTierWithheld += 1;
-                return [];
+              const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
+              const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
+              const pendingPrivacy = readPendingPrivacyItems(options);
+              const released = runs.map((run) => deliverCorpusSearch([run.result]));
+              const withheld = new Set(runs.flatMap((run) => [...run.privateMatches]));
+              const perRun = released.map((result) => result.hits.flatMap((hit) => {
+                const taggedHit = taggedByHit.get(hit);
+                if (!visible.has(taggedHit) || hiddenNames.has(taggedHit))
+                  return [];
+                if ((personalNamesOnly || !searchedSecureLocal) && privateNames.has(taggedHit)) {
+                  withheld.add(tierLedgerIdentityKey(taggedHit.sourceItem));
+                  return [];
+                }
+                return [taggedHit];
+              }));
+              const merged = [];
+              for (let rank = 0;merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
+                for (const hits of perRun) {
+                  const hit = hits[rank];
+                  if (hit && merged.length < searchRequest.maxResults)
+                    merged.push(hit);
+                }
               }
-              return [taggedHit];
-            }));
-            const merged = [];
-            for (let rank = 0;merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
-              for (const hits of perRun) {
-                const hit = hits[rank];
-                if (hit && merged.length < searchRequest.maxResults)
-                  merged.push(hit);
+              const hits = merged;
+              const withheldChildIdentifiers = new Set;
+              for (const { store } of runs) {
+                const governed = hits.filter((hit) => hit.corpusId === store.corpusId);
+                if (governed.length === 0)
+                  continue;
+                try {
+                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map((hit) => hit.sourceItem), !personalNamesOnly);
+                  for (const hit of governed) {
+                    if (children.has(tierLedgerIdentityKey(hit.sourceItem)))
+                      withheldChildIdentifiers.add(hit);
+                  }
+                } catch {
+                  for (const hit of governed)
+                    withheldChildIdentifiers.add(hit);
+                }
               }
-            }
-            const hits = tiered ? merged : perRun[0];
-            const locatorsExposed = hits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
-            const safeResult = {
-              kind: "source_index_search",
-              corpus_id: connectorStore.corpusId,
-              retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
-              ...secretLocations.length > 0 ? {
-                secret_locations: secretLocations.map((location) => ({
-                  source: location.source,
-                  ref: location.ref,
-                  ...location.locator ? { locator: location.locator } : {},
-                  ...location.title ? { title: location.title } : {},
-                  finding_kinds: [...location.findingKinds]
-                }))
-              } : {},
-              audit: {
-                request_id: `${connectorStore.corpusId}:connector-store-search`,
+              const releasedHits = hits.map((rankedHit) => {
+                const { corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit } = rankedHit;
+                if (!withheldChildIdentifiers.has(rankedHit))
+                  return addSelectedItemToSearchHit(hitCorpusId, hit);
+                const { family, provider, accountScope } = hit.sourceItem;
+                const title = hit.provenance?.citation?.title;
+                const sourceItem = { family, provider, accountScope };
+                return {
+                  sourceItem,
+                  provenance: { sourceItem, citation: { sourceLabel: provider, ...title ? { title } : {} } },
+                  score: hit.score,
+                  rawExposed: false
+                };
+              });
+              const locatorsExposed = releasedHits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
+              const safeResult = {
+                kind: "source_index_search",
+                corpus_id: connectorStore.corpusId,
                 retrieval_source: "local_index",
-                queries_attempted: runs.length,
-                metadata_hits: hits.length,
-                items_returned: hits.length,
-                latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
-                ...tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {},
-                ...searchRequest.explicitEmptyChatScope ? {} : { lane_audits: released.flatMap((result) => result.laneAudits ?? []) },
-                raw_source_exposed: false,
-                source_text_returned: false,
-                ...searchRequest.locatorsRequested ? { locators_requested: true } : {},
-                ...privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {},
-                ...pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}
-              },
-              policy: {
-                raw_source_exposed: false,
-                source_text_returned: false,
-                source_packets_exposed: false,
-                local_only: searchRequest.explicitEmptyChatScope || searchedSecureLocal || hits.some(hitIsPrivate),
-                trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
-                ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
+                hits: releasedHits,
+                ...secretLocations.length > 0 ? {
+                  secret_locations: secretLocations.map((location) => ({
+                    source: location.source,
+                    ref: location.ref,
+                    ...location.locator ? { locator: location.locator } : {},
+                    ...location.title ? { title: location.title } : {},
+                    finding_kinds: [...location.findingKinds]
+                  }))
+                } : {},
+                audit: {
+                  request_id: `${connectorStore.corpusId}:connector-store-search`,
+                  retrieval_source: "local_index",
+                  queries_attempted: runs.length,
+                  metadata_hits: hits.length,
+                  items_returned: hits.length,
+                  latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
+                  ...tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {},
+                  ...searchRequest.explicitEmptyChatScope ? {} : { lane_audits: released.flatMap((result) => result.laneAudits ?? []) },
+                  raw_source_exposed: false,
+                  source_text_returned: false,
+                  ...searchRequest.locatorsRequested ? { locators_requested: true } : {},
+                  ...withheld.size > 0 ? { private_tier_withheld: withheld.size } : {},
+                  ...pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}
+                },
+                policy: {
+                  raw_source_exposed: false,
+                  source_text_returned: false,
+                  source_packets_exposed: false,
+                  local_only: searchRequest.explicitEmptyChatScope || searchedSecureLocal || hits.some((hit) => privateNames.has(hit)),
+                  trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
+                  ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
+                }
+              };
+              assertNoRawEmailFields(safeResult);
+              if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
+                throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The source read scope changed during search. Retry under the current scope.");
               }
+              return safeResult;
             };
-            assertNoRawEmailFields(safeResult);
-            if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
-              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The source read scope changed during search. Retry under the current scope.");
+          };
+          if (corpusIds === undefined)
+            return json((await prepare(record))());
+          if (record.corpus_id !== undefined || !Array.isArray(corpusIds) || !corpusIds.length || !corpusIds.every((id) => typeof id === "string" && id.trim()) || new Set(corpusIds).size !== corpusIds.length) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "Supply distinct corpus_ids for a multi-source search.");
+          }
+          const prepared = await Promise.allSettled(corpusIds.map((corpus_id) => prepare({ ...record, corpus_id })));
+          let firstFailure;
+          const results = prepared.map((outcome) => {
+            if (outcome.status === "rejected") {
+              firstFailure ??= outcome.reason;
+            } else {
+              try {
+                return outcome.value();
+              } catch (error) {
+                firstFailure ??= error;
+              }
             }
-            return json(safeResult);
-          }
-          if (!corpusId) {
-            throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
-          }
-          throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
+            return null;
+          });
+          if (results.every((result) => result === null))
+            throw firstFailure;
+          return json({ results });
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/embed`) {
           const record = await parseObjectBody(request);
@@ -229987,6 +230386,7 @@ var init_engine2 = __esm(() => {
   init_embedding_plan();
   init_tier_visibility();
   init_child_visibility();
+  init_tier_ledger();
   init_remote_access_recheck();
   init_selected_items();
   init_deep_read_jobs();
@@ -247288,16 +247688,6 @@ var init_gmail_archive_target = __esm(() => {
 });
 
 // src/workers/email-source/gmail-status-scope.ts
-function contentWindow(contentAfter) {
-  return contentAfter ? { contentNotBefore: contentAfter } : {};
-}
-function gmailInternalStoreStatusScope(authority) {
-  const approval = authority?.mailSnapshot();
-  if (approval?.status !== "approved")
-    return;
-  const window2 = contentWindow(approval.mailScope?.contentAfter);
-  return window2.contentNotBefore ? window2 : undefined;
-}
 function gmailRetainedAccountMatches(input) {
   const { handle, binding, historyAccountId } = input;
   if (!handle)
@@ -247350,20 +247740,21 @@ function gmailEmbeddingPopulation(input) {
     observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX
   } };
 }
-function gmailPrivateStoreStatusScope(input) {
-  const accountScope = input.gmailRetainedAccountScope();
-  if (!accountScope)
+function gmailReadCountScope(domain, population, ref, authority) {
+  if (domain === "public_safe")
+    return {};
+  const contentAfter = ref && authority?.assertCurrentMail(ref).mailScope.contentAfter;
+  const window2 = contentAfter ? { contentNotBefore: contentAfter } : {};
+  if (domain !== "secure_local")
+    return window2;
+  if (population.contentAllowed === false)
     return { itemsAllowed: false, contentAllowed: false };
-  const ref = input.handle ? input.authority?.mailPolicyRef() : undefined;
-  const approval = ref ? input.authority.assertCurrentMail(ref) : undefined;
-  const population = gmailEmbeddingPopulation({ ...input, accountScope, ref, privateStore: true });
-  const { filters } = population;
   return {
-    accountScope,
+    ...window2,
     contentAllowed: true,
-    ...filters ? { itemFilters: filters, contentFilters: filters } : {},
-    ...ref ? { scopeRevision: ref.revision } : {},
-    ...contentWindow(approval?.mailScope.contentAfter)
+    ...population.accountScope ? { accountScope: population.accountScope } : {},
+    ...population.contentFilters ? { itemFilters: population.contentFilters, contentFilters: population.contentFilters } : {},
+    ...ref ? { scopeRevision: ref.revision } : {}
   };
 }
 function gmailStoreEmbeddingScope(deps) {
@@ -249582,12 +249973,25 @@ var init_installed_tier_classification = __esm(() => {
 function settleLegacyPersonalBodiesOffThread(options) {
   return runPassOffThread(walk(options), { family: "legacy-personal-bodies", ...options.turn ? { turn: options.turn } : {} });
 }
-function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE, movesAvailable = () => true }) {
+function settleRecordedPersonalBodiesOffThread(options) {
+  return runPassOffThread(walk(options, true), { family: "legacy-recorded-decisions", ...options.turn ? { turn: options.turn } : {} });
+}
+function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE, movesAvailable = () => true }, recordedOnly = false) {
   const { ledger } = set;
-  const report = { checked: 0, held: 0, secrets: 0, failed: 0, retired: false, waitingForMoves: false };
+  const report = { checked: 0, settled: 0, held: 0, secrets: 0, failed: 0, retired: false, waitingForMoves: false };
+  const personal = set.store("internal");
+  const progress = ledger.readMeta(RECORDED_PROGRESS);
+  if (personal && progress !== "done") {
+    if (set.foreignBoundLeg())
+      return { ...report, failed: 1 };
+    const handled = yield* walkRecorded({ set, queue, limit, chunkLimit, movesAvailable }, personal, progress, report);
+    if (handled)
+      return report;
+  }
+  if (recordedOnly)
+    return { ...report, retired: true };
   if (ledger.readMeta(DONE3) === "1")
     return { ...report, retired: true };
-  const personal = set.store("internal");
   const saved = ledger.readMeta(LEGACY_PERSONAL_BODIES_CURSOR);
   const canMove = movesAvailable();
   const last = saved ? JSON.parse(saved) : undefined;
@@ -249604,40 +250008,13 @@ function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit 
     const previousLedger = page.items.length ? personal.preRoutingLedgerFor(ledger) : undefined;
     const placement = { movesAvailable: canMove, ...previousLedger ? { previousLedger } : {} };
     for (const item of page.items) {
-      yield* turn();
-      report.checked++;
-      if (canMove && secretScanReusable(item.text)) {
-        yield* find({ here: () => {
-          return;
-        }, offThread: () => scanSecretsAhead(item.text) });
-      }
-      if (movesAvailable() !== canMove)
+      const outcome = yield* processBody(set, personal, item, queue, placement, marker, movesAvailable, report);
+      if (outcome === "interrupted")
         return report;
-      const current = item.watch ? personal.personalBodyWatchCurrent(item.watch) : personal.changeMarker() === marker || personal.itemMigrationFingerprint(item.identity, item.chunkCount + 1) === item.fingerprint;
-      if (!current) {
+      if (outcome === "changed")
         dirty = true;
-        continue;
-      }
-      try {
-        if (item.chunkCount === 0) {
-          if (canMove)
-            personal.clearOrphanPersonalVectors(item.identity);
-          else
-            waiting++;
-          continue;
-        }
-        const disposition = placePersonalBody(set, personal, item, queue, "walk", placement);
-        if (disposition === "held")
-          report.held++;
-        if (disposition === "secrets")
-          report.secrets++;
-        if (disposition === "waiting")
-          waiting++;
-        if (disposition === "retry")
-          report.failed++;
-      } catch {
-        report.failed++;
-      }
+      if (outcome === "waiting")
+        waiting++;
     }
     dirty ||= report.held + report.secrets + report.failed > 0;
     if (page.next || page.partial) {
@@ -249658,7 +250035,94 @@ function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit 
   }
   return report;
 }
-var DONE3 = "legacy_personal_bodies_done_v2", LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
+function* walkRecorded(options, personal, saved, report) {
+  const { set, queue, movesAvailable } = options;
+  const { ledger } = set;
+  const previousLedger = personal.preRoutingLedgerFor(ledger);
+  const cursor = saved ? JSON.parse(saved) : {};
+  const limit = Math.max(1, Math.min(options.limit, LEGACY_PERSONAL_BODY_PAGE_SIZE));
+  const canMove = movesAvailable();
+  let remaining = Math.max(1, Math.min(options.chunkLimit, PERSONAL_BODY_CHUNKS_PER_PAGE));
+  let checked = 0;
+  for (const source of cursor.previous ? [previousLedger] : [ledger, previousLedger]) {
+    if (!source)
+      continue;
+    const pageSize = limit - checked;
+    const rows = yield* findInLedger(source, () => source.legacyProtectedRowsSteps(cursor.after, pageSize));
+    for (const identity of rows) {
+      checked++;
+      const marker = personal.changeMarker();
+      const page = yield* find(personal.personalBodyForIdentityFinder(identity, remaining));
+      if (page.partial) {
+        ledger.writeSettleProgress(RECORDED_PROGRESS, JSON.stringify(cursor));
+        return true;
+      }
+      const item = page.items[0];
+      if (!item?.chunkCount)
+        yield* turn();
+      if (item?.chunkCount) {
+        const outcome = yield* processBody(set, personal, item, queue, {
+          ...previousLedger ? { previousLedger } : {},
+          movesAvailable: canMove,
+          recordedOnly: true
+        }, marker, movesAvailable, report);
+        if (outcome === "interrupted")
+          return true;
+        if (outcome === "changed" || outcome === "retry" || outcome === "waiting")
+          cursor.retry = true;
+        remaining -= item.chunkCount;
+      }
+      cursor.after = identity;
+      if (remaining <= 0 || checked === limit) {
+        ledger.writeSettleProgress(RECORDED_PROGRESS, JSON.stringify(cursor));
+        return true;
+      }
+    }
+    delete cursor.after;
+    cursor.previous = true;
+  }
+  if (!cursor.retry && ledger.readMeta(DONE3) === "1")
+    personal.finishPersonalBodyWalk();
+  ledger.writeSettleProgress(RECORDED_PROGRESS, cursor.retry ? "" : "done");
+  return checked > 0 || !!cursor.retry;
+}
+function* processBody(set, personal, item, queue, placement, marker, movesAvailable, report) {
+  const canMove = placement.movesAvailable;
+  yield* turn();
+  report.checked++;
+  if ((canMove || placement.recordedOnly) && secretScanReusable(item.text)) {
+    yield* find({ here: () => {
+      return;
+    }, offThread: () => scanSecretsAhead(item.text) });
+  }
+  if (movesAvailable() !== canMove)
+    return "interrupted";
+  const current = item.watch ? personal.personalBodyWatchCurrent(item.watch) : personal.changeMarker() === marker || personal.itemMigrationFingerprint(item.identity, item.chunkCount + 1) === item.fingerprint;
+  if (!current)
+    return "changed";
+  try {
+    if (item.chunkCount === 0) {
+      if (!canMove)
+        return "waiting";
+      personal.clearOrphanPersonalVectors(item.identity);
+      return "unchanged";
+    }
+    const disposition = placePersonalBody(set, personal, item, queue, "walk", placement);
+    if (disposition === "held")
+      report.held++;
+    if (disposition === "secrets")
+      report.secrets++;
+    if (disposition === "settled")
+      report.settled++;
+    if (disposition === "retry")
+      report.failed++;
+    return disposition;
+  } catch {
+    report.failed++;
+    return "retry";
+  }
+}
+var RECORDED_PROGRESS = "legacy_personal_recorded_decisions_v2", DONE3 = "legacy_personal_bodies_done_v2", LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
 var init_legacy_personal_bodies = __esm(() => {
   init_tier_ledger();
   init_engine();
@@ -249839,8 +250303,10 @@ class TierSnifferService {
       ...options.now ? { now: options.now } : {},
       ...options.budgetStatePath ? { statePath: options.budgetStatePath } : {}
     });
+    const { lane, model } = options;
+    if (!lane)
+      return;
     options.installed.setReleaseWindowResolver(async (ledgerPath, request, signal, expected) => {
-      const lane = options.lane;
       if (this.stopped || signal.aborted || options.modelAvailable?.() === false || options.breakerOpen?.() || lane.rejudgeReady === false)
         return { verdict: "undecided" };
       const ownerContext = options.ownerContext?.();
@@ -249855,7 +250321,7 @@ class TierSnifferService {
       return resolveReleaseWindow({
         store: options.installed.snifferStoreForLedger(ledgerPath),
         lane,
-        model: options.model,
+        model,
         request,
         promptVersion: versions.cache,
         ...ownerContext ? { ownerContext } : {},
@@ -250282,8 +250748,8 @@ class TierSnifferService {
   retiredPrefilterCleaned = new Set;
   status() {
     return {
-      lane: this.options.lane.kind,
-      modelId: this.options.lane.modelId,
+      lane: this.options.lane?.kind ?? "off",
+      modelId: this.options.lane?.modelId ?? "",
       callsToday: this.budget.usedToday(),
       ...this.lastTick ? { lastTick: this.lastTick } : {},
       ...this.waiting ? { waiting: { ...this.waiting } } : {},
@@ -250364,7 +250830,7 @@ class TierSnifferService {
     try {
       tick = await this.tick(abort.signal);
       tickReturnedAt = this.monotonicNow();
-      const lowerMoves = await this.drainMoves("lower");
+      const lowerMoves = this.options.lane ? await this.drainMoves("lower") : undefined;
       if (tick.state === "ran" && lowerMoves) {
         tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
       }
@@ -250401,7 +250867,7 @@ class TierSnifferService {
       this.notAnsweringPasses += 1;
       this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
     }
-    if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
+    if (this.options.lane && this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
       if (backlog.checkingItems > 0)
@@ -250411,6 +250877,8 @@ class TierSnifferService {
       this.pacedUntilMs = this.clockMs() + (this.options.pacing?.trickleGapMs ?? 0);
     if (this.stopped)
       this.closeLedgers();
+    else if (this.timer && tick.state === "settling_recorded" && tick.more && !this.yieldNow())
+      this.wake();
     else if (this.timer && tick.state === "ran" && !this.yieldNow() && tick.report.stoppedBy !== "daily_budget" && tick.report.stoppedBy !== "transport_failures" && tick.report.stoppedBy !== "cloud_stopped" && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls || (tick.autoMoves?.moved ?? 0) > 0 || (tick.rejudged?.seen ?? 0) > 0 || tick.report.stoppedBy === "preempted"))
       this.wake();
     const cycleEndedAt = this.monotonicNow();
@@ -250422,7 +250890,7 @@ class TierSnifferService {
     return (this.options.now?.() ?? new Date).getTime();
   }
   trickle() {
-    if (!this.options.pacing || !isBuiltInLane(this.options.lane))
+    if (!this.options.pacing || !this.options.lane || !isBuiltInLane(this.options.lane))
       return false;
     try {
       return this.options.pacing.trickle();
@@ -250780,7 +251248,28 @@ class TierSnifferService {
     return targets;
   }
   async tick(signal) {
-    const { lane } = this.options;
+    const { lane, model } = this.options;
+    if (!lane) {
+      const recorded = await this.settleRecordedDecisions();
+      await this.drainMoves();
+      if (!recorded) {
+        let pendingMove = false;
+        for (const path of this.ledgerPaths()) {
+          const set = tierSetForLedger(path);
+          if (set && (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({
+            limit: 1,
+            direction: "raise",
+            recordedOnly: true
+          }), { lane: "background" })).length) {
+            pendingMove = true;
+            break;
+          }
+        }
+        if (!pendingMove)
+          this.stop();
+      }
+      return { state: "settling_recorded", more: recorded === "more" };
+    }
     const phaseStarted = this.monotonicNow();
     const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
     let phaseAt = phaseStarted;
@@ -250793,11 +251282,17 @@ class TierSnifferService {
       this.passStep = `in the step after "${name}"`;
       setEngineStep(`judge pass, after "${name}"`);
     };
+    await this.applyOwnerOverrides();
+    const recorded = await this.settleRecordedDecisions();
+    if (recorded) {
+      await this.drainMoves();
+      return { state: "settling_recorded", more: recorded === "more" };
+    }
     await this.settleStoredItems();
     phase("settle");
     const targets = this.snifferTargets();
     phase("targets");
-    await this.recoverMissingQuestions(signal);
+    await this.recoverMissingQuestions(signal, lane);
     phase("recover");
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       try {
@@ -250844,10 +251339,10 @@ class TierSnifferService {
       return { state: "awaiting_owner_approval", lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
     }
     phase("approval");
-    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
+    const preparationStopped = await prepareSnifferModel({ model, signal, shouldYield: () => this.yieldNow() });
     phase("prepare");
     if (!preparationStopped)
-      await this.recoverMissingQuestions(signal, true);
+      await this.recoverMissingQuestions(signal, lane, true);
     phase("recover");
     const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge(snifferId(lane, versions.cache));
     phase("rejudge");
@@ -250860,7 +251355,7 @@ class TierSnifferService {
     const report = await runSnifferPass({
       targets,
       lane,
-      model: this.options.model,
+      model,
       promptVersion: versions.cache,
       ...ownerContext ? { ownerContext } : {},
       budget: this.budget,
@@ -250890,7 +251385,7 @@ class TierSnifferService {
       await this.applyOwnerOverrides();
     return { state: "ran", report, ...rejudged.seen > 0 || rejudged.builtinPromptSkipped > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
   }
-  async recoverMissingQuestions(signal, allowReask = false) {
+  async recoverMissingQuestions(signal, lane, allowReask = false) {
     const deadline = this.monotonicNow() + MISSING_QUESTION_RECOVERY_PHASE_MS;
     const cursorKey = allowReask ? "sniffer_missing_question_reask_cursor_v1" : "sniffer_missing_question_cursor_v1";
     const paths = this.ledgerPaths();
@@ -250977,7 +251472,7 @@ class TierSnifferService {
             if (ledger.settleMissingQuestions(row, {
               missingMetadata,
               missingContent: missingContent && !waitingForText && !legacyHold,
-              snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
+              snifferId: snifferId(lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, "metadata")) && (!missingContent || !queue.questionFor(identity, "content")),
               ...planner ? { placementFor: planner } : {}
             }))
@@ -251118,14 +251613,39 @@ class TierSnifferService {
       entry.walks.set(name, walk);
     }
     await runStoredWalk(walk, inputs, readPage, () => this.clockMs());
+    return walk.status;
   }
-  async settleStoredItems() {
-    await this.applyOwnerOverrides();
+  async settleRecordedDecisions() {
+    let pending;
     const paths = new Set(this.ledgerPaths());
     for (const path of this.storedWalks.keys())
       if (!paths.has(path))
         this.storedWalks.delete(path);
-    for (const ledgerPath of paths) {
+    for (const path of paths) {
+      const set = tierSetForLedger(path);
+      if (!set)
+        continue;
+      const status = await this.runStoredWalker(set, "legacyRecordedDecisions", undefined, async () => {
+        const page = await settleRecordedPersonalBodiesOffThread({
+          set,
+          queue: this.options.installed.snifferStoreForLedger(path),
+          movesAvailable: () => !!this.options.autoMoves?.localEmbeddingsOnly() && (this.options.autoMoves.maxPerPass ?? 25) > 0,
+          turn: () => {
+            this.progress();
+            return this.ingestionTurn();
+          }
+        });
+        return { complete: page.retired, retired: page.retired, changed: page.settled + page.secrets + page.held > 0, failed: page.failed > 0 };
+      });
+      if (status.lastResult === "read_failed")
+        pending ??= "retry";
+      else if (status.reason !== "retired")
+        pending = "more";
+    }
+    return pending;
+  }
+  async settleStoredItems() {
+    for (const ledgerPath of this.ledgerPaths()) {
       await this.ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set)
@@ -251321,7 +251841,7 @@ class TierSnifferService {
         continue;
       const builtInOnly = !recoveryOnly && setEmbedsWithBuiltInOnly(set);
       const legacyHoldsOnly = direction === "raise" && !builtInOnly;
-      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly }))).filter(isAutoMoveCandidate);
+      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly, recordedOnly: !this.options.lane }))).filter(isAutoMoveCandidate);
       if (set.openStores().some((store) => store.reclaiming))
         continue;
       if (!builtInOnly && direction === "lower") {
@@ -251355,7 +251875,7 @@ class TierSnifferService {
           this.movesRefusedNow.set(refusedKey, why);
         } else
           this.movesRefusedNow.delete(refusedKey);
-        if (error instanceof TierMoveContentChangedError) {
+        if (error instanceof TierMoveContentChangedError && this.options.lane) {
           if (set.ledger.getCurrent(identity)?.state === "moving") {
             try {
               set.ledger.abandonMove(identity, { expectedGeneration: record.generation });
@@ -255124,6 +255644,15 @@ function storeEmbeddingScope(input) {
     }
   };
 }
+function embeddingCountScope(store, provider, scope) {
+  if (!scope.allowed)
+    return { contentAllowed: false };
+  return {
+    ...scope.accountScope ? { accountScope: scope.accountScope } : {},
+    ...scope.filters ? { contentFilters: scope.filters } : {},
+    ...!scope.excludeAllEmbeddingHolds && store.canEmbedHeld(provider) ? { includeHeldForJudgment: true } : {}
+  };
+}
 var init_embedding_scope = __esm(() => {
   init_operation_error();
   init_source_scope_runtime();
@@ -255281,13 +255810,43 @@ function registeredStoreReadScope(sourceId, authority) {
     ...content.allowed && content.filters ? { contentFilters: content.filters } : {}
   };
 }
-function createStoreEmbeddingScopeFor(input) {
-  const policies = new Map([[GMAIL_SOURCE_ID, gmailStoreEmbeddingScope(input)]]);
-  return (store, provider) => {
+function createStoreScopes(input) {
+  const policies = new Map([[GMAIL_SOURCE_ID, {
+    embedding: gmailStoreEmbeddingScope(input),
+    ref: () => input.authority?.mailPolicyRef(),
+    readCounts: gmailReadCountScope
+  }]]);
+  function resolve(store, provider, readScope) {
     const sourceId = input.sourceIdForStore(store);
-    const policy = policies.get(sourceId) ?? (getFileScopeSource(sourceId) ? "approval" : "open");
-    const scopeRef = policy === "approval" ? input.authority?.policyRef(sourceId) : sourceId === GMAIL_SOURCE_ID ? input.authority?.mailPolicyRef() : undefined;
-    return storeEmbeddingScope({ store, provider, policy, scopeRef, authority: input.authority, readScope: input.readScope });
+    const published = policies.get(sourceId);
+    const ref = published?.ref();
+    const policy = published?.embedding ?? (getFileScopeSource(sourceId) ? "approval" : "open");
+    const scopeRef = policy === "approval" ? input.authority?.policyRef(sourceId) : ref;
+    const scope = storeEmbeddingScope({ store, provider, policy, scopeRef, authority: input.authority, readScope });
+    return { scope, published, ref };
+  }
+  return {
+    embeddingScopeFor: (store, provider) => resolve(store, provider, input.readScope).scope,
+    statusScopeFor(store, provider) {
+      const read = input.readScope(store);
+      const { scope, published, ref } = resolve(store, provider, () => read);
+      const embedding = embeddingCountScope(store, provider, scope);
+      const counts = published ? published.readCounts(store.trustDomain, embedding, ref, input.authority) : readCountScope(read);
+      return { ...counts, embedding };
+    }
+  };
+}
+function readCountScope(read) {
+  if (!read.allowed)
+    return { itemsAllowed: false, contentAllowed: false };
+  if (read.contentAllowed && !read.filters && !read.contentFilters)
+    return {};
+  return {
+    ...read.filters?.sourceScopeRevision ? { scopeRevision: read.filters.sourceScopeRevision } : {},
+    ...read.accountScope ? { accountScope: read.accountScope } : {},
+    ...read.filters ? { itemFilters: read.filters } : {},
+    ...read.contentAllowed !== undefined ? { contentAllowed: read.contentAllowed } : {},
+    ...read.contentFilters ? { contentFilters: read.contentFilters } : {}
   };
 }
 var init_store_scope_policies = __esm(() => {
@@ -263444,7 +264003,7 @@ async function defaultPrivateMatchProbe(question, ctx) {
   const none = { count: 0, evidence: [] };
   if (corpora.length === 0)
     return none;
-  const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
+  const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }, "private_answer").then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
   const perCorpus = await Promise.all(searches);
   const evidence = perCorpus.flat();
   return { count: evidence.length, evidence };
@@ -280767,7 +281326,7 @@ ${key}`;
       return { allowed: false };
     return registeredStoreReadScope(sourceId, fileSourceScopeAuthority);
   };
-  const embeddingScopeFor = createStoreEmbeddingScopeFor({
+  const { embeddingScopeFor, statusScopeFor } = createStoreScopes({
     sourceIdForStore,
     authority: fileSourceScopeAuthority,
     readScope: connectorStoreReadScope,
@@ -280940,37 +281499,7 @@ ${key}`;
   };
   for (const mount of configuredConnectorStoreMounts)
     adoptConfiguredPrincipal(mount);
-  const connectorStoreStatusScope = (store) => {
-    if (store === gmailSecureConnectorStore) {
-      const handle = selectedSourceCredentialHandle({
-        env: process.env,
-        pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
-        provider: "gmail",
-        capability: "gmail.email.sync",
-        handles: readActiveConnectedHandles(process.env)
-      });
-      return gmailPrivateStoreStatusScope({
-        authority: fileSourceScopeAuthority,
-        handle,
-        provider: connectorStoreEmbeddingProviders.get(store.corpusId),
-        gmailRetainedAccountScope
-      });
-    }
-    if (store === gmailInternalConnectorStore)
-      return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
-    const readScope = connectorStoreReadScope(store);
-    if (!readScope.allowed)
-      return { itemsAllowed: false, contentAllowed: false };
-    if (readScope.contentAllowed && !readScope.filters && !readScope.contentFilters)
-      return;
-    return {
-      ...readScope.filters?.sourceScopeRevision ? { scopeRevision: readScope.filters.sourceScopeRevision } : {},
-      ...readScope.accountScope ? { accountScope: readScope.accountScope } : {},
-      ...readScope.filters ? { itemFilters: readScope.filters } : {},
-      contentAllowed: readScope.contentAllowed,
-      ...readScope.contentFilters ? { contentFilters: readScope.contentFilters } : {}
-    };
-  };
+  const connectorStoreStatusScope = (store) => statusScopeFor(store, connectorStoreEmbeddingProviders.get(store.corpusId));
   const secureEmbeddingProfile = sovereigntyEngine.resolveEmbeddingProfile("secure_local");
   const secureEmbeddingCloudApproved = secureEmbeddingProfile?.profile.provider === "venice" && secureEmbeddingProfile.profile.trust === "encrypted_cloud";
   const fullCorpusDefinitions = [
@@ -283950,6 +284479,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   let lastSecondRoundLog = "";
   const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
   const withSecondRound = (model) => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed, localDecisionBar) : model;
+  const tierMoveOptions = {
+    ...automaticMoveContext,
+    onPlacementChecked: (paths) => {
+      overPrivate?.refresh(paths);
+    },
+    onEmbeddingNeeded: (corpora) => {
+      const sourceIds = new Set(sourceCorpusRegistry.list().filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
+      sourceScheduler?.wakeTasksOfKind("embed", undefined, sourceIds);
+    }
+  };
   const tierSniffer = !engineFront && snifferLane && snifferModel ? new TierSnifferService({
     installed: installedTierClassification,
     lane: snifferLane,
@@ -283990,17 +284529,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line) => console.log(line),
     ...snifferRuntime.source === "built_in" ? { autoApproveBuiltIn: true } : {},
-    autoMoves: {
-      ...automaticMoveContext,
-      onPlacementChecked: (paths) => {
-        overPrivate?.refresh(paths);
-      },
-      onEmbeddingNeeded: (corpora) => {
-        const sourceIds = new Set(sourceCorpusRegistry.list().filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
-        sourceScheduler?.wakeTasksOfKind("embed", undefined, sourceIds);
-      }
-    }
+    autoMoves: tierMoveOptions
   }) : undefined;
+  const tierWork = engineFront ? undefined : tierSniffer ?? new TierSnifferService({
+    installed: installedTierClassification,
+    stores: () => connectorStores,
+    classificationLedgerPath: resolveClassificationLedgerPath(process.env),
+    intervalMs: snifferEnv.intervalMs,
+    autoMoves: tierMoveOptions,
+    log: (line) => console.log(line)
+  });
   if (tierSniffer && snifferResource) {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
@@ -284086,8 +284624,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       tierOverPrivate = () => overPrivate.status();
     archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   }
-  tierSniffer?.start();
-  const currentMemoryActivity = () => engineRole === "front" ? memoryActivity(false, false, engineFront?.backgroundActivity() ?? "idle") : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
+  tierWork?.start();
+  const currentMemoryActivity = () => engineRole === "front" ? memoryActivity(false, false, engineFront?.backgroundActivity() ?? "idle") : memoryActivity(tierWork?.passRunning ?? false, statusRecount?.health().counting ?? false);
   const memoryDiagnostic = createMemoryDiagnostic({
     role: engineRole,
     activity: currentMemoryActivity,
@@ -284256,7 +284794,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const rssRestart = startEngineRssRestart({
       memory: memoryDiagnostic,
       thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,
-      batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
+      batchRunning: () => (tierWork?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
       restart: () => requestModelReload(),
       record: () => status.publish(),
       previous: engineRssRestartsFrom(readEngineStatusSnapshot(engineStatusSnapshotPath(process.env)))
@@ -284405,7 +284943,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     stopSupersededSweep();
     stopCpuSampleLog?.();
     stopCreditRecovery();
-    tierSniffer?.stop();
+    tierWork?.stop();
     localPacer.stop();
     archiveImportDashboard.close();
     installedTierClassification.close({ checkpoint: true });

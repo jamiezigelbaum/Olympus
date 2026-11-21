@@ -3,6 +3,7 @@
 // mail approval and the real status handler; expected counts come from the
 // fixture's own dates, never from running the code under test.
 
+import { createStoreScopes } from '../src/workers/engine/runtime/store-scope-policies.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +11,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { defaultMailScopeSelection } from '../src/core/mail-source-scope.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope, gmailRetainedAccountMatches } from '../src/workers/email-source/gmail-status-scope.ts';
+import { gmailRetainedAccountMatches } from '../src/workers/email-source/gmail-status-scope.ts';
 import { defineInternalEmailCorpus, gmailCursorConnectorIds } from '../src/workers/google-connectors/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
@@ -78,6 +79,15 @@ test('disconnecting a refused mailbox leaves the retained library available loca
   expect(gmailRetainedAccountMatches({ binding, historyAccountId: binding.provider_account_id, handle: undefined })).toBe(true);
 });
 
+function statusScope(authority: FileSourceScopeAuthority | undefined, domain: 'internal' | 'secure_local', account?: string) {
+  const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: domain + '.email', trustDomain: domain, family: 'email', tierLedger: null });
+  stores.push(store);
+  return createStoreScopes({
+    authority, sourceIdForStore: () => 'gmail.email', readScope: () => ({ allowed: true, contentAllowed: true }),
+    gmailRetainedAccountScope: () => account,
+  }).statusScopeFor(store, undefined);
+}
+
 describe('Gmail store status scope: the approved window', () => {
   test('a 2-year window passes the approval\'s own cutoff to the Personal store', () => {
     const subject = authority();
@@ -88,19 +98,19 @@ describe('Gmail store status scope: the approved window', () => {
     const ageDays = (Date.now() - Date.parse(cutoff!)) / DAY_MS;
     expect(ageDays).toBeGreaterThan(728);
     expect(ageDays).toBeLessThan(733);
-    expect(gmailInternalStoreStatusScope(subject)).toEqual({ contentNotBefore: cutoff! });
+    expect(statusScope(subject, 'internal', 'personal').contentNotBefore).toBe(cutoff);
   });
 
   test('"everything" has no window, so the Personal store is counted exactly as before', () => {
     const subject = authority();
     approve(subject, 'all');
     expect(subject.mailSnapshot().mailScope?.contentAfter).toBeUndefined();
-    expect(gmailInternalStoreStatusScope(subject)).toBeUndefined();
+    expect(statusScope(subject, 'internal', 'personal').contentNotBefore).toBeUndefined();
   });
 
   test('no approved mail scope means no window and no authority means none either', () => {
-    expect(gmailInternalStoreStatusScope(authority())).toBeUndefined();
-    expect(gmailInternalStoreStatusScope(undefined)).toBeUndefined();
+    expect(statusScope(authority(), 'internal').contentNotBefore).toBeUndefined();
+    expect(statusScope(undefined, 'internal').contentNotBefore).toBeUndefined();
   });
 
   test('the Private store keeps its approved-observation scope and adds the same window', () => {
@@ -115,7 +125,7 @@ describe('Gmail store status scope: the approved window', () => {
       // Mail an import brought into the account is in the approved scope too.
       observedConnectorIdPrefix: 'archive.',
     };
-    expect(gmailPrivateStoreStatusScope({ authority: subject, handle: { accountRole: 'personal' }, gmailRetainedAccountScope: () => 'personal' })).toEqual({
+    expect(statusScope(subject, 'secure_local', 'personal')).toMatchObject({
       accountScope: 'personal',
       scopeRevision: ref.revision,
       itemFilters: observed,
@@ -128,7 +138,7 @@ describe('Gmail store status scope: the approved window', () => {
   test('the Private store under "everything" is exactly its approved-observation scope, with no window', () => {
     const subject = authority();
     approve(subject, 'all');
-    const scope = gmailPrivateStoreStatusScope({ authority: subject, handle: { accountRole: 'personal' }, gmailRetainedAccountScope: () => 'personal' });
+    const scope = statusScope(subject, 'secure_local', 'personal');
     expect(scope.contentAllowed).toBe(true);
     expect(scope.scopeRevision).toBe(subject.mailPolicyRef()!.revision);
     expect('contentNotBefore' in scope).toBe(false);
@@ -136,14 +146,14 @@ describe('Gmail store status scope: the approved window', () => {
 
   test('the Private store counts nothing for an unverified mail account', () => {
     const pending = authority();
-    expect(gmailPrivateStoreStatusScope({ authority: pending, handle: { accountRole: 'personal' }, gmailRetainedAccountScope: () => undefined }))
-      .toEqual({ itemsAllowed: false, contentAllowed: false });
+    expect(statusScope(pending, 'secure_local', undefined))
+      .toMatchObject({ itemsAllowed: false, contentAllowed: false, embedding: { contentAllowed: false } });
     const approved = authority();
     approve(approved, '2y');
-    expect(gmailPrivateStoreStatusScope({ authority: approved, handle: undefined, gmailRetainedAccountScope: () => undefined }))
-      .toEqual({ itemsAllowed: false, contentAllowed: false });
-    expect(gmailPrivateStoreStatusScope({ authority: undefined, handle: { accountRole: 'personal' }, gmailRetainedAccountScope: () => undefined }))
-      .toEqual({ itemsAllowed: false, contentAllowed: false });
+    expect(statusScope(approved, 'secure_local', undefined))
+      .toMatchObject({ itemsAllowed: false, contentAllowed: false, embedding: { contentAllowed: false } });
+    expect(statusScope(undefined, 'secure_local', undefined))
+      .toMatchObject({ itemsAllowed: false, contentAllowed: false, embedding: { contentAllowed: false } });
   });
 });
 
@@ -208,7 +218,10 @@ describe('Gmail store status scope: what the status handler publishes', () => {
     const handler = createSourceIndexStatusHandler({
       corpusDefinitions: () => [defineInternalEmailCorpus()],
       connectorStores: [store],
-      connectorStoreStatusScope: () => gmailInternalStoreStatusScope(subject),
+      connectorStoreStatusScope: (leg) => createStoreScopes({
+        authority: subject, sourceIdForStore: () => 'gmail.email', readScope: () => ({ allowed: true }),
+        gmailRetainedAccountScope: () => 'personal',
+      }).statusScopeFor(leg, undefined),
     });
     const result = await handler.status({ corpus_id: 'internal.email' });
     const corpus = result.corpora.find((entry) => entry.corpus_id === 'internal.email');

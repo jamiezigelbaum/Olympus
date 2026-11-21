@@ -968,7 +968,7 @@ export async function defaultPrivateMatchProbe(question: string, ctx: OperationC
   const none: PrivateMatchProbeResult = { count: 0, evidence: [] };
   if (corpora.length === 0) return none;
   const searches = corpora.map((corpus) => ctx.email
-    .sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false })
+    .sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }, 'private_answer')
     .then(
       (result) => (Array.isArray(result.hits) ? result.hits : [])
         .filter((hit): hit is PrivateEvidenceItem => typeof hit === 'object' && hit !== null && !Array.isArray(hit)),

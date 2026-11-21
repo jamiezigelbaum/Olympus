@@ -293,6 +293,28 @@ describe('live totals beside kept counts', () => {
     }
   });
 
+  test('a write outside the embedding population never increases a cached backlog', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    try {
+      await store.reconcileTotals();
+      const inside = file('inside.txt', 'inside body');
+      await store.syncFromConnector(connector([inside]), { fetchContent: true });
+      const handler = createSourceIndexStatusHandler({
+        corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store],
+        connectorStoreStatusScope: () => ({ embedding: { accountScope: inside.identity.accountScope } }),
+        retrievalAvailability: { [CORPUS_ID]: { servable: true, modelId: 'test', backend: 'local', provider: 'built-in' } },
+      });
+      const status = () => handler.status({}, SNAPSHOT);
+      const parity = { missing_chunks: 1, backlog_estimate: { missing_chunks: 1 } };
+      expect((await status()).corpora[0]?.embedding_parity).toMatchObject(parity);
+      const other = file('other.txt', 'different account');
+      await store.syncFromConnector(connector([{ ...other, identity: { ...other.identity, accountScope: 'other' } }]), { fetchContent: true });
+      expect((await status()).corpora[0]).toMatchObject({ totals: { chunks: 2 }, embedding_parity: parity });
+    } finally {
+      store.close();
+    }
+  });
+
   test('a newer store recount replaces dashboard counts during the readiness cache window', async () => {
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
     let now = 1_000_000;
@@ -322,8 +344,9 @@ test('finished embedding shows at once: the parity follows the live vectors on t
   // Lane 6 run 43777041779: both remaining chunks embedded right after the count.
   const live = { items: 3, tombstoned_items: 0, chunks: 3, sync_runs: 1, vectors_by_model: { m1: 3, old: 3 }, reconciled_at: 'x' };
   const shown = bringCountsForward(counted, live);
-  expect(shown.embedding_parity).toMatchObject({ chunks: 3, embedded_chunks: 3, missing_chunks: 0, refresh_needed: false });
-  expect(shown.embedding_parity!.backlog_estimate!.missing_chunks).toBe(0);
+  expect(shown.embedding_parity).toMatchObject({ chunks: 3, embedded_chunks: 3, missing_chunks: 0 });
+  // Live totals track vector progress, but are not scoped to eligible rows.
+  expect(shown.embedding_parity!.backlog_estimate).toEqual(counted.embedding_parity!.backlog_estimate);
   expect(shown.counts.embedded_chunks).toBe(3);
   // Another model's vectors never count for the serving one; nothing moved, nothing changes.
   expect(bringCountsForward(counted, { ...live, vectors_by_model: { m1: 1, old: 9 } })).toBe(counted);

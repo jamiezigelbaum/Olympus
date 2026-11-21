@@ -429,6 +429,11 @@ test.each(['grant is revoked', 'source version changes'] as const)(
       store.grantOnDemandRead('a:0', '1');
       expect((await search()).rows.map(row => row.sourceItem.localItemId)).toEqual(['a:0']);
 
+      const filtered = await store.vectorSearchLane('harbor note', provider, 1, 'a', filters, undefined, {
+        searchEligibility: rows => rows.map(() => true),
+      });
+      expect(filtered.rows.map(row => row.sourceItem.localItemId)).toEqual(['a:0']);
+
       const lane = store as unknown as { visibleVectorItemPks: LocalConnectorStore['visibleVectorItemPks'] };
       const visible = lane.visibleVectorItemPks.bind(store);
       const beforeValidation = spyOn(lane, 'visibleVectorItemPks').mockImplementationOnce((pks, ...scope) => {

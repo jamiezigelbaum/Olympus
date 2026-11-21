@@ -65,6 +65,10 @@ export interface LegacyPersonalBodyProgress {
   waiting?: number;
 }
 
+const LEGACY_PROTECTED_ROWS = "routed = 0 AND (metadata_tier IN ('secure', 'secrets') OR content_tier IN ('secure', 'secrets'))";
+const LEGACY_PROTECTED_INDEX = 'tier_items_legacy_protected';
+const LEGACY_PROTECTED_KEYS = 'provider, account_scope, conversation_key, provider_item_id';
+
 const LEGACY_PERSONAL_BODIES_HELD = 'legacy-personal-bodies:held';
 const LEGACY_PERSONAL_BODIES_JUDGED = 'legacy-personal-bodies:judged';
 export const LEGACY_PERSONAL_BODIES_CURSOR = 'legacy_personal_bodies_cursor_v2';
@@ -229,11 +233,12 @@ function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead
 
 type HidingIntent = 'deletion' | 'secret';
 
-interface TierLedgerItemState {
+export interface TierLedgerItemState {
   record?: TierLedgerRecord;
   copies: TierCopy[];
   override?: ItemTierOverride;
   hidingIntent?: HidingIntent;
+  pendingRaisePurge?: true;
 }
 
 function* hidingIntentsSteps(values: string, params: string[]): Generator<LedgerRead, Array<TierIdentityRow & { kind: HidingIntent }>, unknown> {
@@ -468,7 +473,12 @@ function* windowSteps(
   return lastEnd ? { records, resumeAfter: identityOfRow(lastEnd) } : { records };
 }
 
-interface MovingPageOptions { limit?: number; direction?: 'raise' | 'lower'; legacyHoldsOnly?: boolean }
+interface MovingPageOptions {
+  limit?: number;
+  direction?: 'raise' | 'lower';
+  legacyHoldsOnly?: boolean;
+  recordedOnly?: boolean;
+}
 
 function listMovingRead(options: MovingPageOptions): LedgerRead {
   const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
@@ -476,8 +486,8 @@ function listMovingRead(options: MovingPageOptions): LedgerRead {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
-      ${options.legacyHoldsOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
-        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)
+      ${options.recordedOnly ? "AND (target_metadata_tier = 'secure' OR target_content_tier = 'secure') AND content_pending = 0 AND metadata_pending = 0" : ''}
+      ${options.legacyHoldsOnly || options.recordedOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
         AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
           AND c.account_scope = tier_items.account_scope AND c.conversation_key = tier_items.conversation_key
           AND c.provider_item_id = tier_items.provider_item_id AND c.trust_domain = 'internal' AND c.layers <> 'metadata'
@@ -998,6 +1008,9 @@ export class TierLedger {
       // an older build opens the file as before and ignores it.
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
+      // Install the recorded-pass index during writable schema setup, before any page or move transaction.
+      db.exec(`CREATE INDEX IF NOT EXISTS ${LEGACY_PROTECTED_INDEX}
+        ON tier_items (${LEGACY_PROTECTED_KEYS}) WHERE ${LEGACY_PROTECTED_ROWS}`);
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
       if (db) closeSqliteStore(db, this.readOnly || options.expectedLedgerId !== undefined
@@ -1540,6 +1553,16 @@ export class TierLedger {
     return tierMovingDirectionClause(direction);
   }
 
+
+  *legacyProtectedRowsSteps(after: TierLedgerIdentity | undefined, limit: number): Generator<LedgerRead, TierLedgerIdentity[], unknown> {
+    const rows = (yield {
+      sql: `SELECT ${LEGACY_PROTECTED_KEYS} FROM tier_items INDEXED BY ${LEGACY_PROTECTED_INDEX}
+        WHERE ${LEGACY_PROTECTED_ROWS} AND (${LEGACY_PROTECTED_KEYS}) > (?, ?, ?, ?)
+        ORDER BY ${LEGACY_PROTECTED_KEYS} LIMIT ?`,
+      params: [...(after ? idParams(after) : ['', '', '', '']), limit], mode: 'all',
+    }) as TierIdentityRow[];
+    return rows.map(identityFromRow);
+  }
 
   /**
    * Items with a queued move (state `moving`): the fewest failed attempts
@@ -2835,9 +2858,9 @@ export class TierLedger {
     this.setMeta(key, value);
   }
 
-  /** Count a newly held body in the same transaction that hides its Personal copy. */
+  /** Hide the physical Personal copy. Only a body awaiting judgment counts as a new hold. */
   recordLegacyPersonalHold(
-    identity: TierLedgerIdentity, decision: TierDecision, plan: TierPlacementPlan, digest: string,
+    identity: TierLedgerIdentity, decision: TierDecision, plan: TierPlacementPlan, digest: string | undefined,
     guard: TierOwnerOverrideGuard, retainedBodyCorpusId?: string,
   ): ReturnType<TierLedger['recordRoutedPlacement']> {
     return this.db.transaction(() => {
@@ -2862,7 +2885,7 @@ export class TierLedger {
         }
       }
       const key = legacyPersonalBodyKey(identity);
-      if (result.raise && this.readMeta(key) === undefined) {
+      if (digest !== undefined && result.raise && this.readMeta(key) === undefined) {
         const order = this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_HELD);
         this.writeMeta(key, JSON.stringify({ digest, order }));
       }
@@ -3565,13 +3588,24 @@ export class TierLedger {
         params, mode: 'all',
       }) as TierItemRow[];
       for (const row of rows) result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
+      // A mixed move may have flipped while the Personal source still awaits its purge.
+      // Read the durable receipt by primary key along with the affected copy.
       const copies = (yield {
-        sql: `SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        sql: `SELECT c.*, CASE WHEN trust_domain = 'internal' AND (copy_state = 'superseded' OR layers = 'metadata')
+          THEN (SELECT json_array_length(value, '$.raisePurge') FROM tier_ledger_meta
+            WHERE key = 'tier-move-verified:' || c.provider || char(0) || c.account_scope || char(0)
+              || c.conversation_key || char(0) || c.provider_item_id AND value <> '') END AS pending_raise_purge
+          FROM tier_copies c WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
           ORDER BY corpus_id`,
         params, mode: 'all',
-      }) as TierCopyRow[];
-      for (const row of copies) result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+      }) as Array<TierCopyRow & { pending_raise_purge: number | null }>;
+      for (const row of copies) {
+        const state = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+        if (state) {
+          state.copies.push(copyFromRow(row));
+          if (row.pending_raise_purge) state.pendingRaisePurge = true;
+        }
+      }
       // The owner's override, read in the same batch: a release check weighs an
       // override whose queued placement has not settled yet.
       const overrides = (yield {

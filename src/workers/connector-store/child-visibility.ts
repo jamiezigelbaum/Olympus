@@ -327,6 +327,8 @@ export interface ParentStandingRow extends ParentRef {
   active: boolean;
   /** The row is a Secret's: tombstoned and kept as a location only. */
   secret: boolean;
+  /** The row's own placement, used when the ledger has no names verdict. */
+  legacyPrivateNames?: boolean;
   /** The row's own parent, when the parent is a child too. */
   grandparentLocalItemId?: string;
 }

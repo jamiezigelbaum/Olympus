@@ -2,7 +2,10 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { copyFileSync, existsSync, renameSync, writeFileSync } from 'node:fs';
-import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { defineConnectorCorpus, embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { embeddingCountScope } from '../src/workers/connector-store/embedding-scope.ts';
+import { registerConnectorStoreEmbeddingLane } from '../src/workers/engine/runtime/embedding-providers.ts';
+import { createSourceIndexStatusHandler, type SourceIndexStatusRetrievalAvailability } from '../src/workers/source-index/status.ts';
 import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
@@ -91,6 +94,18 @@ async function fixture(options: { accountScope?: string; empty?: boolean } = {})
   };
 }
 
+function statusFor({ store, provider }: Pick<Awaited<ReturnType<typeof fixture>>, 'store' | 'provider'>) {
+  const retrievalAvailability: Record<string, SourceIndexStatusRetrievalAvailability> = {};
+  registerConnectorStoreEmbeddingLane({ store, provider, personalProvider: provider, providers: new Map(), retrievalAvailability });
+  return createSourceIndexStatusHandler({
+    corpusDefinitions: [defineConnectorCorpus({
+      corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain, activationMode: 'hybrid_primary',
+    })],
+    connectorStores: [store], retrievalAvailability,
+    connectorStoreStatusScope: () => ({ embedding: embeddingCountScope(store, provider, { allowed: true }) }),
+  });
+}
+
 test('a queued vector is committed before inventory and before a finder that outlasts the pass budget', async () => {
   const f = await fixture();
   const queued = localId('synthetic-id');
@@ -163,6 +178,39 @@ test('pending judgments embed early under the shared local identity and idle is 
   expect(await f.pass()).toMatchObject({ eligible_chunks: 0, pending_chunks: 0, skipped_held_chunks: 0, held_for_judgment_chunks: 1, queued_first_items: 1, chunks_embedded: 1 });
   expect(await f.pass()).toMatchObject({ eligible_chunks: 0, pending_chunks: 0, chunks_embedded: 0, held_for_judgment_chunks: 1, held_for_judgment_items: 1 });
   expect(f.ledger.getCurrent(identityOf('synthetic-id'))?.contentPending).toBe(true);
+});
+
+test('a current vector awaiting judgment counts in parity while retrieval stays unavailable', async () => {
+  const f = await fixture();
+  const status = statusFor(f);
+  expect(await f.pass()).toMatchObject({ chunks_embedded: 1 });
+  expect(await f.store.missingEmbeddingItemIdsInTurns(f.provider, 10)).toEqual([]);
+  expect(f.ledger.getCurrent(identityOf('synthetic-id'))?.contentPending).toBe(true);
+  const [shown] = (await status.status({ corpus_id: f.store.corpusId })).corpora;
+  expect(shown?.retrieval).toMatchObject({ servable_mode: 'keyword', reason: 'no_current_embedding_artifacts' });
+  expect(shown?.embedding_parity).toMatchObject({
+    chunks: 1, embedded_chunks: 1, missing_chunks: 0, refresh_needed: false,
+    backlog_estimate: { missing_chunks: 0 },
+  });
+});
+
+test('permanent failures stay out of priced backlog and refresh work', async () => {
+  const f = await fixture();
+  const status = statusFor(f);
+  f.store.markEmbeddingFailed(localId('synthetic-id'), 'synthetic');
+  expect(await f.store.missingEmbeddingItemIdsInTurns(f.provider, 10)).toEqual([]);
+  const scope = { embedding: embeddingCountScope(f.store, f.provider, { allowed: true }) };
+  const noBacklog = { missingChunks: 0, estimatedTokens: 0 };
+  const reads = {
+    sync: f.store.embeddingBacklogEstimate(f.provider.modelId, f.provider, scope),
+    offThread: await f.store.embeddingBacklogEstimateOffThread(f.provider.modelId, f.provider, scope),
+  };
+  const [shown] = (await status.status({ corpus_id: f.store.corpusId })).corpora;
+  expect({ ...reads, parity: shown?.embedding_parity }).toMatchObject({
+    sync: noBacklog,
+    offThread: noBacklog,
+    parity: { chunks: 1, missing_chunks: 1, refresh_needed: false, backlog_estimate: { missing_chunks: 0, estimated_tokens: 0 } },
+  });
 });
 
 test('retained-content maintenance leaves judgment holds in place even with the shared local identity', async () => {

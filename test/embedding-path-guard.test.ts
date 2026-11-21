@@ -10,15 +10,19 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
+import { getFileScopeSource, registerFileScopeSource, unregisterFileScopeSource } from '../src/core/file-scope-sources.ts';
+import { gmailCursorConnectorIds } from '../src/workers/google-connectors/index.ts';
+import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
+import type { ConnectorStoreStatusScope } from '../src/workers/connector-store/local-index.ts';
 import { defaultSourceCorpusRegistryConfig } from '../src/core/source-corpus-registry.ts';
 import { storageAccountForCorpus } from '../src/core/source-placement.ts';
 import { archiveImportCorpora } from '../src/workers/archive-import/store.ts';
 import { QUEUE_ONLY_METERED_EMBEDDING, planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
 import { storeEmbeddingScope, type SourceEmbeddingScopePolicy } from '../src/workers/connector-store/embedding-scope.ts';
-import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { defineConnectorCorpus, embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { writeConnectedHandleRegistry, type ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
-import { createStoreEmbeddingScopeFor, registeredStoreReadScope } from '../src/workers/engine/runtime/store-scope-policies.ts';
+import { createStoreScopes, registeredStoreReadScope } from '../src/workers/engine/runtime/store-scope-policies.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
@@ -61,6 +65,31 @@ function fixtureConnector(
   };
 }
 
+// Each fixture item has one chunk. Compare both published missing counts to
+// the work list the sweep actually reads, including the serving model's vectors.
+async function expectStatusBacklog(
+  store: LocalConnectorStore, provider: SourceEmbeddingProvider,
+  scopes: {
+    embeddingScopeFor: (store: LocalConnectorStore, provider: SourceEmbeddingProvider) => ReturnType<typeof storeEmbeddingScope>;
+    statusScopeFor: (store: LocalConnectorStore, provider: SourceEmbeddingProvider) => ConnectorStoreStatusScope;
+  }, expected: number,
+) {
+  const scope = scopes.embeddingScopeFor(store, provider);
+  const missing = scope.allowed ? await store.missingEmbeddingItemIdsInTurns(provider, 100, scope) : [];
+  expect(missing.length).toBe(expected);
+  const status = createSourceIndexStatusHandler({
+    corpusDefinitions: [defineConnectorCorpus({
+      corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain, activationMode: 'hybrid_primary',
+    })],
+    connectorStores: [store], connectorStoreStatusScope: leg => scopes.statusScopeFor(leg, provider),
+    retrievalAvailability: { [store.corpusId]: {
+      servable: true, modelId: provider.modelId, provider: provider.provider, backend: provider.backend, embeddingEpoch: provider.epochId,
+    } },
+  });
+  const parity = (await status.status()).corpora[0]!.embedding_parity;
+  expect(parity).toMatchObject({ missing_chunks: missing.length, backlog_estimate: { missing_chunks: missing.length } });
+}
+
 describe('embedding paths', () => {
   test('the shared sweep is the only embed task: no source wires its own', () => {
     const declaring = sourceFiles(SRC)
@@ -87,6 +116,63 @@ describe('embedding paths', () => {
     }).map((corpus) => corpus.corpusId);
     expect(missing).toEqual([]);
   });
+
+  test.each([...defaultSourceCorpusRegistryConfig().corpora, ...archiveImportCorpora()])(
+    'status counts exactly the sweep backlog for $corpusId', async (corpus) => {
+      const dir = mkdtempSync(join(tmpdir(), 'embedding-status-'));
+      const store = new LocalConnectorStore({ ...corpus, dbPath: join(dir, 'store.sqlite'), tierLedger: null });
+      try {
+        const provider = new RecordingProvider('fixture', 'status-model', 'local');
+        const generation = 'owner-generation';
+        const revision = 'revision-1';
+        const currentLive = gmailCursorConnectorIds('owner', { generation, revision }).connectorId;
+        let sourceId = corpus.sourceId;
+        const approved = getFileScopeSource(sourceId);
+        const mail = corpus.sourceId === 'gmail.email';
+        let retained: string | undefined = 'owner';
+        let mailApproved = true;
+        const authority = Object.assign(new FileSourceScopeAuthority({ registryPath: join(dir, 'handles.json') }), {
+          policyRef: () => ({ sourceId, accountGeneration: generation, revision }),
+          mailPolicyRef: () => mailApproved ? { sourceId: 'gmail.email' as const, accountGeneration: generation, revision } : undefined,
+          assertCurrentMail: () => ({ mailScope: {} }),
+        });
+        const scopes = createStoreScopes({
+          authority, sourceIdForStore: () => sourceId, gmailRetainedAccountScope: () => retained,
+          readScope: () => approved ? { allowed: true, contentAllowed: true, accountScope: 'owner',
+            contentFilters: { observedConnectorId: currentLive } } : { allowed: true, contentAllowed: true },
+        });
+        for (const [id, owner, connector] of [
+          ['live', 'owner', currentLive], ['already-indexed', 'owner', currentLive],
+          ['imported', 'owner', 'archive.1'], ['old-live', 'owner', 'previous-grant'], ['other', 'other', currentLive],
+        ] as const) {
+          await store.syncFromConnector(fixtureConnector(connector, id, id + ' fixture body', {
+            family: corpus.family, provider: corpus.provider, accountScope: owner,
+          }), { fetchContent: true });
+        }
+        expect((await store.embedChunks({ provider, localItemIds: ['already-indexed'] })).chunksEmbedded).toBe(1);
+        const expected = approved ? 1 : mail ? (store.trustDomain === 'secure_local' ? 2 : 3) : 4;
+        await expectStatusBacklog(store, provider, scopes, expected);
+        if (approved) {
+          sourceId = 'renamed.source';
+          registerFileScopeSource({ ...approved, sourceId, provider: 'renamed' });
+          try {
+            await expectStatusBacklog(store, provider, scopes, expected);
+          } finally {
+            unregisterFileScopeSource(sourceId);
+          }
+        }
+        if (mail) {
+          mailApproved = false;
+          await expectStatusBacklog(store, provider, scopes, 1); // Only owner imports.
+          retained = undefined;
+          await expectStatusBacklog(store, provider, scopes, 0);
+        }
+      } finally {
+        store.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   test('the registered Evernote scope restricts the sweep to approved notebooks and stops queued work after reconnect', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'embedding-scope-evernote-'));
@@ -131,12 +217,13 @@ describe('embedding paths', () => {
       expect(store.status().counts).toMatchObject({ chunks: 2, embeddedChunks: 0 });
       approve([{ key: 'work', state: 'ingest' }, { key: 'home', state: 'exclude' }]);
       const provider = new RecordingProvider('built-in', 'fixture', 'local');
-      const embeddingScopeFor = createStoreEmbeddingScopeFor({
+      const scopes = createStoreScopes({
         authority, sourceIdForStore,
         readScope: (leg) => registeredStoreReadScope(sourceIdForStore(leg), authority),
       });
+      await expectStatusBacklog(store, provider, scopes, 1);
       const sweep = () => {
-        const target = planStoreEmbedding({ store, provider, servedByMeaning: true, scope: embeddingScopeFor(store, provider) });
+        const target = planStoreEmbedding({ store, provider, servedByMeaning: true, scope: scopes.embeddingScopeFor(store, provider) });
         return embedPendingChunks(target ? [target] : [], { maxItems: 10 });
       };
       store.queueEmbedding(['home'], provider);
@@ -147,6 +234,7 @@ describe('embedding paths', () => {
       writeConnectedHandleRegistry({ version: 1, handles: [{ ...handle, connectedAt: '2026-11-20T13:00:00.000Z' }] }, registryPath);
       store.queueEmbedding(['home'], provider);
       expect(store.queuedEmbeddingItemIds()).toEqual(['home']);
+      await expectStatusBacklog(store, provider, scopes, 0);
       expect(await sweep()).toEqual([]);
       expect(provider.inputs).toHaveLength(1);
       expect(store.status().counts.embeddedChunks).toBe(1);

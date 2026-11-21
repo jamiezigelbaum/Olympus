@@ -2,9 +2,9 @@
 // calling the shared plan. Folder and notebook approvals use one registry.
 import { getFileScopeSource, type FileScopeSourceDefinition } from '../../../core/file-scope-sources.ts';
 import { GMAIL_SOURCE_ID } from '../../google-connectors/index.ts';
-import { gmailStoreEmbeddingScope } from '../../email-source/gmail-status-scope.ts';
-import { storeEmbeddingScope, type EmbeddingPolicy, type EmbeddingReadScope } from '../../connector-store/embedding-scope.ts';
-import type { LocalConnectorStore } from '../../connector-store/local-index.ts';
+import { gmailReadCountScope, gmailStoreEmbeddingScope } from '../../email-source/gmail-status-scope.ts';
+import { embeddingCountScope, storeEmbeddingScope, type EmbeddingPolicy, type EmbeddingReadScope } from '../../connector-store/embedding-scope.ts';
+import type { ConnectorStoreStatusScope, LocalConnectorStore } from '../../connector-store/local-index.ts';
 import type { ConnectedCredentialHandle } from '../../credential-broker/connected-handles.ts';
 import { fileSourceScopeContentFilters, fileSourceScopeMetadataFilters, type FileSourceScopeAuthority } from '../../source-scope-runtime.ts';
 import type { SourceEmbeddingProvider } from '../../source-index/embeddings.ts';
@@ -38,19 +38,52 @@ export function registeredStoreReadScope(sourceId: string, authority: FileSource
   };
 }
 
-export function createStoreEmbeddingScopeFor(input: {
+export function createStoreScopes(input: {
   authority: FileSourceScopeAuthority | undefined;
   sourceIdForStore: (store: LocalConnectorStore) => string;
   readScope: EmbeddingReadScope;
 } & Parameters<typeof gmailStoreEmbeddingScope>[0]) {
-  const policies = new Map<string, EmbeddingPolicy>([[GMAIL_SOURCE_ID, gmailStoreEmbeddingScope(input)]]);
-  return (store: LocalConnectorStore, provider: SourceEmbeddingProvider | undefined) => {
+  const policies = new Map([[GMAIL_SOURCE_ID, {
+    embedding: gmailStoreEmbeddingScope(input),
+    ref: () => input.authority?.mailPolicyRef(),
+    readCounts: gmailReadCountScope,
+  }]]);
+  function resolve(store: LocalConnectorStore, provider: SourceEmbeddingProvider | undefined, readScope: EmbeddingReadScope) {
     const sourceId = input.sourceIdForStore(store);
-    // Use the same live registry as registeredStoreReadScope, including sources
-    // registered after the worker constructed this resolver.
-    const policy = policies.get(sourceId) ?? (getFileScopeSource(sourceId) ? 'approval' : 'open');
-    const scopeRef = policy === 'approval' ? input.authority?.policyRef(sourceId)
-      : sourceId === GMAIL_SOURCE_ID ? input.authority?.mailPolicyRef() : undefined;
-    return storeEmbeddingScope({ store, provider, policy, scopeRef, authority: input.authority, readScope: input.readScope });
+    const published = policies.get(sourceId);
+    const ref = published?.ref();
+    // Consult the live registry so later registrations use their approval.
+    const policy: EmbeddingPolicy = published?.embedding ?? (getFileScopeSource(sourceId) ? 'approval' : 'open');
+    const scopeRef = policy === 'approval' ? input.authority?.policyRef(sourceId) : ref;
+    const scope = storeEmbeddingScope({ store, provider, policy, scopeRef, authority: input.authority, readScope });
+    return { scope, published, ref };
+  }
+  return {
+    embeddingScopeFor: (store: LocalConnectorStore, provider: SourceEmbeddingProvider | undefined) =>
+      resolve(store, provider, input.readScope).scope,
+    statusScopeFor(store: LocalConnectorStore, provider: SourceEmbeddingProvider | undefined): ConnectorStoreStatusScope {
+      const read = input.readScope(store);
+      const { scope, published, ref } = resolve(store, provider, () => read);
+      const embedding = embeddingCountScope(store, provider, scope);
+      const counts = published ? published.readCounts(store.trustDomain, embedding, ref, input.authority) : readCountScope(read);
+      return { ...counts, embedding };
+    },
+  };
+}
+
+// The offline command only needs the embedding resolver.
+export function createStoreEmbeddingScopeFor(input: Parameters<typeof createStoreScopes>[0]) {
+  return createStoreScopes(input).embeddingScopeFor;
+}
+
+function readCountScope(read: ReturnType<EmbeddingReadScope>): ConnectorStoreStatusScope {
+  if (!read.allowed) return { itemsAllowed: false, contentAllowed: false };
+  if (read.contentAllowed && !read.filters && !read.contentFilters) return {};
+  return {
+    ...(read.filters?.sourceScopeRevision ? { scopeRevision: read.filters.sourceScopeRevision } : {}),
+    ...(read.accountScope ? { accountScope: read.accountScope } : {}),
+    ...(read.filters ? { itemFilters: read.filters } : {}),
+    ...(read.contentAllowed !== undefined ? { contentAllowed: read.contentAllowed } : {}),
+    ...(read.contentFilters ? { contentFilters: read.contentFilters } : {}),
   };
 }

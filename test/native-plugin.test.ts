@@ -8,6 +8,15 @@ import plugin, {
   sendOpenClawSourceWatchDelivery,
   sourceWatchRouteFromToolContext,
 } from '../src/native-plugin.ts';
+import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
+import { createPublicSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
+import { configFromPluginConfig } from '../src/core/config.ts';
+import { defaultPrivateMatchProbe } from '../src/workers/chatgpt/mcp-surface.ts';
+import { createInProcessOperationContext } from '../src/workers/remote-mcp.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import manifest from '../openclaw.plugin.json';
 import pkg from '../package.json';
 import {
@@ -747,6 +756,145 @@ describe('native OpenClaw plugin adapter', () => {
     for (const shape of hostShapes) {
       expect(registeredToolNames({ argus: { lanes: { fast: { model: 'local-qwen-fast' } } } }, shape))
         .toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
+    }
+  });
+
+  const searchCorpora = createPublicSourceCorpusRegistry().list('search');
+  for (const sourceId of new Set(searchCorpora.map(corpus => corpus.sourceId))) {
+    test(`all-sources search releases only Personal names from ${sourceId}'s Private store`, async () => {
+      const corpora = searchCorpora.filter(corpus => corpus.sourceId === sourceId);
+      const ledger = new TierLedger({ dbPath: ':memory:' });
+      const stores = corpora.map(corpus => new LocalConnectorStore({ ...corpus, dbPath: ':memory:', tierLedger: ledger }));
+      try {
+        const secure = stores.find(store => store.trustDomain === 'secure_local')!;
+        const { family, provider } = corpora[0]!;
+        const privateTitle = 'Orchard winter notes';
+        const personalTitle = 'Orchard summer notes';
+        const body = 'Confidential body marker with SSN 123-45-6789.';
+        const items = [privateTitle, personalTitle].map((title, i): RawItem => ({
+          identity: { family, provider, accountScope: 'personal', providerItemId: `provider-marker-${i}`, localItemId: `local-marker-${i}` },
+          metadata: { title },
+          content: { kind: 'text', text: body },
+          mimeType: 'text/plain',
+          fetchedAt: '2026-11-01T00:00:00Z',
+        }));
+        const connector: SourceConnector = {
+          id: provider, family,
+          async authenticate() {},
+          async *listItems() { yield { items, done: true }; },
+          async fetchItem(id) { return items.find(item => item.identity.localItemId === id)!; },
+          classificationSignals(item) {
+            const title = String(item.metadata.title);
+            return { title, labels: title === privateTitle ? ['raised-names'] : [] };
+          },
+        };
+        await secure.syncFromConnector(connector, {
+          fetchContent: true,
+          tierClassification: { rules: [{ id: 'private-names', match: { kind: 'label', value: 'raised-names' }, tier: 'secure', strength: 'force' }] },
+        });
+        // The ledger spells Private "secure" and Personal "private".
+        for (const [i, item] of items.entries()) {
+          expect(ledger.getCurrent(item.identity)).toMatchObject({ metadataTier: i === 0 ? 'secure' : 'private', contentTier: 'secure' });
+        }
+        const corpusIds = new Set(corpora.map(corpus => corpus.corpusId));
+        const worker = createEmailSourceWorker({
+          connectorStores: stores,
+          connectorStoreTierSiblings: id => [...corpusIds].filter(sibling => sibling !== id),
+          sourceIndexVisibilityGate: createTierVisibilityGate(() => [{ ledger, corpusIds }]),
+        });
+        globalThis.fetch = (async (input, init) => worker.fetch(new Request(input, init))) as typeof fetch;
+        const tools = new Map<string, NativeTool>();
+        const pluginConfig = {
+          email: { enabled: true, baseUrl: workerTestOrigin },
+          sourceIndex: { enabled: true, corpusRegistry: { schemaVersion: 1, corpora } },
+        };
+        plugin.register({
+          pluginConfig,
+          registerTool(tool) { tools.set(tool.name, tool); },
+        });
+        const result = await tools.get('source_index_search')!.execute('search', { query: 'orchard' }) as {
+          content: Array<{ text: string }>; details: unknown;
+        };
+        expect(result.details).toMatchObject({ audit: { request_id: 'all-sources:connector-store-search' } });
+        const inspect = (output: string) => ({
+          personalTitle: output.includes(personalTitle),
+          privateBody: output.includes(body),
+          privateTitle: output.includes(privateTitle),
+          providerId: output.includes(items[0]!.identity.providerItemId),
+          localId: output.includes(items[0]!.identity.localItemId),
+        });
+        const allowed = { personalTitle: true, privateBody: false, privateTitle: false, providerId: false, localId: false };
+        expect({ text: inspect(result.content[0]!.text), details: inspect(JSON.stringify(result.details)) })
+          .toEqual({ text: allowed, details: allowed });
+
+        const privateMatch = await defaultPrivateMatchProbe('orchard', createInProcessOperationContext({
+          config: configFromPluginConfig(pluginConfig),
+          sourceIndexReadEnabled: true,
+          workerFetch: worker.fetch,
+          caller: { surface: 'remote', displayName: 'ChatGPT' },
+        }));
+        expect(privateMatch.evidence).toContainEqual(expect.objectContaining({
+          selected_item: expect.objectContaining({ title: privateTitle }),
+        }));
+      } finally {
+        stores.forEach(store => store.close());
+        ledger.close();
+      }
+    });
+  }
+
+  test('all-sources search rechecks names after the slowest source finishes', async () => {
+    const privateCorpora = searchCorpora.filter(corpus => corpus.trustDomain === 'secure_local');
+    const corpora = [privateCorpora[0]!, privateCorpora.find(corpus => corpus.sourceId !== privateCorpora[0]!.sourceId)!];
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const stores = corpora.map(corpus => new LocalConnectorStore({ ...corpus, dbPath: ':memory:', tierLedger: ledger }));
+    const titles = ['Orchard early harvest', 'Orchard late harvest'];
+    try {
+      const items = corpora.map(({ family, provider }, index): RawItem => ({
+        identity: { family, provider, accountScope: 'personal', providerItemId: `orchard-id-${index}`, localItemId: `orchard-local-${index}` },
+        metadata: { title: titles[index]! }, content: { kind: 'text', text: 'Confidential body marker with SSN 123-45-6789.' }, mimeType: 'text/plain', fetchedAt: '2026-11-01T00:00:00Z',
+      }));
+      for (const [index, store] of stores.entries()) {
+        const item = items[index]!;
+        await store.syncFromConnector({
+          id: item.identity.provider, family: item.identity.family, async authenticate() {},
+          async *listItems() { yield { items: [item], done: true }; },
+          async fetchItem() { return item; },
+          classificationSignals() { return { title: titles[index]! }; },
+        }, { fetchContent: true, tierClassification: {} });
+      }
+      const slow = stores[1]!;
+      const read = slow.searchItemsDetailedOffThread.bind(slow);
+      slow.searchItemsDetailedOffThread = async (...args) => {
+        // Let the in-memory fast source finish all its reads on this turn.
+        await new Promise<void>(resolve => setImmediate(resolve));
+        ledger.setOverride(items[0]!.identity, { kind: 'tier', tier: 'secure' });
+        return read(...args);
+      };
+      const worker = createEmailSourceWorker({ connectorStores: stores });
+      globalThis.fetch = (async (input, init) => worker.fetch(new Request(input, init))) as typeof fetch;
+      const tools = new Map<string, NativeTool>();
+      plugin.register({
+        pluginConfig: {
+          email: { enabled: true, baseUrl: workerTestOrigin },
+          sourceIndex: { enabled: true, corpusRegistry: { schemaVersion: 1, corpora } },
+        },
+        registerTool(tool) { tools.set(tool.name, tool); },
+      });
+      const result = await tools.get('source_index_search')!.execute('search', { query: 'orchard', max_results: 5 }) as {
+        content: Array<{ text: string }>; details: unknown;
+      };
+      expect(ledger.getOverride(items[0]!.identity)).toEqual({ kind: 'tier', tier: 'secure' });
+      for (const output of [result.content[0]!.text, JSON.stringify(result.details)]) {
+        expect(output).toContain(titles[1]!);
+        expect(output).not.toContain(titles[0]!);
+        expect(output).not.toContain(items[0]!.identity.providerItemId);
+        expect(output).not.toContain(items[0]!.identity.localItemId);
+      }
+      expect(result.details).toMatchObject({ audit: { items_returned: 1, metadata_hits: 1 } });
+    } finally {
+      stores.forEach(store => store.close());
+      ledger.close();
     }
   });
 

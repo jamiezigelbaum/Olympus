@@ -278,7 +278,7 @@ import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RE
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import { setConnectorStoreRecencyIndexAdmission, setVectorDigestBackfillHold } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
-import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope, readGmailRetainedAccountScope } from '../email-source/gmail-status-scope.ts';
+import { readGmailRetainedAccountScope } from '../email-source/gmail-status-scope.ts';
 import {
   TIER_DOMAIN_ORDER,
   onDemandTierStore,
@@ -563,7 +563,7 @@ import {
   storeServedByMeaning,
   sourceStoresCouldEmbed,
 } from './runtime/embedding-providers.ts';
-import { createStoreEmbeddingScopeFor, fileScopeCredentialHandle, registeredStoreReadScope } from './runtime/store-scope-policies.ts';
+import { createStoreScopes, fileScopeCredentialHandle, registeredStoreReadScope } from './runtime/store-scope-policies.ts';
 import { createWorkerSharedBuiltInModel,
   builtInModelWanted, createTierSnifferModel, stopBuiltInModelOnShutdown } from './runtime/judging-models.ts';
 import {
@@ -2921,7 +2921,7 @@ export async function main(): Promise<void> {
     if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready()) return { allowed: false };
     return registeredStoreReadScope(sourceId, fileSourceScopeAuthority);
   };
-  const embeddingScopeFor = createStoreEmbeddingScopeFor({
+  const { embeddingScopeFor, statusScopeFor } = createStoreScopes({
     sourceIdForStore, authority: fileSourceScopeAuthority, readScope: connectorStoreReadScope,
     gmailRetainedAccountScope, gmailLiveProcessorVerified,
   });
@@ -3104,34 +3104,8 @@ export async function main(): Promise<void> {
     }
   };
   for (const mount of configuredConnectorStoreMounts) adoptConfiguredPrincipal(mount);
-  const connectorStoreStatusScope = (store: LocalConnectorStore):
-    ConnectorStoreStatusScope | undefined => {
-    // Mail older than the approved window is kept as names only on purpose,
-    // so neither Gmail store counts it as owed reading (gmail-status-scope.ts).
-    if (store === gmailSecureConnectorStore) {
-      const handle = selectedSourceCredentialHandle({
-        env: process.env, pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
-        provider: 'gmail', capability: 'gmail.email.sync', handles: readActiveConnectedHandles(process.env),
-      });
-      return gmailPrivateStoreStatusScope({
-        authority: fileSourceScopeAuthority,
-        handle, provider: connectorStoreEmbeddingProviders.get(store.corpusId), gmailRetainedAccountScope,
-      });
-    }
-    if (store === gmailInternalConnectorStore) return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
-    const readScope = connectorStoreReadScope(store);
-    if (!readScope.allowed) return { itemsAllowed: false, contentAllowed: false };
-    if (readScope.contentAllowed && !readScope.filters && !readScope.contentFilters) return undefined;
-    return {
-      ...(readScope.filters?.sourceScopeRevision
-        ? { scopeRevision: readScope.filters.sourceScopeRevision }
-        : {}),
-      ...(readScope.accountScope ? { accountScope: readScope.accountScope } : {}),
-      ...(readScope.filters ? { itemFilters: readScope.filters } : {}),
-      contentAllowed: readScope.contentAllowed,
-      ...(readScope.contentFilters ? { contentFilters: readScope.contentFilters } : {}),
-    };
-  };
+  const connectorStoreStatusScope = (store: LocalConnectorStore): ConnectorStoreStatusScope =>
+    statusScopeFor(store, connectorStoreEmbeddingProviders.get(store.corpusId));
   // Policy truth is independent of credential readiness: a selected Venice
   // profile stays visible as the intended secure embedding lane even when its
   // secret is currently missing and the runtime provider is unavailable.
@@ -6900,6 +6874,17 @@ export async function main(): Promise<void> {
   let lastSecondRoundLog = '';
   const secondRoundConfirmed = secondRoundVenice ? new SecondRoundConfirmed(judgeSecondRoundConfirmedPath(process.env)) : undefined;
   const withSecondRound = (model: SnifferModel): SnifferModel => secondRoundVenice ? secondRoundJudge(model, secondRoundVenice, secondRoundCounts, secondRoundConfirmed, localDecisionBar) : model;
+  const tierMoveOptions = {
+    ...automaticMoveContext,
+    onPlacementChecked: (paths: ReadonlySet<string>) => { void overPrivate?.refresh(paths); },
+    // A sweep may have visited the destination while the item was held
+    // or moving. Wake its source once the new copy is visible.
+    onEmbeddingNeeded: (corpora: ReadonlySet<string>) => {
+      const sourceIds = new Set(sourceCorpusRegistry.list()
+        .filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
+      sourceScheduler?.wakeTasksOfKind('embed', undefined, sourceIds);
+    },
+  };
   // The front judges nothing: the background is the only judge.
   const tierSniffer = !engineFront && snifferLane && snifferModel
     ? new TierSnifferService({
@@ -6957,19 +6942,17 @@ export async function main(): Promise<void> {
         // for the sniffer by default, and a Personal verdict's queued move
         // runs at once while every embedding is the built-in local model.
         ...(snifferRuntime.source === 'built_in' ? { autoApproveBuiltIn: true } : {}),
-        autoMoves: {
-          ...automaticMoveContext,
-          onPlacementChecked: (paths) => { void overPrivate?.refresh(paths); },
-          // A sweep may have visited the destination while the item was held
-          // or moving. Wake its source once the new copy is visible.
-          onEmbeddingNeeded: (corpora) => {
-            const sourceIds = new Set(sourceCorpusRegistry.list()
-              .filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
-            sourceScheduler?.wakeTasksOfKind('embed', undefined, sourceIds);
-          },
-        },
+        autoMoves: tierMoveOptions,
       })
     : undefined;
+  const tierWork = engineFront ? undefined : tierSniffer ?? new TierSnifferService({
+    installed: installedTierClassification,
+    stores: () => connectorStores,
+    classificationLedgerPath: resolveClassificationLedgerPath(process.env),
+    intervalMs: snifferEnv.intervalMs,
+    autoMoves: tierMoveOptions,
+    log: (line) => console.log(line),
+  });
   if (tierSniffer && snifferResource) {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
@@ -7053,12 +7036,12 @@ export async function main(): Promise<void> {
     if (overPrivate) tierOverPrivate = () => overPrivate.status();
     archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   }
-  tierSniffer?.start();
+  tierWork?.start();
   // The split's background: its private command socket, then the status
   // snapshot, then ready. The front waits for ready before it serves.
   const currentMemoryActivity = () => engineRole === 'front'
     ? memoryActivity(false, false, engineFront?.backgroundActivity() ?? 'idle')
-    : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
+    : memoryActivity(tierWork?.passRunning ?? false, statusRecount?.health().counting ?? false);
   const memoryDiagnostic = createMemoryDiagnostic({
     role: engineRole, activity: currentMemoryActivity, readers: readPoolMemoryCounts,
     workerPayloads: modelWorkerMemoryPayloads,
@@ -7224,7 +7207,7 @@ export async function main(): Promise<void> {
     const rssRestart = startEngineRssRestart({
       memory: memoryDiagnostic,
       thresholdMb: olympusConfig.worker.engineSplitRssRestartMb,
-      batchRunning: () => (tierSniffer?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
+      batchRunning: () => (tierWork?.passRunning ?? false) || (sourceScheduler?.anyTaskRunning ?? false),
       restart: () => requestModelReload(),
       record: () => status.publish(),
       previous: engineRssRestartsFrom(readEngineStatusSnapshot(engineStatusSnapshotPath(process.env))),
@@ -7369,7 +7352,7 @@ export async function main(): Promise<void> {
     stopSupersededSweep();
     stopCpuSampleLog?.();
     stopCreditRecovery();
-    tierSniffer?.stop();
+    tierWork?.stop();
     localPacer.stop();
     archiveImportDashboard.close();
     installedTierClassification.close({ checkpoint: true });
