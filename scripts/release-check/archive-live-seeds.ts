@@ -8,6 +8,8 @@
  *
  * A source registers its hook here with `registerLiveSeedHook`, beside its fixture's `besideLive.seedHook` name.
  */
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import type { LocalConnectorStore } from '../../src/workers/connector-store/local-index.ts';
 import type { StoreView } from './archive-leg.ts';
 
 export interface LiveSeedContext {
@@ -42,4 +44,43 @@ export function liveSeedHook(name: string): LiveSeedHook {
   const hook = HOOKS.get(name);
   if (!hook) throw new Error(`no live seed hook "${name}" is registered (known: ${[...HOOKS.keys()].join(', ') || 'none'})`);
   return hook;
+}
+
+export async function seedSpoolRecords(options: {
+  path: string;
+  records: Array<{ id: string; line: string }>;
+  provider: string;
+  accountScope: string;
+  providerConversationId: string;
+  stores: () => Array<LocalConnectorStore | undefined>;
+  pull: () => Promise<unknown>;
+}): Promise<LiveSeedResult> {
+  const { records, path, provider, accountScope, providerConversationId } = options;
+  // Per record, how many stores hold it untombstoned: one is stored, more is a duplicate.
+  const holders = () => {
+    const stores = options.stores();
+    return records.map(({ id }) => stores.filter((store) =>
+      store?.storedItemState({ provider, accountScope, providerConversationId, providerItemId: id })?.tombstoned === false,
+    ).length);
+  };
+  const countStored = () => holders().filter((n) => n > 0).length;
+
+  const alreadyStored = countStored();
+  const spool = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const existing = new Set(spool.split(/\r?\n/u));
+  const missing = records.filter(({ line }) => !existing.has(line.trimEnd()));
+  if (missing.length) {
+    const separator = spool && !spool.endsWith('\n') ? '\n' : '';
+    appendFileSync(path, separator + missing.map(({ line }) => line).join(''), { mode: 0o600 });
+  }
+  await options.pull();
+  const after = holders();
+  const liveItems = after.filter((n) => n > 0).length;
+  const duplicated = after.filter((n) => n > 1).length;
+  return {
+    ok: liveItems === records.length && duplicated === 0,
+    liveItems,
+    detail: `${liveItems} of ${records.length} live record(s) stored (${alreadyStored} already stored by an earlier seed)`
+      + (duplicated ? `; ${duplicated} stored in more than one store` : ''),
+  };
 }

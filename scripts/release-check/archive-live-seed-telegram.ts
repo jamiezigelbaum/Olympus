@@ -3,7 +3,7 @@
  * registry entry naming the paired account, hashed as pairing hashes it) and a synthetic live input written the way the Telethon helper
  * writes its spool, then read by Telegram's own pull. Nothing writes the stores but that pull.
  */
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TELEGRAM_SOURCE_ID } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
@@ -17,7 +17,7 @@ import {
 import { telegramProviderAccountId } from '../../src/workers/telegram-messages/archive-target.ts';
 import { liveSpoolLine } from '../../test/support/telegram-spool-fixtures.ts';
 import { TELEGRAM_BESIDE_LIVE, TELEGRAM_SEEDED_USER_ID } from './archive-fixtures.ts';
-import { registerLiveSeedHook } from './archive-live-seeds.ts';
+import { registerLiveSeedHook, seedSpoolRecords } from './archive-live-seeds.ts';
 
 registerLiveSeedHook('telegram', {
   provider: 'telegram',
@@ -35,23 +35,29 @@ registerLiveSeedHook('telegram', {
     const spoolDir = defaultTelegramCaptureSpoolDir(env);
     mkdirSync(spoolDir, { recursive: true, mode: 0o700 });
     const chat = `-${TELEGRAM_BESIDE_LIVE.chatId}`;
-    const lines = TELEGRAM_BESIDE_LIVE.shared.map((message) => liveSpoolLine({
-      chat,
-      id: String(1000 + message.index),
-      text: message.text,
-      sentAt: `${message.day}T12:00:00Z`,
-      chatTitle: TELEGRAM_BESIDE_LIVE.chatName,
-      sender: { id: String(TELEGRAM_SEEDED_USER_ID), name: 'Sam Example' },
-    }));
-    appendFileSync(join(spoolDir, '2024-04-02.jsonl'), lines.join(''), { mode: 0o600 });
+    const records = TELEGRAM_BESIDE_LIVE.shared.map((message) => {
+      const id = String(1000 + message.index);
+      const line = liveSpoolLine({
+        chat,
+        id,
+        text: message.text,
+        sentAt: `${message.day}T12:00:00Z`,
+        chatTitle: TELEGRAM_BESIDE_LIVE.chatName,
+        sender: { id: String(TELEGRAM_SEEDED_USER_ID), name: 'Sam Example' },
+      });
+      return { id, line };
+    });
     const stores = createTelegramConnectorStores(env);
     try {
-      const receipt = await createTelegramConnectorStoreSyncHandler({ stores, spoolDir, env }).pull();
-      return {
-        ok: receipt.counts.items_indexed >= lines.length,
-        detail: `account ${TELEGRAM_PERSONAL_ACCOUNT_SCOPE} recorded; ${receipt.counts.items_indexed} of ${lines.length} live record(s) stored`,
-        liveItems: receipt.counts.items_indexed,
-      };
+      return await seedSpoolRecords({
+        path: join(spoolDir, '2024-04-02.jsonl'),
+        records,
+        provider: 'telegram',
+        accountScope: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
+        providerConversationId: chat,
+        stores: () => [stores.internal, stores.secureLocal],
+        pull: () => createTelegramConnectorStoreSyncHandler({ stores, spoolDir, env }).pull(),
+      });
     } finally {
       stores.internal.close();
       stores.secureLocal.close();

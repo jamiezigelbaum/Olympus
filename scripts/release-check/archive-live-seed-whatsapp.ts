@@ -5,18 +5,19 @@
  * times name in UTC, so the export's zone is found by matching (whatever zone the machine is set to).
  */
 import { fixtureText } from './fixture-judge.ts';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { WHATSAPP_SOURCE_ID } from '../../src/core/olympus-layout.ts';
 import { placeOwnedAccount } from '../../src/core/source-storage.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import {
+  WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
   createWhatsAppConnectorStore,
   createWhatsAppConnectorStoreSyncHandler,
   createWhatsAppTierLane,
   defaultWhatsAppSpoolDir,
 } from '../../src/workers/whatsapp/store-sync.ts';
-import { registerLiveSeedHook } from './archive-live-seeds.ts';
+import { registerLiveSeedHook, seedSpoolRecords } from './archive-live-seeds.ts';
 
 export const WHATSAPP_SEED_HOOK = 'whatsapp';
 /** The direct chat the export and the live spool share, and its people. Made up. */
@@ -30,9 +31,9 @@ export const WHATSAPP_BESIDE_SHARED: ReadonlyArray<readonly [string, string | un
   ['2024-04-14T12:05:00', undefined, fixtureText('Great, I will bring the map.')],
 ];
 
-function spoolLine(index: number, [at, sender, text]: readonly [string, string | undefined, string]): string {
+function spoolLine(id: string, [at, sender, text]: readonly [string, string | undefined, string]): string {
   return `${JSON.stringify({
-    id: `RCSEED${index}`,
+    id,
     chat_jid: CHAT_JID,
     chat_name: WHATSAPP_BESIDE_CHAT,
     sender_jid: sender === undefined ? '' : CHAT_JID,
@@ -55,14 +56,23 @@ registerLiveSeedHook(WHATSAPP_SEED_HOOK, {
     placeOwnedAccount({ sourceId: WHATSAPP_SOURCE_ID }, env);
     const spoolDir = defaultWhatsAppSpoolDir(env);
     mkdirSync(spoolDir, { recursive: true, mode: 0o700 });
-    writeFileSync(join(spoolDir, '2024-04-14.jsonl'), WHATSAPP_BESIDE_SHARED.map((message, index) => spoolLine(index, message)).join(''), { mode: 0o600 });
+    const records = WHATSAPP_BESIDE_SHARED.map((message, index) => {
+      const id = `RCSEED${index}`;
+      return { id, line: spoolLine(id, message) };
+    });
     // WhatsApp's own pull reads the spool into the account's stores.
     const store = createWhatsAppConnectorStore(env);
     const lane = createWhatsAppTierLane({ store, env });
     try {
-      const receipt = await createWhatsAppConnectorStoreSyncHandler({ store, spoolDir, env, tierSet: lane.set }).pull();
-      const liveItems = receipt.counts.items_seen;
-      return { ok: liveItems === WHATSAPP_BESIDE_SHARED.length, detail: `${liveItems} live message(s) pulled`, liveItems };
+      return await seedSpoolRecords({
+        path: join(spoolDir, '2024-04-14.jsonl'),
+        records,
+        provider: 'whatsapp',
+        accountScope: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
+        providerConversationId: CHAT_JID,
+        stores: () => [store, lane.set.store('internal')],
+        pull: () => createWhatsAppConnectorStoreSyncHandler({ store, spoolDir, env, tierSet: lane.set }).pull(),
+      });
     } finally {
       lane.newStores.internal?.current()?.close();
       store.close();
