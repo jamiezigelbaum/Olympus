@@ -74684,7 +74684,7 @@ var init_local_index = __esm(() => {
         stores: () => [this]
       };
     }
-    childrenWithWithheldSearchIdentifiers(identities, includePrivateNames) {
+    childrenWithWithheldSearchIdentifiers(identities, includePrivateNames, plans) {
       const links = this.parentLinksOf(identities);
       const withheld = new Set;
       const lookupKey = (parent) => ("parentLocalItemId" in parent) ? `local:${parentKey(parent)}` : `provider:${tierLedgerIdentityKey(parent)}`;
@@ -74718,10 +74718,23 @@ var init_local_index = __esm(() => {
           else
             encoded.push(parent);
         }
-        const rows = stores.flatMap((store) => [
-          ...store.parentStandings(linked).map((row) => ({ ...row, key: lookupKey(row) })),
-          ...Array.from(store.itemStandings(encoded).values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
-        ].filter((row) => row.active).map((row) => ({ ...row, corpusId: store.corpusId })));
+        const rows = stores.flatMap((store) => {
+          const plan = plans.get(store.corpusId);
+          if (!plan || plan.store !== store)
+            return [];
+          const active = [
+            ...store.parentStandings(linked).map((row) => ({ ...row, key: lookupKey(row) })),
+            ...Array.from(store.itemStandings(encoded).values(), (row) => ({ ...row, key: lookupKey(row.identity) }))
+          ].filter((row) => row.active);
+          const account = normalizeOptionalAccountScope(plan.scope.accountScope);
+          const predicate = connectorStoreFilterSql(plan.scope.filters);
+          const matches = predicate.sql ? new Set(plan.store.itemRowsForIdentities(active.map((row) => row.identity), (id) => normalizeConversationId(id.providerConversationId), predicate).map((row) => row.idx)) : undefined;
+          return active.map((row, index) => ({
+            ...row,
+            corpusId: store.corpusId,
+            inScope: (!account || row.accountScope === account) && (!matches || matches.has(index))
+          }));
+        });
         const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map((row) => ({
           ...row.identity,
           corpusId: row.corpusId,
@@ -74733,7 +74746,7 @@ var init_local_index = __esm(() => {
         rows.forEach((row, index) => {
           const key = row.key;
           const verdict = verdicts[index];
-          const canRelease = !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
+          const canRelease = row.inScope && !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
           const previous = allowed.get(key);
           if (!canRelease || previous && (previous.grandparentLocalItemId !== row.grandparentLocalItemId || tierLedgerIdentityKey(previous.identity) !== tierLedgerIdentityKey(row.identity))) {
             denied.add(key);
@@ -229823,7 +229836,13 @@ function createEmailSourceWorker(options = {}) {
               return;
             const readScopeSignature = JSON.stringify(mandatoryScope);
             const searchRequest = parseConnectorStoreIndexSearchRequestRecord({ ...record, corpus_id: store.corpusId }, store, connectorStoreAccountScopes.get(store.corpusId), store.family === "chat" ? connectorStorePrincipals.get(store.corpusId) : undefined, connectorStorePrincipals.get(store.corpusId), connectorStoreFilterCapabilities);
-            return { store, mandatoryScope, readScopeSignature, searchRequest };
+            const accountScope = mandatoryScope?.accountScope || searchRequest.accountScope;
+            const filters = normalizeConnectorStoreSearchFilters({ ...searchRequest.filters, ...mandatoryScope?.filters });
+            const scope = {
+              ...accountScope ? { accountScope } : {},
+              ...filters ? { filters } : {}
+            };
+            return { store, scope, readScopeSignature, searchRequest };
           };
           const plans = new Map;
           const planErrors = new Map;
@@ -229843,14 +229862,10 @@ function createEmailSourceWorker(options = {}) {
           };
           const parentAllowed = (candidate) => plans.get(candidate.corpusId)?.store === candidate;
           const prepare = (corpusId, ids) => withSearchVisibilityStores(parentAllowed, async () => {
-            const searchConnectorStore = async ({ store, mandatoryScope, readScopeSignature, searchRequest }) => {
+            const searchConnectorStore = async ({ store, scope, readScopeSignature, searchRequest }) => {
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
               const searchEmbeddingProvider = connectorStoreEmbeddingProvider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? connectorStoreEmbeddingProvider : undefined;
               const retrievalMode = searchRequest.retrievalMode ?? (searchEmbeddingProvider && store.vectorLaneServable(searchEmbeddingProvider.modelId) ? "hybrid" : "keyword");
-              const combinedFilters = searchRequest.filters || mandatoryScope?.filters ? normalizeConnectorStoreSearchFilters({
-                ...searchRequest.filters,
-                ...mandatoryScope?.filters
-              }) : undefined;
               const privateMatches = new Set;
               const adapter = createConnectorStoreCorpusAdapter({
                 store,
@@ -229869,8 +229884,7 @@ function createEmailSourceWorker(options = {}) {
                     });
                   }
                 } : {},
-                ...mandatoryScope?.allowed === true && mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {},
-                ...combinedFilters ? { filters: combinedFilters } : {},
+                ...scope,
                 ...searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {},
                 ...searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}
               });
@@ -229888,18 +229902,13 @@ function createEmailSourceWorker(options = {}) {
                   allowedCorpusIds: [store.corpusId]
                 }
               }));
-              const accountScope = mandatoryScope?.allowed === true && mandatoryScope.accountScope ? mandatoryScope.accountScope : searchRequest.accountScope;
               return {
                 store,
                 searchRequest,
                 result,
                 privateMatches,
                 readScopeSignature,
-                scope: {
-                  corpusId: store.corpusId,
-                  ...accountScope ? { accountScope } : {},
-                  ...combinedFilters ? { filters: combinedFilters } : {}
-                }
+                scope: { corpusId: store.corpusId, ...scope }
               };
             };
             const runs = [];
@@ -230003,7 +230012,7 @@ function createEmailSourceWorker(options = {}) {
                 if (governed.length === 0)
                   continue;
                 try {
-                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map((hit) => hit.sourceItem), !personalNamesOnly);
+                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map((hit) => hit.sourceItem), !personalNamesOnly, plans);
                   for (const hit of governed) {
                     if (children.has(tierLedgerIdentityKey(hit.sourceItem)))
                       withheldChildIdentifiers.add(hit);

@@ -14,7 +14,7 @@ import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
-import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { LocalConnectorStore, type ConnectorStoreSyncOptions } from '../src/workers/connector-store/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
@@ -78,11 +78,13 @@ async function store(
   trustDomain: SourceTrustDomain,
   fixtures: readonly Fixture[],
   tierLedger: TierLedger | null = null,
+  sourceScopeObservation?: ConnectorStoreSyncOptions['sourceScopeObservation'],
 ): Promise<LocalConnectorStore> {
   const opened = new LocalConnectorStore({ dbPath: ':memory:', corpusId, family: 'file', trustDomain, tierLedger });
   const tiers = new Map(fixtures.map((fixture) => [`${ACCOUNT}:${fixture.id}`, fixture.tier]));
   await opened.syncFromConnector(connector(fixtures), {
     fetchContent: true,
+    ...(sourceScopeObservation ? { sourceScopeObservation } : {}),
     ...(tierLedger ? { tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER } } : {}),
     placement: (item: RawItem) => buildSourceSensitivity({
       trustTier: tiers.get(item.identity.localItemId)!,
@@ -416,6 +418,51 @@ describe('source_index_search and rows Private by their own tier', () => {
         selected_item: { provider_item_id: childId },
       }]);
     } finally { internal.close(); }
+  });
+
+  test.each(['folder', 'account'] as const)('an unlinked child withholds its id when its encoded parent is outside the approved %s scope', async exclusion => {
+    const parentId = 'garden-plan';
+    const childId = `${parentId}#child:notes`;
+    const parent: Fixture = { id: parentId, name: 'plan', text: 'Garden layout', tier: 'S3' };
+    const child: Fixture = { id: childId, name: 'pruning notes', text: 'orchard', tier: 'S3' };
+    const internal = await store(INTERNAL, 'internal', exclusion === 'folder' ? [parent, child] : [child], null, item => ({
+      accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000001',
+      folderKeys: [item.identity.providerItemId === parentId ? 'plans' : 'notes'],
+    }));
+    // Encoded relatives share an identity account, but each store has its own account approval.
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const sibling = await store(SECURE, 'secure_local', exclusion === 'account' ? [parent] : [], ledger);
+    const stores = [internal, sibling];
+    const lane = { stores: () => stores, ledger: () => ledger };
+    for (const holder of stores) holder.useChildVisibility(lane);
+    let restricted = false;
+    try {
+      const worker = createEmailSourceWorker({
+        connectorStores: stores,
+        connectorStoreReadScope: holder => ({
+          allowed: true,
+          accountScope: restricted && exclusion === 'account' && holder === sibling ? 'other' : ACCOUNT,
+          filters: { sourceScopeFolderNoneKeys: restricted && exclusion === 'folder' ? ['plans'] : [] },
+        }),
+      });
+      const find = () => exclusion === 'folder'
+        ? search(worker, { query: 'orchard', corpus_id: INTERNAL })
+        : search(worker, { query: 'orchard', corpus_ids: [INTERNAL, SECURE] }).then(page => page.results[0]);
+      expect((await find()).hits[0].selected_item.provider_item_id).toBe(childId);
+      restricted = true;
+      const result = await find();
+      const sourceItem = { family: 'file', provider: 'fixture', accountScope: ACCOUNT };
+      expect(result.hits).toEqual([{
+        corpus_id: INTERNAL, sourceItem, score: expect.any(Number), rawExposed: false,
+        provenance: { sourceItem, citation: { sourceLabel: 'fixture', title: 'pruning notes' } },
+      }]);
+      expect(JSON.stringify(result)).not.toContain(parentId);
+      expect(result.audit).not.toHaveProperty('private_tier_withheld');
+    } finally {
+      internal.close();
+      sibling.close();
+      ledger.close();
+    }
   });
 
   test('a withheld top-ranked hit leaves room for the next eligible match', async () => {

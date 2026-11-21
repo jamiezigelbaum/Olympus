@@ -3617,7 +3617,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               connectorStorePrincipals.get(store.corpusId),
               connectorStoreFilterCapabilities,
             );
-            return { store, mandatoryScope, readScopeSignature, searchRequest };
+            const accountScope = mandatoryScope?.accountScope || searchRequest.accountScope;
+            const filters = normalizeConnectorStoreSearchFilters({ ...searchRequest.filters, ...mandatoryScope?.filters });
+            const scope = {
+              ...(accountScope ? { accountScope } : {}),
+              ...(filters ? { filters } : {}),
+            };
+            return { store, scope, readScopeSignature, searchRequest };
           };
           type SearchPlan = NonNullable<ReturnType<typeof planStore>>;
           const plans = new Map<string, SearchPlan>();
@@ -3636,7 +3642,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           };
           const parentAllowed = (candidate: ChildVisibilityStore) => plans.get(candidate.corpusId)?.store === candidate;
           const prepare = (corpusId: string, ids: readonly string[]) => withSearchVisibilityStores(parentAllowed, async () => {
-            const searchConnectorStore = async ({ store, mandatoryScope, readScopeSignature, searchRequest }: SearchPlan) => {
+            const searchConnectorStore = async ({ store, scope, readScopeSignature, searchRequest }: SearchPlan) => {
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId)
                 ?? sourceIndexEmbeddingProvider;
               const searchEmbeddingProvider = connectorStoreEmbeddingProvider
@@ -3653,12 +3659,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ?? (searchEmbeddingProvider && store.vectorLaneServable(searchEmbeddingProvider.modelId)
                   ? 'hybrid'
                   : 'keyword');
-              const combinedFilters = searchRequest.filters || mandatoryScope?.filters
-                ? normalizeConnectorStoreSearchFilters({
-                    ...searchRequest.filters,
-                    ...mandatoryScope?.filters,
-                  })
-                : undefined;
               const privateMatches = new Set<string>();
               const adapter = createConnectorStoreCorpusAdapter({
                 store,
@@ -3676,10 +3676,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                     });
                   },
                 } : {}),
-                ...(mandatoryScope?.allowed === true && mandatoryScope.accountScope
-                  ? { accountScope: mandatoryScope.accountScope }
-                  : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {}),
-                ...(combinedFilters ? { filters: combinedFilters } : {}),
+                ...scope,
                 ...(searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {}),
                 ...(searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}),
               });
@@ -3697,20 +3694,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   allowedCorpusIds: [store.corpusId],
                 },
               }));
-              const accountScope = mandatoryScope?.allowed === true && mandatoryScope.accountScope
-                ? mandatoryScope.accountScope
-                : searchRequest.accountScope;
               return {
                 store,
                 searchRequest,
                 result,
                 privateMatches,
                 readScopeSignature,
-                scope: {
-                  corpusId: store.corpusId,
-                  ...(accountScope ? { accountScope } : {}),
-                  ...(combinedFilters ? { filters: combinedFilters } : {}),
-                },
+                scope: { corpusId: store.corpusId, ...scope },
               };
             };
             const runs: Array<Awaited<ReturnType<typeof searchConnectorStore>>> = [];
@@ -3819,7 +3809,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 const governed = hits.filter(hit => hit.corpusId === store.corpusId);
                 if (governed.length === 0) continue;
                 try {
-                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map(hit => hit.sourceItem), !personalNamesOnly);
+                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map(hit => hit.sourceItem), !personalNamesOnly, plans);
                   for (const hit of governed) {
                     if (children.has(tierLedgerIdentityKey(hit.sourceItem))) withheldChildIdentifiers.add(hit);
                   }
