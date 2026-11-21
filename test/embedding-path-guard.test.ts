@@ -150,7 +150,7 @@ describe('embedding paths', () => {
           }), { fetchContent: true });
         }
         expect((await store.embedChunks({ provider, localItemIds: ['already-indexed'] })).chunksEmbedded).toBe(1);
-        const expected = approved ? 1 : mail ? (store.trustDomain === 'secure_local' ? 2 : 3) : 4;
+        const expected = approved ? 1 : mail ? 2 : 4;
         await expectStatusBacklog(store, provider, scopes, expected);
         if (approved) {
           sourceId = 'renamed.source';

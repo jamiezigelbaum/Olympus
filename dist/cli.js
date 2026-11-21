@@ -82607,7 +82607,7 @@ ${parentKey(ref)}`, { ref, origin });
       };
       const ownScope = Object.entries(scope ?? {}).filter(([key]) => key !== "embedding");
       const embeddingOnly = scope?.embedding !== undefined && ownScope.every(([, value]) => value === undefined);
-      const fileScoped = policyHolds.size > 0 || scope !== undefined && !embeddingOnly && !(scope.contentNotBefore !== undefined && ownScope.every(([key, value]) => key === "contentNotBefore" || value === undefined));
+      const fileScoped = policyHolds.size > 0 || scope !== undefined && scope.countFileSelection !== false && !embeddingOnly && !(scope.contentNotBefore !== undefined && ownScope.every(([key, value]) => key === "contentNotBefore" || value === undefined));
       const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
       const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
@@ -247850,28 +247850,21 @@ function gmailEmbeddingPopulation(input) {
   }
   if (!ref)
     return { accountScope, filters: GMAIL_IMPORTED_FILTERS };
-  if (!input.privateStore)
-    return { accountScope };
   const ids = gmailCursorConnectorIds(accountScope, { generation: ref.accountGeneration, revision: ref.revision });
   return { accountScope, filters: {
-    provider: "gmail",
+    ...GMAIL_IMPORTED_FILTERS,
     observedConnectorId: ids.connectorId,
-    previousObservedConnectorId: ids.previousId,
-    observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX
+    previousObservedConnectorId: ids.previousId
   } };
 }
-function gmailReadCountScope(domain, population, ref, authority) {
-  if (domain === "public_safe")
-    return {};
-  const contentAfter = ref && authority?.assertCurrentMail(ref).mailScope.contentAfter;
-  const window2 = contentAfter ? { contentNotBefore: contentAfter } : {};
-  if (domain !== "secure_local")
-    return window2;
+function gmailReadCountScope(population, ref, authority) {
   if (population.contentAllowed === false)
-    return { itemsAllowed: false, contentAllowed: false };
+    return { itemsAllowed: false, contentAllowed: false, countFileSelection: false };
+  const contentAfter = ref && authority?.assertCurrentMail(ref).mailScope.contentAfter;
   return {
-    ...window2,
+    countFileSelection: false,
     contentAllowed: true,
+    ...contentAfter ? { contentNotBefore: contentAfter } : {},
     ...population.accountScope ? { accountScope: population.accountScope } : {},
     ...population.contentFilters ? { itemFilters: population.contentFilters, contentFilters: population.contentFilters } : {},
     ...ref ? { scopeRevision: ref.revision } : {}
@@ -247879,7 +247872,7 @@ function gmailReadCountScope(domain, population, ref, authority) {
 }
 function gmailStoreEmbeddingScope(deps) {
   return (input) => {
-    const { store, scopeRef: ref, authority } = input;
+    const { scopeRef: ref, authority } = input;
     const account = deps.gmailRetainedAccountScope;
     const accountScope = account?.();
     if (!account || !accountScope)
@@ -247889,8 +247882,7 @@ function gmailStoreEmbeddingScope(deps) {
     const population = gmailEmbeddingPopulation({
       provider: input.provider,
       accountScope,
-      ref,
-      privateStore: store.trustDomain === "secure_local"
+      ref
     });
     return {
       ...population,
@@ -255951,7 +255943,7 @@ function createStoreScopes(input) {
       const read = input.readScope(store);
       const { scope, published, ref } = resolve(store, provider, () => read);
       const embedding = embeddingCountScope(store, provider, scope);
-      const counts = published ? published.readCounts(store.trustDomain, embedding, ref, input.authority) : readCountScope(read);
+      const counts = published ? published.readCounts(embedding, ref, input.authority) : readCountScope(read);
       return { ...counts, embedding };
     }
   };

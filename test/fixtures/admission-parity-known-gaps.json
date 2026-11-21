@@ -22,17 +22,6 @@
     "approved without a durable owner | manual_embed/content | serving=true shadow=false | account_unproven | accountScope, provider, locatorPathScopes, locatorPathExcludedScopes, sourceScopeGeneration, sourceScopeRevision",
     "approved without a durable owner | backlog/content | serving=true shadow=false | account_unproven | accountScope, provider, locatorPathScopes, locatorPathExcludedScopes, sourceScopeGeneration, sourceScopeRevision"
   ],
-  "internal.email": [
-    "no approval | count/names | serving=true shadow=true | imports_only | accountScope, provider, observedConnectorIdPrefix",
-    "no approval | count/content | serving=true shadow=true | imports_only | accountScope, provider, observedConnectorIdPrefix",
-    "approved scope | count/names | serving=true shadow=true | current_observation | accountScope, provider, observedConnectorId, previousObservedConnectorId, observedConnectorIdPrefix",
-    "approved scope | count/content | serving=true shadow=true | current_observation | accountScope, provider, observedConnectorId, previousObservedConnectorId, observedConnectorIdPrefix",
-    "approved scope | embed/content | serving=true shadow=true | current_observation | provider, observedConnectorId, previousObservedConnectorId, observedConnectorIdPrefix",
-    "approved scope | manual_embed/content | serving=true shadow=true | current_observation | provider, observedConnectorId, previousObservedConnectorId, observedConnectorIdPrefix",
-    "approved scope | backlog/content | serving=true shadow=true | current_observation | provider, observedConnectorId, previousObservedConnectorId, observedConnectorIdPrefix",
-    "revoked | count/names | serving=true shadow=true | imports_only | accountScope, provider, observedConnectorIdPrefix",
-    "revoked | count/content | serving=true shadow=true | imports_only | accountScope, provider, observedConnectorIdPrefix"
-  ],
   "internal.evernote.notes": [
     "approved without a durable owner | search/names | serving=true shadow=false | account_unproven | accountScope, provider, sourceScopeGeneration, sourceScopeFolderNoneKeys, metadataOnlySourceScopeFolderKeys, sourceScopeFolderAnyKeys",
     "approved without a durable owner | answer/names | serving=true shadow=false | account_unproven | accountScope, provider, sourceScopeGeneration, sourceScopeFolderNoneKeys, metadataOnlySourceScopeFolderKeys, sourceScopeFolderAnyKeys",
@@ -65,17 +54,6 @@
     "approved without a durable owner | embed/content | serving=true shadow=false | account_unproven | accountScope, provider, locatorPathScopes, locatorPathExcludedScopes, sourceScopeGeneration, sourceScopeRevision",
     "approved without a durable owner | manual_embed/content | serving=true shadow=false | account_unproven | accountScope, provider, locatorPathScopes, locatorPathExcludedScopes, sourceScopeGeneration, sourceScopeRevision",
     "approved without a durable owner | backlog/content | serving=true shadow=false | account_unproven | accountScope, provider, locatorPathScopes, locatorPathExcludedScopes, sourceScopeGeneration, sourceScopeRevision"
-  ],
-  "public_safe.email": [
-    "no approval | count/names | serving=true shadow=true | imports_only | accountScope, provider, observedConnectorIdPrefix",
-    "no approval | count/content | serving=true shadow=true | imports_only | accountScope, provider, observedConnectorIdPrefix",
-    "approved scope | count/names | serving=true shadow=true | current_observation | accountScope, provider, observedConnectorId, previousObservedConnectorId, observedConnectorIdPrefix",
-    "approved scope | count/content | serving=true shadow=true | current_observation | accountScope, contentAfter, provider, observedConnectorId, previousObservedConnectorId, observedConnectorIdPrefix",
-    "approved scope | embed/content | serving=true shadow=true | current_observation | provider, observedConnectorId, previousObservedConnectorId, observedConnectorIdPrefix",
-    "approved scope | manual_embed/content | serving=true shadow=true | current_observation | provider, observedConnectorId, previousObservedConnectorId, observedConnectorIdPrefix",
-    "approved scope | backlog/content | serving=true shadow=true | current_observation | provider, observedConnectorId, previousObservedConnectorId, observedConnectorIdPrefix",
-    "revoked | count/names | serving=true shadow=true | imports_only | accountScope, provider, observedConnectorIdPrefix",
-    "revoked | count/content | serving=true shadow=true | imports_only | accountScope, provider, observedConnectorIdPrefix"
   ],
   "secure_local.drive.docs": [
     "approved without a durable owner | search/names | serving=true shadow=false | account_unproven | accountScope, provider, sourceScopeGeneration, sourceScopeRevision, sourceScopeFolderNoneKeys, metadataOnlySourceScopeFolderKeys, sourceScopeFolderAnyKeys",
