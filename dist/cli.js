@@ -3199,7 +3199,7 @@ function assertCloudEmbeddingApproval(profile, approved) {
     throw new Error("Cloud embeddings require explicit corpus policy approval.");
   }
 }
-var SOURCE_FAMILIES, SOURCE_TRUST_TIERS, SOURCE_TRUST_DOMAINS;
+var DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS = 10, SOURCE_FAMILIES, SOURCE_TRUST_TIERS, SOURCE_TRUST_DOMAINS;
 var init_types = __esm(() => {
   SOURCE_FAMILIES = ["email", "file", "chat", "calendar", "note", "task", "readwise", "x"];
   SOURCE_TRUST_TIERS = ["S0", "S1", "S2", "S3", "S4", "S4+", "S5"];
@@ -151151,7 +151151,7 @@ class EmailClient {
       });
     return result;
   }
-  async requestSourceIndexSearch(body, searchCorpora) {
+  async requestSourceIndexSearch(body) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
@@ -151161,7 +151161,7 @@ class EmailClient {
     const data = asRecord15(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, tier_corpus_ids: searchCorpora.map((corpus) => corpus.corpusId) })
+      body: JSON.stringify(body)
     }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
@@ -151173,6 +151173,7 @@ class EmailClient {
     const data = await this.requestSourceIndexSearch({
       query: options.query,
       corpus_id: corpusId,
+      tier_corpus_ids: searchCorpora.map((corpus) => corpus.corpusId),
       ...audience === "private_answer" ? { include_private_names: true } : { personal_names_only: true },
       ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
       ...options.account ? { account: options.account } : {},
@@ -151194,34 +151195,45 @@ class EmailClient {
       ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
       ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
       ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
-    }, searchCorpora);
+    });
     return parseSourceIndexSearchResult(data, {
       searchCorpora,
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true
     });
   }
-  async sourceIndexSearchMany(corpusIds, options) {
-    if (!corpusIds.length)
-      throw new OperationError("invalid_params", "No source is configured for search.");
+  async sourceIndexSearchMany(options) {
     const searchCorpora = createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
+    if (!searchCorpora.length)
+      throw new OperationError("invalid_params", "No source is configured for search.");
     const response = await this.requestSourceIndexSearch({
       query: options.query,
-      corpus_ids: corpusIds,
+      corpus_ids: searchCorpora.map((corpus) => corpus.corpusId),
       personal_names_only: true,
       retrieval_mode: options.retrievalMode,
       max_results: options.maxResults,
       include_locators: options.includeLocators
-    }, searchCorpora);
-    if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
-      throw new OperationError("email_error", "The worker did not return a search result for each requested source.");
+    });
+    const slots = response.results;
+    if (!Array.isArray(slots) || slots.length !== searchCorpora.length) {
+      throw new OperationError("email_error", "The worker did not return a search result for each requested corpus.");
     }
-    return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord15(value), {
-      searchCorpora,
-      requestedCorpusId: corpusIds[index],
-      allowSiblingRepresentative: true,
-      includeLocators: options.includeLocators === true
-    })]);
+    const skipped = asRecord15(response.audit).skipped_corpora;
+    const missing = new Set(searchCorpora.filter((_, i) => slots[i] === null).map((corpus) => corpus.corpusId));
+    if (!Array.isArray(skipped) || !skipped.every((id) => missing.delete(id))) {
+      throw new OperationError("email_error", "The worker reported invalid skipped corpora.");
+    }
+    const results = slots.flatMap((value, index) => {
+      if (value === null)
+        return [];
+      const corpus = searchCorpora[index];
+      return [parseSourceIndexSearchResult(asRecord15(value), {
+        searchCorpora: [corpus],
+        requestedCorpusId: corpus.corpusId,
+        includeLocators: options.includeLocators === true
+      })];
+    });
+    return { results, skipped, failed: missing.size };
   }
   async sourceWatchCreate(options) {
     this.requireSourceWatchSurface();
@@ -151713,10 +151725,7 @@ function parseSourceIndexSearchResult(value, context) {
   const corpusId = value.corpus_id;
   const corpus = context.searchCorpora.find((entry) => entry.corpusId === corpusId);
   if (corpusId !== context.requestedCorpusId) {
-    const requested = context.searchCorpora.find((entry) => entry.corpusId === context.requestedCorpusId);
-    if (!context.allowSiblingRepresentative || !requested || requested.sourceId !== corpus?.sourceId) {
-      throw new OperationError("email_error", "source index search returned a different corpus than requested.");
-    }
+    throw new OperationError("email_error", "source index search returned a different corpus than requested.");
   }
   if (!corpus) {
     throw new OperationError("email_error", "source index search returned an unsupported corpus.");
@@ -167953,20 +167962,13 @@ async function searchEverySource(ctx, query, params) {
   const retrievalMode = optionalRetrievalMode2(params.retrieval_mode);
   const maxResults = optionalNumber4(params.max_results, "max_results");
   const includeLocators = optionalBoolean2(params.include_locators, "include_locators");
-  const bySource = new Map;
-  for (const corpus of publicSourceCorpusRegistry(ctx.config).list("search")) {
-    if (!bySource.has(corpus.sourceId))
-      bySource.set(corpus.sourceId, corpus.corpusId);
-  }
-  const results = await ctx.email.sourceIndexSearchMany([...bySource.values()], {
+  const { results, skipped, failed } = await ctx.email.sourceIndexSearchMany({
     query,
     ...retrievalMode !== undefined ? { retrievalMode } : {},
     ...maxResults !== undefined ? { maxResults } : {},
     ...includeLocators !== undefined ? { includeLocators } : {}
   });
-  if (!results.length)
-    throw new OperationError("email_error", "No source could be searched this time.");
-  const limit = maxResults ?? Math.max(...results.map((result) => result.hits.length), 0);
+  const limit = maxResults ?? DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS;
   const hits = [];
   for (let rank = 0;hits.length < limit && results.some((result) => result.hits.length > rank); rank += 1) {
     for (const result of results)
@@ -167974,30 +167976,32 @@ async function searchEverySource(ctx, query, params) {
         hits.push(result.hits[rank]);
   }
   const domains = results.map((result) => result.policy.trust_domain);
-  const secretLocations = results.flatMap((result) => result.secret_locations ?? []);
   const notes = [...new Set(results.flatMap((result) => result.coverage_notes ?? []))];
-  const unsearched = bySource.size - results.length;
+  if (failed)
+    notes.push(`${failed} ${failed === 1 ? "corpus was" : "corpora were"} not searched this time.`);
   return {
     kind: "source_index_search",
-    corpus_id: results[0].corpus_id,
+    ...results.length ? { corpus_id: results[0].corpus_id } : {},
     corpus_ids: results.map((result) => result.corpus_id),
     retrieval_source: "local_index",
     hits,
-    ...secretLocations.length > 0 ? { secret_locations: secretLocations } : {},
-    ...notes.length > 0 || unsearched > 0 ? { coverage_notes: [...notes, ...unsearched > 0 ? [`${unsearched} source${unsearched === 1 ? " was" : "s were"} not searched this time.`] : []] } : {},
+    ...notes.length ? { coverage_notes: notes } : {},
     audit: {
       request_id: "all-sources:connector-store-search",
       retrieval_source: "local_index",
       queries_attempted: results.reduce((total, result) => total + result.audit.queries_attempted, 0),
-      searched_corpora: results.flatMap((result) => result.audit.searched_corpora ?? [result.corpus_id]),
+      searched_corpora: results.map((result) => result.corpus_id),
+      skipped_corpora: skipped,
       metadata_hits: hits.length,
       items_returned: hits.length,
-      latency_ms: Math.max(...results.map((result) => result.audit.latency_ms)),
+      latency_ms: Math.max(0, ...results.map((result) => result.audit.latency_ms)),
       raw_source_exposed: false,
       source_text_returned: false
     },
     policy: {
-      ...results[0].policy,
+      raw_source_exposed: false,
+      source_text_returned: false,
+      source_packets_exposed: false,
       local_only: results.some((result) => result.policy.local_only),
       trust_domain: domains.includes("secure_local") ? "secure_local" : domains.includes("internal") ? "internal" : "public_safe",
       ...results.some((result) => result.policy.locators_exposed) ? { locators_exposed: true, locator_release: "explicit_request" } : {}
@@ -168180,6 +168184,7 @@ var init_operations = __esm(() => {
   init_config2();
   init_config2();
   init_operation_error();
+  init_types();
   init_selected_items();
   init_source_corpus_registry();
   init_venice_models();
@@ -221064,7 +221069,7 @@ function parseConnectorStoreIndexSearchRequestRecord(record, store, defaultAccou
   }
   return {
     query: record.query,
-    maxResults: maxResults ?? 10,
+    maxResults: maxResults ?? DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS,
     ...retrievalMode !== undefined ? { retrievalMode } : {},
     ...accountScope ? { accountScope } : {},
     ...chatScopeResolution?.kind === "title" && !chatScopeResolution.resolved ? { explicitEmptyChatScope: true } : {},
@@ -221107,6 +221112,7 @@ function asOptionalExactNarrowingString(record, key) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES;
 var init_connector_store_search_request = __esm(() => {
+  init_types();
   init_x_bookmarks();
   init_approved_scope_filter2();
   init_locator_result_projector2();
@@ -229786,22 +229792,7 @@ function createEmailSourceWorker(options = {}) {
             throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names is only available for a single Private search.");
           }
           const personalNamesOnly = record.include_private_names !== true;
-          const prepare = async (record) => {
-            const corpusId = canonicalRequestCorpusId(record);
-            if (!corpusId) {
-              throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
-            }
-            const connectorStore = connectorStoresByCorpusId.get(corpusId);
-            const siblingIds = record.all_tiers === false || record.trust_domain !== undefined ? [] : options.connectorStoreTierSiblings?.(corpusId) ?? [];
-            const searchableIds = [...new Set([corpusId, ...siblingIds])].filter(canSearch);
-            if (!searchableIds.length) {
-              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This corpus is not enabled for search.");
-            }
-            if (canSearch(corpusId) && !connectorStore)
-              throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
-            if (!personalNamesOnly && connectorStore?.trustDomain !== "secure_local") {
-              throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names requires a Private corpus.");
-            }
+          const prepare = async (corpusId, ids, mounted = connectorStoresByCorpusId) => {
             const searchConnectorStore = async (store) => {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false)
@@ -229867,14 +229858,14 @@ function createEmailSourceWorker(options = {}) {
               };
             };
             const runs = [];
-            for (const id of searchableIds) {
-              const store = connectorStoresByCorpusId.get(id);
+            for (const id of ids) {
+              const store = mounted.get(id);
               if (!store)
                 continue;
               const run = await searchConnectorStore(store);
               if (run)
                 runs.push(run);
-              else if (id === corpusId)
+              else if (store.corpusId === corpusId)
                 break;
             }
             const primary = runs[0];
@@ -229993,7 +229984,7 @@ function createEmailSourceWorker(options = {}) {
               const locatorsExposed = releasedHits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
               const safeResult = {
                 kind: "source_index_search",
-                corpus_id: corpusIds === undefined ? corpusId : primary.store.corpusId,
+                corpus_id: corpusId,
                 retrieval_source: "local_index",
                 hits: releasedHits,
                 ...secretLocations.length > 0 ? {
@@ -230036,17 +230027,42 @@ function createEmailSourceWorker(options = {}) {
               return safeResult;
             };
           };
-          if (corpusIds === undefined)
-            return json((await prepare(record))());
+          if (corpusIds === undefined) {
+            const corpusId = canonicalRequestCorpusId(record);
+            if (!corpusId) {
+              throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
+            }
+            const connectorStore = connectorStoresByCorpusId.get(corpusId);
+            const siblingIds = record.all_tiers === false || record.trust_domain !== undefined ? [] : options.connectorStoreTierSiblings?.(corpusId) ?? [];
+            const searchableIds = [...new Set([corpusId, ...siblingIds])].filter(canSearch);
+            if (!searchableIds.length) {
+              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This corpus is not enabled for search.");
+            }
+            if (canSearch(corpusId) && !connectorStore)
+              throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
+            if (!personalNamesOnly && connectorStore?.trustDomain !== "secure_local") {
+              throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names requires a Private corpus.");
+            }
+            return json((await prepare(corpusId, searchableIds))());
+          }
           if (record.corpus_id !== undefined || !Array.isArray(corpusIds) || !corpusIds.length || !corpusIds.every((id) => typeof id === "string" && id.trim()) || new Set(corpusIds).size !== corpusIds.length) {
             throw new EmailSourceWorkerError(400, "invalid_request", "Supply distinct corpus_ids for a multi-source search.");
           }
-          const prepared = await Promise.allSettled(corpusIds.map((corpus_id) => prepare({ ...record, corpus_id })));
+          const eligible = new Set(corpusIds.filter(canSearch));
+          options.refreshConnectorStores?.(eligible);
+          const mounted = new Map(connectorStores.map((store) => [store.corpusId, store]));
+          const skipped = [];
+          const prepared = await Promise.allSettled(corpusIds.map((id) => {
+            if (eligible.has(id) && mounted.has(id))
+              return prepare(id, [id], mounted);
+            skipped.push(id);
+            return null;
+          }));
           let firstFailure;
           const results = prepared.map((outcome) => {
             if (outcome.status === "rejected") {
               firstFailure ??= outcome.reason;
-            } else {
+            } else if (outcome.value) {
               try {
                 return outcome.value();
               } catch (error) {
@@ -230055,9 +230071,9 @@ function createEmailSourceWorker(options = {}) {
             }
             return null;
           });
-          if (results.every((result) => result === null))
+          if (skipped.length < corpusIds.length && results.every((result) => result === null))
             throw firstFailure;
-          return json({ results });
+          return json({ results, audit: { skipped_corpora: skipped } });
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/embed`) {
           const record = await parseObjectBody(request);
@@ -283202,7 +283218,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     } : {},
     connectorStores,
-    refreshConnectorStores: () => mountConfiguredSourceStores(),
+    refreshConnectorStores: mountConfiguredSourceStores,
     revokeSourceReads,
     searchableCorpusIds: new Set(sourceCorpusRegistry.ids("search")),
     connectorStoreTierSiblings: (corpusId) => [
