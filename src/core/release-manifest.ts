@@ -88,7 +88,7 @@ export interface ReleaseManifest {
 export interface ReleaseInputVerdict {
   tier: 'legacy' | 'public_or_personal' | 'private' | 'secret' | 'unknown';
   gone: boolean;
-  /** This input includes text protected by a Private decision before its first routed placement. */
+  /** Private text still awaits placement or removal from its Personal move source. */
   unroutedPrivate?: true;
   /** A committed deletion intent withholds the whole answer while removal settles. */
   pendingDeletion?: boolean;

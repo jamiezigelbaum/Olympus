@@ -5,6 +5,7 @@
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import { classifyItemTiers, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
 import {
@@ -47,6 +48,28 @@ describe('tier ledger', () => {
     expect(again.record.decidedAt).toBe(first.record.decidedAt);
     expect(store.history(ITEM)).toHaveLength(1);
     store.close();
+  });
+
+  test('the first protected page uses the index from ledger open while another writer holds the ledger', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-ledger-page-'));
+    const dbPath = join(dir, 'ledger.sqlite');
+    const seed = new TierLedger({ dbPath });
+    for (const id of ['a', 'b']) seed.recordDecision({ ...ITEM, providerItemId: id }, decision({ contentTier: 'secure' }));
+    seed.close();
+    const writer = new Database(dbPath);
+    try {
+      // A populated ledger from before the recorded pass had this index.
+      writer.exec('DROP INDEX IF EXISTS tier_items_legacy_protected');
+      const store = new TierLedger({ dbPath });
+      try {
+        writer.transaction(() => {
+          const page = store.readSteps(store.legacyProtectedRowsSteps(undefined, 1));
+          expect(page.map(row => row.providerItemId)).toEqual(['a']);
+          writer.query("INSERT INTO tier_ledger_meta (key,value) VALUES ('writer','ok')").run();
+        }).immediate();
+        expect(store.readMeta('writer')).toBe('ok');
+      } finally { store.close(); }
+    } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 
   test('a changed tier bumps the generation and keeps the previous tiers', () => {

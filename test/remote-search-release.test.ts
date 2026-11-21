@@ -13,13 +13,15 @@ import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { forbidWritableStoreOpens, resetStoreWriteGuardForTests } from '../src/core/store-write-guard.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
+import { remoteOperationOutputOffThread } from '../src/core/remote-result.ts';
+import { placePersonalBody } from '../src/workers/connector-store/place-personal-body.ts';
 import type { ReleaseCheck } from '../src/core/release-manifest.ts';
 import { classifyItemTiers, contentDigestReason, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
-import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { moveTieredItem, resumeVerifiedTierMove } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
@@ -173,6 +175,52 @@ async function legacyRemoteLane(legacy: 'set' | 'sidecar') {
   }));
   return { remoteTool, workerAnswer, question, ctx, apps, modelCalls: () => modelCalls };
 }
+
+test('remote search and delayed answers withhold a queued legacy Private move until the body leaves Personal', async () => {
+  const { fixture, lanes, releaseCheck } = await gardenLane(JUDGED_PERSONAL_SNIFFER, 'set');
+  const identity = identityOf('garden');
+  const personal = fixture.stores.internal!;
+  const input = { ...identity, corpusId: personal.corpusId, privateAtAnswer: false };
+  const collected = () => remoteOperationOutputOffThread('source_answer_result', {
+    answer: SENTENCE, evidence: [{ corpus_id: personal.corpusId, provider: identity.provider, provider_item_id: identity.providerItemId }],
+  }, { releaseCheck, releaseManifests: [{ inputs: [input], constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } }] });
+  expect(placePersonalBody(fixture.set, personal, { identity, text: SENTENCE }, undefined, 'walk',
+    { recordedOnly: true, movesAvailable: true })).toBe('settled');
+  expect(fixture.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', routed: true });
+  expect(personal.exportItemCopy(identity)?.chunks[0]?.boundedText).toBe(SENTENCE);
+  const search = await searchReleasedEvidence({ lanes, question: 'violet turnips', releaseCheck });
+  expect(search.evidence).toEqual([]);
+  const delayed = await collected();
+  expect(delayed).toMatchObject({ status: 'withheld', citations: [] });
+  expect(JSON.stringify(delayed)).not.toContain(SENTENCE);
+
+  await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'private', contentTier: 'secure' } });
+  expect(personal.exportItemCopy(identity)?.chunks ?? []).toEqual([]);
+  expect((await collected()).status).toBe('answered');
+});
+
+test('a mixed recorded move withholds its body through an interrupted Personal purge', async () => {
+  const { fixture, releaseCheck } = await gardenLane(JUDGED_PERSONAL_SNIFFER, 'set');
+  const personal = fixture.stores.internal!;
+  const identity = identityOf('garden');
+  const decision = classifyItemTiers({ signals: {}, text: SENTENCE }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  const target = { metadataTier: 'public', contentTier: 'secure' } as const;
+  fixture.ledger.recordDecision(identity, { ...decision, ...target });
+  expect(placePersonalBody(fixture.set, personal, { identity, text: SENTENCE }, undefined, 'walk',
+    { recordedOnly: true, movesAvailable: true })).toBe('settled');
+  const strip = personal.stripCopyContent;
+  personal.stripCopyContent = () => { throw new Error('interrupted Personal purge'); };
+  try {
+    await expect(moveTieredItem({ set: fixture.set, identity, target })).rejects.toThrow('interrupted Personal purge');
+  } finally { personal.stripCopyContent = strip; }
+  expect(fixture.ledger.getCurrent(identity)?.state).toBe('current');
+  expect(personal.exportItemCopy(identity)?.chunks[0]?.boundedText).toBe(SENTENCE);
+  const read = () => releaseCheck.inputsOffThread!([{ ...identity, corpusId: personal.corpusId, privateAtAnswer: false }]);
+  expect((await read())[0]?.unroutedPrivate).toBe(true);
+  expect(resumeVerifiedTierMove(fixture.set, identity)).toBe(true);
+  expect(personal.exportItemCopy(identity)?.chunks ?? []).toEqual([]);
+  expect((await read())[0]?.unroutedPrivate).toBeUndefined();
+});
 
 test.each(['set', 'sidecar'] as const)('remote search withholds an unrouted Private body (%s ledger)', async legacy => {
   const { remoteTool, question, ctx, apps } = await legacyRemoteLane(legacy);

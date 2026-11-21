@@ -43241,6 +43241,8 @@ class TierLedger {
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations().filter((migration) => restoredVersion === undefined || migration.version <= restoredVersion));
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
+      db.exec(`CREATE INDEX IF NOT EXISTS ${LEGACY_PROTECTED_INDEX}
+        ON tier_items (${LEGACY_PROTECTED_KEYS}) WHERE ${LEGACY_PROTECTED_ROWS}`);
       if (onDisk)
         restrictLedgerFiles(this.dbPath);
     } catch (error) {
@@ -43593,48 +43595,6 @@ class TierLedger {
   }
   movingDirectionClause(direction) {
     return tierMovingDirectionClause(direction);
-  }
-  legacyProtectedIndexReady = false;
-  async prepareLegacyProtectedIndex() {
-    if (this.legacyProtectedIndexReady)
-      return;
-    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(LEGACY_PROTECTED_INDEX)) {
-      assertWritableStoreOpenAllowed("legacy placement index", this.dbPath);
-      const sql = `CREATE INDEX IF NOT EXISTS ${LEGACY_PROTECTED_INDEX} ON tier_items (${LEGACY_PROTECTED_KEYS}) WHERE ${LEGACY_PROTECTED_ROWS}`;
-      if (this.dbPath === ":memory:")
-        this.db.exec(sql);
-      else {
-        const source = `import { Database } from 'bun:sqlite';
-          self.onmessage = ({ data: path }) => {
-            const db = new Database(path, { readwrite: true, create: false });
-            try {
-              // A busy writer gets this turn. The next scheduled pass retries.
-              db.exec('PRAGMA busy_timeout = 0;');
-              db.exec(${JSON.stringify(sql)});
-            } finally { db.close(); }
-            postMessage(true);
-          };`;
-        const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
-        try {
-          const worker = new Worker(url);
-          try {
-            await new Promise((resolve, reject) => {
-              worker.onmessage = () => resolve();
-              worker.onerror = (event) => {
-                event.preventDefault();
-                reject(new Error(event.message));
-              };
-              worker.postMessage(this.dbPath);
-            });
-          } finally {
-            worker.terminate();
-          }
-        } finally {
-          URL.revokeObjectURL(url);
-        }
-      }
-    }
-    this.legacyProtectedIndexReady = true;
   }
   *legacyProtectedRowsSteps(after, limit) {
     const rows = yield {
@@ -45018,14 +44978,23 @@ class TierLedger {
       for (const row of rows)
         result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
       const copies = yield {
-        sql: `SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        sql: `SELECT c.*, CASE WHEN trust_domain = 'internal' AND (copy_state = 'superseded' OR layers = 'metadata')
+          THEN (SELECT json_array_length(value, '$.raisePurge') FROM tier_ledger_meta
+            WHERE key = 'tier-move-verified:' || c.provider || char(0) || c.account_scope || char(0)
+              || c.conversation_key || char(0) || c.provider_item_id AND value <> '') END AS pending_raise_purge
+          FROM tier_copies c WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
           ORDER BY corpus_id`,
         params,
         mode: "all"
       };
-      for (const row of copies)
-        result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+      for (const row of copies) {
+        const state = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+        if (state) {
+          state.copies.push(copyFromRow(row));
+          if (row.pending_raise_purge)
+            state.pendingRaisePurge = true;
+        }
+      }
       const overrides = yield {
         sql: `SELECT provider, account_scope, conversation_key, provider_item_id, override_json FROM tier_overrides
           WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
@@ -67046,10 +67015,12 @@ function releaseVerdict(input, state = { copies: [] }) {
     tiers.push(override.tier);
   const privateTier = tiers.includes("secure");
   const held = namesOnly ? itemNamesHeldForJudgment(record, copies, input.corpusId) : record.metadataPending || contentHeldForJudgment(record);
+  const movingPersonalBody = record.state === "moving" && copies.some((copy) => copy.trustDomain === "internal" && copy.layers !== "metadata" && copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1);
+  const unroutedPrivate = state.pendingRaisePurge || !record.routed && record.contentRead && privateTier || movingPersonalBody && (privateTier || held);
   return {
     tier: tiers.includes("secrets") ? "secret" : held || privateTier ? "private" : "public_or_personal",
     gone: pendingDeletion || record.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata")),
-    ...!namesOnly && !record.routed && record.contentRead && privateTier ? { unroutedPrivate: true } : {},
+    ...!namesOnly && unroutedPrivate ? { unroutedPrivate: true } : {},
     ...pendingDeletion ? { pendingDeletion: true } : {}
   };
 }
@@ -153022,7 +152993,7 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   if (walk?.recordedOnly && !recorded.length)
     return "unchanged";
   if (recorded.length && ledger.writeIntent(identity))
-    return "unchanged";
+    return "retry";
   const readOverride = (source) => movesAvailable ? source.observeOverrideText(identity) : source.getOverride(identity);
   const override = readOverride(ledger);
   const previousOverride = !override && !current?.routed && previousLedger ? readOverride(previousLedger) : undefined;
@@ -153072,7 +153043,7 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
     return "settled";
   }
   if (effectiveOverride?.kind !== "not_secret" && (effectiveOverride?.tier === "secrets" || [current, current?.routed ? undefined : previous].some((record) => record && !(mode === "walk" && protectedUnroutedReceipt(record)) && (secretDecision(record) || record.targetMetadataTier === "secrets" || record.targetContentTier === "secrets")))) {
-    if (!movesAvailable)
+    if (!movesAvailable && !recorded.length)
       return "waiting";
     const record = set.adoptLegacyItem(identity);
     const { copies: hidden } = ledger.flipToSecrets(identity, {
@@ -153111,7 +153082,14 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   const currentAllowsPersonal = !current || current.state !== "moving" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public");
   if (recorded.length === 0 && currentAllowsPersonal && ownerTier !== "secure" && [current, previous].some((record) => record && exactPersonalReceipt(record, text, effectiveOverride, image)))
     return "unchanged";
-  if (!movesAvailable)
+  if (current && recorded.length && ownerTier !== "secure" && ownerTier !== "secrets" && recorded.every((record) => contentReceiptRefusal(record.reasons, digest) === "content_receipt_mismatch") && exactPersonalReceipt(current, text, effectiveOverride, image) && !conflictingPhysicalBody()) {
+    return ledger.withMoveBatch(() => {
+      if (!authorityUnchanged() || ledger.writeIntent(identity) || previousLedger?.writeIntent(identity))
+        return "retry";
+      return set.adoptLegacyItem(identity)?.routed ? "settled" : "retry";
+    });
+  }
+  if (!movesAvailable && !recorded.length)
     return "waiting";
   const conflict = () => ledger.copies(identity).some((other) => {
     if (other.corpusId === personal.corpusId || other.state !== "current" || mode === "restore" && (other.trustDomain !== "secure_local" || other.layers === "metadata"))
@@ -249873,9 +249851,6 @@ function* walkRecorded(options, personal, saved, report) {
   for (const source of cursor.previous ? [previousLedger] : [ledger, previousLedger]) {
     if (!source)
       continue;
-    yield* find({ here: () => {
-      return;
-    }, offThread: () => source.prepareLegacyProtectedIndex() });
     const pageSize = limit - checked;
     const rows = yield* findInLedger(source, () => source.legacyProtectedRowsSteps(cursor.after, pageSize));
     for (const identity of rows) {
@@ -249897,11 +249872,8 @@ function* walkRecorded(options, personal, saved, report) {
         }, marker, movesAvailable, report);
         if (outcome === "interrupted")
           return true;
-        if (outcome === "changed" || outcome === "retry")
+        if (outcome === "changed" || outcome === "retry" || outcome === "waiting")
           cursor.retry = true;
-        if (outcome === "waiting") {
-          ledger.writeSettleProgress(DONE3, "");
-        }
         remaining -= item.chunkCount;
       }
       cursor.after = identity;
@@ -249954,7 +249926,7 @@ function* processBody(set, personal, item, queue, placement, marker, movesAvaila
     return "retry";
   }
 }
-var RECORDED_PROGRESS = "legacy_personal_recorded_decisions_v1", DONE3 = "legacy_personal_bodies_done_v2", LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
+var RECORDED_PROGRESS = "legacy_personal_recorded_decisions_v2", DONE3 = "legacy_personal_bodies_done_v2", LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
 var init_legacy_personal_bodies = __esm(() => {
   init_tier_ledger();
   init_engine();

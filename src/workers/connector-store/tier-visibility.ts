@@ -277,11 +277,16 @@ function releaseVerdict(input: ReleaseInput, state: TierLedgerItemState = { copi
   const privateTier = tiers.includes('secure');
   const held = namesOnly ? itemNamesHeldForJudgment(record, copies, input.corpusId)
     : record.metadataPending || contentHeldForJudgment(record);
+  // Adoption records the source copy before the mover has purged its Personal text.
+  const movingPersonalBody = record.state === 'moving' && copies.some(copy => copy.trustDomain === 'internal'
+    && copy.layers !== 'metadata' && copy.state === 'superseded' && copy.supersededByGeneration === record.generation + 1);
+  const unroutedPrivate = state.pendingRaisePurge || (!record.routed && record.contentRead && privateTier)
+    || (movingPersonalBody && (privateTier || held));
   return {
     tier: tiers.includes('secrets') ? 'secret' : held || privateTier ? 'private' : 'public_or_personal',
     gone: pendingDeletion || (record.routed && !copies.some(copy => copy.state === 'current'
       && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata'))),
-    ...(!namesOnly && !record.routed && record.contentRead && privateTier ? { unroutedPrivate: true } : {}),
+    ...(!namesOnly && unroutedPrivate ? { unroutedPrivate: true } : {}),
     ...(pendingDeletion ? { pendingDeletion: true } : {}),
   };
 }

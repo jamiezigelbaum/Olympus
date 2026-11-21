@@ -9,7 +9,8 @@ import { PERSONAL_BODY_CHUNKS_PER_PAGE, type LocalConnectorStore, type PersonalB
 import { placePersonalBody } from './place-personal-body.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
-const RECORDED_PROGRESS = 'legacy_personal_recorded_decisions_v1';
+// The first version could advance past changed bytes while cloud embeddings were configured.
+const RECORDED_PROGRESS = 'legacy_personal_recorded_decisions_v2';
 // Earlier passes could retire after skipping retained metadata-layer bodies.
 const DONE = 'legacy_personal_bodies_done_v2';
 // Match the default raise-drain page. Each candidate carries its complete text.
@@ -113,7 +114,6 @@ function* walkRecorded(options: Required<Omit<WalkOptions, 'turn'>>, personal: L
   let checked = 0;
   for (const source of cursor.previous ? [previousLedger] : [ledger, previousLedger]) {
     if (!source) continue;
-    yield* find({ here: () => undefined, offThread: () => source.prepareLegacyProtectedIndex() });
     const pageSize = limit - checked;
     const rows = yield* findInLedger(source, () => source.legacyProtectedRowsSteps(cursor.after, pageSize));
     for (const identity of rows) {
@@ -131,12 +131,7 @@ function* walkRecorded(options: Required<Omit<WalkOptions, 'turn'>>, personal: L
           ...(previousLedger ? { previousLedger } : {}), movesAvailable: canMove, recordedOnly: true,
         }, marker, movesAvailable, report);
         if (outcome === 'interrupted') return true;
-        if (outcome === 'changed' || outcome === 'retry') cursor.retry = true;
-        if (outcome === 'waiting') {
-          // Hand changed bytes to the ordinary lap when moves become available,
-          // even when an earlier version had retired it.
-          ledger.writeSettleProgress(DONE, '');
-        }
+        if (outcome === 'changed' || outcome === 'retry' || outcome === 'waiting') cursor.retry = true;
         remaining -= item.chunkCount;
       }
       cursor.after = identity;

@@ -32,7 +32,7 @@ export function placePersonalBody(set: TieredStoreSet, personal: LocalConnectorS
   const recorded = mode === 'walk' && !current?.routed
     ? [current, previous].filter((record): record is TierLedgerRecord => protectedUnroutedReceipt(record)) : [];
   if (walk?.recordedOnly && !recorded.length) return 'unchanged';
-  if (recorded.length && ledger.writeIntent(identity)) return 'unchanged';
+  if (recorded.length && ledger.writeIntent(identity)) return 'retry';
   // Stored text cannot supply the original digest of a legacy override.
   const readOverride = (source: TierLedger) => movesAvailable ? source.observeOverrideText(identity) : source.getOverride(identity);
   const override = readOverride(ledger);
@@ -86,7 +86,7 @@ export function placePersonalBody(set: TieredStoreSet, personal: LocalConnectorS
     || [current, current?.routed ? undefined : previous].some(record => record
       && !(mode === 'walk' && protectedUnroutedReceipt(record))
       && (secretDecision(record) || record.targetMetadataTier === 'secrets' || record.targetContentTier === 'secrets')))) {
-    if (!movesAvailable) return 'waiting';
+    if (!movesAvailable && !recorded.length) return 'waiting';
     const record = set.adoptLegacyItem(identity)!;
     const { copies: hidden } = ledger.flipToSecrets(identity, {
       expectedGeneration: record.generation, ...(mode === 'walk' ? { guard: { generation: record.generation, override } } : {}),
@@ -121,7 +121,18 @@ export function placePersonalBody(set: TieredStoreSet, personal: LocalConnectorS
     && (current.metadataTier === 'private' || current.metadataTier === 'public'));
   if (recorded.length === 0 && currentAllowsPersonal && ownerTier !== 'secure'
     && [current, previous].some(record => record && exactPersonalReceipt(record, text, effectiveOverride, image))) return 'unchanged';
-  if (!movesAvailable) return 'waiting';
+  if (current && recorded.length && ownerTier !== 'secure' && ownerTier !== 'secrets'
+    && recorded.every(record => contentReceiptRefusal(record.reasons, digest) === 'content_receipt_mismatch')
+    && exactPersonalReceipt(current, text, effectiveOverride, image) && !conflictingPhysicalBody()) {
+    // The set's receipt covers the present bytes. Bind their placement so release
+    // readers can retire the sidecar verdict for the previous body.
+    return ledger.withMoveBatch(() => {
+      if (!authorityUnchanged() || ledger.writeIntent(identity) || previousLedger?.writeIntent(identity)) return 'retry';
+      return set.adoptLegacyItem(identity)?.routed ? 'settled' : 'retry';
+    });
+  }
+  // A recorded hold is a hide-first raise. Its mover can transfer text without embeddings.
+  if (!movesAvailable && !recorded.length) return 'waiting';
   // Put-back rejects a conflict before replacing the old question. A live
   // Secret disposition also needs to know that no other version would be
   // lost. The ordinary live move checks all copies under its writer locks.

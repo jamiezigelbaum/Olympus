@@ -17,7 +17,7 @@ import {
   CONNECTOR_STORE_DEFAULT_MAX_CHUNK_CHARS, LocalConnectorStore, connectorStoreChunkText,
   connectorStoreHashString, defineConnectorCorpus,
 } from '../src/workers/connector-store/index.ts';
-import { settleLegacyPersonalBodiesOffThread } from '../src/workers/connector-store/legacy-personal-bodies.ts';
+import { settleLegacyPersonalBodiesOffThread, settleRecordedPersonalBodiesOffThread } from '../src/workers/connector-store/legacy-personal-bodies.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createXBookmarksSourceConnector, xBookmarkRawItemFromPost, X_BOOKMARKS_LIVE_CONNECTOR_ID } from '../src/workers/x-bookmarks/connector.ts';
@@ -334,6 +334,55 @@ test.each(['secure', 'secrets'] as const)('a stale %s receipt holds the replacem
   f.enableJudge();
   for (let tick = 0; tick < 3 && f.judgeCalls.length === 0; tick++) await f.service.runOnce();
   expect(f.judgeCalls).toHaveLength(1);
+});
+
+test('an exact current Personal authorization supersedes a Private receipt for earlier bytes', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const row = { id: 'authorized-edit', name: 'Picnic notes', text: BODY };
+  await seedLegacy(tmp.dir, [row]);
+  const f = fixture(tmp);
+  const identity = identityOf(row.id);
+  const personal = f.stores.internal!;
+  const prior = new TierLedger({ dbPath: tierLedgerPathForStore(personal.dbPath) });
+  try {
+    const stale = classifyItemTiers({ signals: {}, text: 'Earlier notes.' }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+    prior.recordDecision(identity, { ...stale, contentTier: 'secure' });
+  } finally { prior.close(); }
+  const override = { kind: 'tier', tier: 'private', setDigest: contentDigestReason(BODY) } as const;
+  f.ledger.setOverride(identity, override);
+  f.ledger.recordDecision(identity, classifyItemTiers({ signals: {}, text: BODY }, { override }));
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  const check = createReleaseTierCheck(() => [{ ledger: f.ledger, corpusIds: new Set([personal.corpusId]),
+    stores: () => f.set.openStores() }], () => 'allow');
+  const read = () => check.inputsOffThread!([{ ...identity, corpusId: personal.corpusId, privateAtAnswer: false }]);
+  expect((await read())[0]?.unroutedPrivate).toBe(true);
+  await settleRecordedPersonalBodiesOffThread({ set: f.set, queue });
+  expect(await read()).toEqual([{ tier: 'public_or_personal', gone: false }]);
+  expect(personal.searchItems(MARKER, 10)).toHaveLength(1);
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ contentPending: false, decidedBy: 'override' });
+  expect(queue.questionFor(identity, 'content')).toBeUndefined();
+});
+
+test.each([false, true])('cloud embeddings hold and queue changed recorded bytes (previous pass done %s)', async retired => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const row = { id: 'changed-cloud', name: 'Picnic notes', text: BODY };
+  await seedLegacy(tmp.dir, [row]);
+  const f = fixture(tmp, { localEmbeddingsOnly: false });
+  const identity = identityOf(row.id);
+  const stale = classifyItemTiers({ signals: {}, text: 'Earlier notes.' }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  f.ledger.recordDecision(identity, { ...stale, contentTier: 'secure' });
+  if (retired) f.ledger.writeSettleProgress('legacy_personal_recorded_decisions_v1', 'done');
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  const page = await settleRecordedPersonalBodiesOffThread({ set: f.set, queue, movesAvailable: () => false });
+  expect(page).toMatchObject({ held: 1, failed: 0 });
+  expect(f.stores.internal!.searchItems(MARKER, 10)).toEqual([]);
+  expect(f.ledger.legacyPersonalBodyHold(identity)?.digest).toBe(contentDigestReason(BODY));
+  await f.service.runOnce();
+  expect(f.stores.secure_local!.exportItemCopy(identity)?.chunks[0]?.boundedText).toBe(BODY);
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'pending', contentPending: true });
+  f.enableJudge();
+  await f.service.runOnce();
+  expect(JSON.stringify(f.judgeCalls)).toContain(BODY);
 });
 
 test('a sidecar Secret is hidden at placement and its interrupted tombstone is recoverable', async () => {
