@@ -171,13 +171,18 @@ describe('source_index_search and rows Private by their own tier', () => {
     }
   });
 
-  test.each(['caller', 'worker'])('all-sources search skips a mounted sibling opted out by the %s', async authority => {
+  test.each([
+    ['caller', 'first'], ['worker', 'first'], ['caller', 'sibling'], ['worker', 'sibling'],
+  ])('all-sources search honors the %s opt-out on the %s tier', async (authority, position) => {
     const config = defaultConfig();
     const internalId = 'internal.drive.docs';
     const secureId = 'secure_local.drive.docs';
+    const optedOut = position === 'first' ? internalId : secureId;
+    const allowed = position === 'first' ? secureId : internalId;
+    const expectedHit = { corpus_id: allowed, selected_item: { corpus_id: allowed, provider_item_id: allowed === internalId ? 'plan' : 'deed' } };
     const registry = config.sourceIndex.corpusRegistry;
     registry.corpora = registry.corpora.filter(entry => [internalId, secureId].includes(entry.corpusId));
-    if (authority === 'caller') registry.corpora.find(entry => entry.corpusId === secureId)!.capabilities = ['status'];
+    if (authority === 'caller') registry.corpora.find(entry => entry.corpusId === optedOut)!.capabilities = ['status'];
     const internal = await store(internalId, 'internal', [INTERNAL_FIXTURES[0]!]);
     const ledger = new TierLedger({ dbPath: ':memory:' });
     const secure = await store(secureId, 'secure_local', [
@@ -191,8 +196,8 @@ describe('source_index_search and rows Private by their own tier', () => {
       const reads: string[] = [];
       const worker = createEmailSourceWorker({
         connectorStores: [internal, secure],
-        connectorStoreTierSiblings: () => [secureId],
-        searchableCorpusIds: new Set(authority === 'worker' ? [internalId] : [internalId, secureId]),
+        connectorStoreTierSiblings: id => [internalId, secureId].filter(sibling => sibling !== id),
+        searchableCorpusIds: new Set(authority === 'worker' ? [allowed] : [internalId, secureId]),
         connectorStoreReadScope: holder => { reads.push(holder.corpusId); return { allowed: true }; },
       });
       const context = createInProcessOperationContext({
@@ -202,14 +207,19 @@ describe('source_index_search and rows Private by their own tier', () => {
       const operation = findOperationByName('source_index_search')!;
       const result = await operation.handler(context, { query: 'orchard' });
       expect(result).toMatchObject({
-        audit: { searched_corpora: [internalId], queries_attempted: 1, items_returned: 1 },
-        hits: [{ selected_item: { corpus_id: internalId, provider_item_id: 'plan' } }],
+        corpus_id: allowed, corpus_ids: [allowed],
+        audit: { searched_corpora: [allowed], queries_attempted: 1, items_returned: 1 },
+        hits: [expectedHit],
       });
-      expect(await operation.handler(context, { query: 'orchard', corpus_id: internalId })).toMatchObject({
+      expect(await operation.handler(context, { query: 'orchard', corpus_id: authority === 'worker' ? optedOut : allowed })).toMatchObject({
         audit: { queries_attempted: 1, items_returned: 1 },
-        hits: [{ selected_item: { corpus_id: internalId, provider_item_id: 'plan' } }],
+        hits: [expectedHit],
       });
-      expect(reads).not.toContain(secureId);
+      if (authority === 'worker') {
+        await expect(operation.handler(context, { query: 'orchard', corpus_id: optedOut, all_tiers: false }))
+          .rejects.toThrow('HTTP 403');
+      }
+      expect(reads).not.toContain(optedOut);
     } finally {
       internal.close();
       secure.close();
@@ -234,6 +244,7 @@ describe('source_index_search and rows Private by their own tier', () => {
       }
       const result = await find();
       expect(result.hits).toHaveLength(1);
+      expect(result.hits[0].corpus_id).toBe(INTERNAL);
       expect(result.hits[0].provenance.citation.title).toBe('orchard attachment');
       expect(result.hits[0]).not.toHaveProperty('selected_item');
       expect(result.hits[0].sourceItem).not.toHaveProperty('providerItemId');

@@ -868,7 +868,8 @@ export class EmailClient {
     audience: 'calling_model' | 'private_answer' = 'calling_model',
   ): Promise<SourceIndexSearchResult> {
     const corpusId = canonicalSourceCorpusId(options.corpusId);
-    const searchCorpora = createSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list('search');
+    const searchCorpora = createSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list('search')
+      .filter(entry => (options.allTiers !== false && options.trustDomain === undefined) || entry.corpusId === corpusId);
     const data = await this.requestSourceIndexSearch({
       query: options.query,
       corpus_id: corpusId,
@@ -921,6 +922,7 @@ export class EmailClient {
     return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord(value), {
       searchCorpora,
       requestedCorpusId: corpusIds[index]!,
+      allowSiblingRepresentative: true,
       includeLocators: options.includeLocators === true,
     })]);
   }
@@ -1529,6 +1531,7 @@ function parseSourceIndexStatusResult(value: Record<string, unknown>): SourceInd
 function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
   searchCorpora: readonly SourceCorpusConfig[];
   requestedCorpusId: string;
+  allowSiblingRepresentative?: boolean;
   includeLocators: boolean;
 }): SourceIndexSearchResult {
   if (value.kind !== 'source_index_search') {
@@ -1538,10 +1541,13 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
     throw new OperationError('email_error', 'source index search returned an unsupported corpus.');
   }
   const corpusId = value.corpus_id;
-  if (corpusId !== context.requestedCorpusId) {
-    throw new OperationError('email_error', 'source index search returned a different corpus than requested.');
-  }
   const corpus = context.searchCorpora.find((entry) => entry.corpusId === corpusId);
+  if (corpusId !== context.requestedCorpusId) {
+    const requested = context.searchCorpora.find(entry => entry.corpusId === context.requestedCorpusId);
+    if (!context.allowSiblingRepresentative || !requested || requested.sourceId !== corpus?.sourceId) {
+      throw new OperationError('email_error', 'source index search returned a different corpus than requested.');
+    }
+  }
   if (!corpus) {
     throw new OperationError('email_error', 'source index search returned an unsupported corpus.');
   }
@@ -1562,15 +1568,14 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
     : [corpus];
   const expectedTrustDomain = tierCorpora.some((entry) => entry.trustDomain === 'secure_local')
     ? 'secure_local'
-    : tierCorpora.some((entry) => entry.trustDomain === 'internal') ? 'internal' : corpus.trustDomain;
+    : tierCorpora.some((entry) => entry.trustDomain === 'internal') ? 'internal' : (tierCorpora[0]?.trustDomain ?? corpus.trustDomain);
   if (!Array.isArray(value.hits)) {
     throw new OperationError('email_error', 'source index search hits must be an array.');
   }
   for (const hit of value.hits) {
-    const selected = asRecord(hit).selected_item;
-    if (selected === undefined) continue;
-    const hitCorpusId = asRecord(selected).corpus_id;
-    if (!tierCorpora.some(entry => entry.corpusId === hitCorpusId)) {
+    const { corpus_id: hitCorpusId, selected_item: selected } = asRecord(hit);
+    if (!tierCorpora.some(entry => entry.corpusId === hitCorpusId)
+      || (selected !== undefined && asRecord(selected).corpus_id !== hitCorpusId)) {
       throw new OperationError('email_error', 'source index search returned a hit outside its searched corpora.');
     }
   }

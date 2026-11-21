@@ -769,6 +769,7 @@ describe('EmailClient', () => {
           corpus_id: 'secure_local.dropbox.files',
           retrieval_source: 'local_index',
           hits: [{
+            corpus_id: 'secure_local.dropbox.files',
             sourceItem: {
               family: 'file',
               provider: 'dropbox',
@@ -858,28 +859,39 @@ describe('EmailClient', () => {
     });
   });
 
-  test.each(['audit', 'hit'])('source_index_search rejects an opted-out sibling in the response %s', async field => {
-    const config = defaultConfig();
-    config.email.enabled = true;
+  describe('two-tier search response validation', () => {
     const internal = 'internal.drive.docs';
     const secure = 'secure_local.drive.docs';
-    config.sourceIndex.corpusRegistry.corpora.find(entry => entry.corpusId === secure)!.capabilities = ['status'];
-    const client = new EmailClient(config, new DirectHttpEmailTransport(async () => jsonResponse({
-      kind: 'source_index_search', corpus_id: internal,
-      hits: [{ selected_item: { corpus_id: secure, title: 'Opted-out title' } }],
-      audit: {
-        searched_corpora: field === 'audit' ? [internal, secure] : [internal],
-        request_id: 'test', queries_attempted: 1, metadata_hits: 1, items_returned: 1, latency_ms: 1,
-        raw_source_exposed: false, source_text_returned: false,
-      },
-      policy: {
-        trust_domain: field === 'audit' ? 'secure_local' : 'internal', local_only: true,
-        source_packets_exposed: false, raw_source_exposed: false, source_text_returned: false,
-      },
-    })));
-    await expect(client.sourceIndexSearch({ corpusId: internal, query: 'title' })).rejects.toThrow(
-      field === 'audit' ? 'outside the requested searchable corpora' : 'outside its searched corpora',
-    );
+    const child = { provenance: { citation: { title: 'Withheld child title' } } };
+    const selection = { selected_item: { corpus_id: secure } };
+
+    test.each([
+      { reason: 'opted-out tier in the audit', searched: [internal, secure], hit: { ...child, corpus_id: secure } },
+      { reason: 'unrequested tier in a pinned search', searched: [internal, secure], hit: { ...child, corpus_id: secure }, pinned: true },
+      { reason: 'opted-out selected hit', searched: [internal], hit: { ...selection, corpus_id: secure } },
+      { reason: 'opted-out child without identifiers', searched: [internal], hit: { ...child, corpus_id: secure } },
+      { reason: 'child without a corpus', searched: [internal], hit: child },
+      { reason: 'selection from a different corpus', searched: [internal], hit: { ...selection, corpus_id: internal } },
+    ])('rejects $reason', async ({ searched, hit, pinned }) => {
+      const claimsSiblingRead = searched.some(id => id === secure);
+      const config = defaultConfig();
+      config.email.enabled = true;
+      if (!pinned) config.sourceIndex.corpusRegistry.corpora.find(entry => entry.corpusId === secure)!.capabilities = ['status'];
+      const client = new EmailClient(config, new DirectHttpEmailTransport(async () => jsonResponse({
+        kind: 'source_index_search', corpus_id: internal, hits: [hit],
+        audit: {
+          searched_corpora: searched, request_id: 'test', queries_attempted: searched.length, metadata_hits: 1,
+          items_returned: 1, latency_ms: 1, raw_source_exposed: false, source_text_returned: false,
+        },
+        policy: {
+          trust_domain: claimsSiblingRead ? 'secure_local' : 'internal', local_only: true,
+          source_packets_exposed: false, raw_source_exposed: false, source_text_returned: false,
+        },
+      })));
+      await expect(client.sourceIndexSearch({ corpusId: internal, query: 'title', allTiers: !pinned })).rejects.toThrow(
+        claimsSiblingRead ? 'outside the requested searchable corpora' : 'outside its searched corpora',
+      );
+    });
   });
 
   test('source_index_search rejects locator release that was not explicitly requested', async () => {
@@ -892,6 +904,7 @@ describe('EmailClient', () => {
         corpus_id: 'secure_local.dropbox.files',
         retrieval_source: 'local_index',
         hits: [{
+          corpus_id: 'secure_local.dropbox.files',
           locator: {
             display_path: '/private/path.pdf',
           },
@@ -935,6 +948,7 @@ describe('EmailClient', () => {
         corpus_id: 'secure_local.dropbox.files',
         retrieval_source: 'local_index',
         hits: [{
+          corpus_id: 'secure_local.dropbox.files',
           locator: {
             display_path: '/private/path.pdf',
           },
@@ -976,6 +990,7 @@ describe('EmailClient', () => {
         corpus_id: 'secure_local.dropbox.files',
         retrieval_source: 'local_index',
         hits: [{
+          corpus_id: 'secure_local.dropbox.files',
           display_path: '/private/path.pdf',
           finder_url: 'file:///Users/private/path.pdf',
           dropbox_web_url: 'https://www.dropbox.com/home/private/path.pdf',
@@ -1018,6 +1033,7 @@ describe('EmailClient', () => {
       parent_dropbox_web_url: 'https://www.dropbox.com/home/2%20Areas',
     };
     const validHit = {
+      corpus_id: 'secure_local.dropbox.files',
       sourceItem: {
         family: 'file',
         provider: 'dropbox',
@@ -1155,6 +1171,7 @@ describe('EmailClient', () => {
         corpus_id: 'internal.drive.docs',
         retrieval_source: 'local_index',
         hits: [{
+          corpus_id: 'internal.drive.docs',
           sourceItem: {
             family: 'file',
             provider: 'dropbox',
@@ -1380,7 +1397,7 @@ describe('EmailClient', () => {
     });
     expect(requests[0]?.url).toBe('http://127.0.0.1:8010/v1/source/index/search');
     expect(await requests[0]?.json()).toEqual({
-      tier_corpus_ids: createSourceCorpusRegistry(config.sourceIndex.corpusRegistry).ids('search'),
+      tier_corpus_ids: ['secure_local.telegram.protected.messages'],
       personal_names_only: true,
       query: 'surface',
       corpus_id: 'secure_local.telegram.protected.messages',
