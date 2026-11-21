@@ -5324,6 +5324,7 @@ export async function main(): Promise<void> {
     connectorStores,
     refreshConnectorStores: () => mountConfiguredSourceStores(),
     revokeSourceReads,
+    searchableCorpusIds: new Set(sourceCorpusRegistry.ids('search')),
     connectorStoreTierSiblings: (corpusId: string) => [
       ...(tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []),
     ].filter((sibling) => sibling !== corpusId),

@@ -3607,7 +3607,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/search`) {
-          const { corpus_ids: corpusIds, ...record } = await parseObjectBody(request);
+          const { corpus_ids: corpusIds, tier_corpus_ids: tierCorpusIds, ...record } = await parseObjectBody(request);
+          if (tierCorpusIds !== undefined && (!Array.isArray(tierCorpusIds) || !tierCorpusIds.every(id => typeof id === 'string'))) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'tier_corpus_ids must be an array of corpus ids.');
+          }
+          const requestedTiers = tierCorpusIds === undefined ? undefined : new Set(tierCorpusIds);
+          const canSearch = (id: string) => (options.searchableCorpusIds?.has(id) ?? true) && (requestedTiers?.has(id) ?? true);
           assertSourceIndexSearchQuery(record.query);
           if (record.personal_names_only !== undefined && record.personal_names_only !== true) {
             throw new EmailSourceWorkerError(400, 'invalid_request', 'personal_names_only must be true when provided.');
@@ -3618,7 +3623,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const personalNamesOnly = record.include_private_names !== true;
           const prepare = async (record: Record<string, unknown>) => {
             const corpusId = canonicalRequestCorpusId(record);
-            const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
             if (!corpusId) {
               throw new EmailSourceWorkerError(
                 400,
@@ -3626,6 +3630,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(', ')}.`,
               );
             }
+            if (!canSearch(corpusId)) {
+              throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'This corpus is not enabled for search.');
+            }
+            const connectorStore = connectorStoresByCorpusId.get(corpusId);
             if (!connectorStore) throw new EmailSourceWorkerError(
               501,
               'source_index_search_not_supported',
@@ -3743,6 +3751,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const siblings = record.all_tiers === false || record.trust_domain !== undefined
               ? []
               : (options.connectorStoreTierSiblings?.(connectorStore.corpusId) ?? [])
+                .filter(canSearch)
                 .flatMap((siblingCorpusId) => {
                   const sibling = connectorStoresByCorpusId.get(siblingCorpusId);
                   return sibling && sibling !== connectorStore ? [sibling] : [];

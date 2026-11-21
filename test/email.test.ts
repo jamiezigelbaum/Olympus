@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 
@@ -847,6 +848,7 @@ describe('EmailClient', () => {
       },
     });
     expect(await requests[0]?.json()).toEqual({
+      tier_corpus_ids: createSourceCorpusRegistry(config.sourceIndex.corpusRegistry).ids('search'),
       personal_names_only: true,
       query: 'dating profile',
       corpus_id: 'secure_local.dropbox.files',
@@ -854,6 +856,30 @@ describe('EmailClient', () => {
       max_results: 5,
       include_locators: true,
     });
+  });
+
+  test.each(['audit', 'hit'])('source_index_search rejects an opted-out sibling in the response %s', async field => {
+    const config = defaultConfig();
+    config.email.enabled = true;
+    const internal = 'internal.drive.docs';
+    const secure = 'secure_local.drive.docs';
+    config.sourceIndex.corpusRegistry.corpora.find(entry => entry.corpusId === secure)!.capabilities = ['status'];
+    const client = new EmailClient(config, new DirectHttpEmailTransport(async () => jsonResponse({
+      kind: 'source_index_search', corpus_id: internal,
+      hits: [{ selected_item: { corpus_id: secure, title: 'Opted-out title' } }],
+      audit: {
+        searched_corpora: field === 'audit' ? [internal, secure] : [internal],
+        request_id: 'test', queries_attempted: 1, metadata_hits: 1, items_returned: 1, latency_ms: 1,
+        raw_source_exposed: false, source_text_returned: false,
+      },
+      policy: {
+        trust_domain: field === 'audit' ? 'secure_local' : 'internal', local_only: true,
+        source_packets_exposed: false, raw_source_exposed: false, source_text_returned: false,
+      },
+    })));
+    await expect(client.sourceIndexSearch({ corpusId: internal, query: 'title' })).rejects.toThrow(
+      field === 'audit' ? 'outside the requested searchable corpora' : 'outside its searched corpora',
+    );
   });
 
   test('source_index_search rejects locator release that was not explicitly requested', async () => {
@@ -1354,6 +1380,7 @@ describe('EmailClient', () => {
     });
     expect(requests[0]?.url).toBe('http://127.0.0.1:8010/v1/source/index/search');
     expect(await requests[0]?.json()).toEqual({
+      tier_corpus_ids: createSourceCorpusRegistry(config.sourceIndex.corpusRegistry).ids('search'),
       personal_names_only: true,
       query: 'surface',
       corpus_id: 'secure_local.telegram.protected.messages',
@@ -1365,6 +1392,7 @@ describe('EmailClient', () => {
     });
     await client.sourceIndexSearch({ corpusId: 'secure_local.telegram.messages', query: 'surface' }, 'private_answer');
     expect(await requests[1]?.json()).toEqual({
+      tier_corpus_ids: createSourceCorpusRegistry(config.sourceIndex.corpusRegistry).ids('search'),
       include_private_names: true,
       query: 'surface',
       corpus_id: 'secure_local.telegram.protected.messages',
