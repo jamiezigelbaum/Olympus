@@ -151151,7 +151151,7 @@ class EmailClient {
       });
     return result;
   }
-  async requestSourceIndexSearch(body) {
+  async requestSourceIndexSearch(body, searchCorpora) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
@@ -151161,7 +151161,7 @@ class EmailClient {
     const data = asRecord15(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      body: JSON.stringify({ ...body, tier_corpus_ids: searchCorpora.map((corpus) => corpus.corpusId) })
     }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
@@ -151169,6 +151169,7 @@ class EmailClient {
   }
   async sourceIndexSearch(options, audience = "calling_model") {
     const corpusId = canonicalSourceCorpusId(options.corpusId);
+    const searchCorpora = createSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
     const data = await this.requestSourceIndexSearch({
       query: options.query,
       corpus_id: corpusId,
@@ -151193,9 +151194,9 @@ class EmailClient {
       ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
       ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
       ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
-    });
+    }, searchCorpora);
     return parseSourceIndexSearchResult(data, {
-      config: this.config,
+      searchCorpora,
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true
     });
@@ -151203,6 +151204,7 @@ class EmailClient {
   async sourceIndexSearchMany(corpusIds, options) {
     if (!corpusIds.length)
       throw new OperationError("invalid_params", "No source is configured for search.");
+    const searchCorpora = createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
     const response = await this.requestSourceIndexSearch({
       query: options.query,
       corpus_ids: corpusIds,
@@ -151210,12 +151212,12 @@ class EmailClient {
       retrieval_mode: options.retrievalMode,
       max_results: options.maxResults,
       include_locators: options.includeLocators
-    });
+    }, searchCorpora);
     if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
       throw new OperationError("email_error", "The worker did not return a search result for each requested source.");
     }
     return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord15(value), {
-      config: this.config,
+      searchCorpora,
       requestedCorpusId: corpusIds[index],
       includeLocators: options.includeLocators === true
     })]);
@@ -151711,22 +151713,30 @@ function parseSourceIndexSearchResult(value, context) {
   if (corpusId !== context.requestedCorpusId) {
     throw new OperationError("email_error", "source index search returned a different corpus than requested.");
   }
-  const searchCorpora = createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list("search");
-  const corpus = searchCorpora.find((entry) => entry.corpusId === corpusId);
+  const corpus = context.searchCorpora.find((entry) => entry.corpusId === corpusId);
   if (!corpus) {
     throw new OperationError("email_error", "source index search returned an unsupported corpus.");
   }
   const auditRecord = asRecord15(value.audit);
   const tierCorpora = Array.isArray(auditRecord.searched_corpora) ? auditRecord.searched_corpora.map((searchedId) => {
-    const entry = typeof searchedId === "string" ? createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list().find((candidate) => candidate.corpusId === searchedId) : undefined;
+    const entry = typeof searchedId === "string" ? context.searchCorpora.find((candidate) => candidate.corpusId === searchedId) : undefined;
     if (!entry || entry.sourceId !== corpus.sourceId) {
-      throw new OperationError("email_error", "source index search reported a corpus outside the requested source.");
+      throw new OperationError("email_error", "source index search reported a corpus outside the requested searchable corpora.");
     }
     return entry;
   }) : [corpus];
   const expectedTrustDomain = tierCorpora.some((entry) => entry.trustDomain === "secure_local") ? "secure_local" : tierCorpora.some((entry) => entry.trustDomain === "internal") ? "internal" : corpus.trustDomain;
   if (!Array.isArray(value.hits)) {
     throw new OperationError("email_error", "source index search hits must be an array.");
+  }
+  for (const hit of value.hits) {
+    const selected = asRecord15(hit).selected_item;
+    if (selected === undefined)
+      continue;
+    const hitCorpusId = asRecord15(selected).corpus_id;
+    if (!tierCorpora.some((entry) => entry.corpusId === hitCorpusId)) {
+      throw new OperationError("email_error", "source index search returned a hit outside its searched corpora.");
+    }
   }
   const audit = asRecord15(value.audit);
   const policy = asRecord15(value.policy);
@@ -229760,7 +229770,12 @@ function createEmailSourceWorker(options = {}) {
           }
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/search`) {
-          const { corpus_ids: corpusIds, ...record } = await parseObjectBody(request);
+          const { corpus_ids: corpusIds, tier_corpus_ids: tierCorpusIds, ...record } = await parseObjectBody(request);
+          if (tierCorpusIds !== undefined && (!Array.isArray(tierCorpusIds) || !tierCorpusIds.every((id) => typeof id === "string"))) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "tier_corpus_ids must be an array of corpus ids.");
+          }
+          const requestedTiers = tierCorpusIds === undefined ? undefined : new Set(tierCorpusIds);
+          const canSearch = (id) => (options.searchableCorpusIds?.has(id) ?? true) && (requestedTiers?.has(id) ?? true);
           assertSourceIndexSearchQuery(record.query);
           if (record.personal_names_only !== undefined && record.personal_names_only !== true) {
             throw new EmailSourceWorkerError(400, "invalid_request", "personal_names_only must be true when provided.");
@@ -229771,10 +229786,13 @@ function createEmailSourceWorker(options = {}) {
           const personalNamesOnly = record.include_private_names !== true;
           const prepare = async (record) => {
             const corpusId = canonicalRequestCorpusId(record);
-            const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
             if (!corpusId) {
               throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
             }
+            if (!canSearch(corpusId)) {
+              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This corpus is not enabled for search.");
+            }
+            const connectorStore = connectorStoresByCorpusId.get(corpusId);
             if (!connectorStore)
               throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
             if (!personalNamesOnly && connectorStore.trustDomain !== "secure_local") {
@@ -229849,7 +229867,7 @@ function createEmailSourceWorker(options = {}) {
               throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This file source is unavailable until its folder scope is approved for the connected account.");
             }
             const searchRequest = primary.searchRequest;
-            const siblings = record.all_tiers === false || record.trust_domain !== undefined ? [] : (options.connectorStoreTierSiblings?.(connectorStore.corpusId) ?? []).flatMap((siblingCorpusId) => {
+            const siblings = record.all_tiers === false || record.trust_domain !== undefined ? [] : (options.connectorStoreTierSiblings?.(connectorStore.corpusId) ?? []).filter(canSearch).flatMap((siblingCorpusId) => {
               const sibling = connectorStoresByCorpusId.get(siblingCorpusId);
               return sibling && sibling !== connectorStore ? [sibling] : [];
             });
@@ -283181,6 +283199,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     connectorStores,
     refreshConnectorStores: () => mountConfiguredSourceStores(),
     revokeSourceReads,
+    searchableCorpusIds: new Set(sourceCorpusRegistry.ids("search")),
     connectorStoreTierSiblings: (corpusId) => [
       ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
     ].filter((sibling) => sibling !== corpusId),

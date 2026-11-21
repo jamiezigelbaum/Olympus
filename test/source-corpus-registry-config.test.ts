@@ -101,8 +101,10 @@ describe('config-driven source corpus registry', () => {
     const current = createSourceCorpusRegistry({ ...config, schemaVersion: 2 });
     expect(current.has(personal.corpusId, 'search')).toBe(false);
     expect(current.has(privateCorpus.corpusId, 'search')).toBe(false);
-    personal.capabilities = ['answer', 'status'];
     privateCorpus.capabilities = ['status'];
+    expect(load().list('search').filter(corpus => corpus.sourceId === personal.sourceId).map(corpus => corpus.corpusId))
+      .toEqual([personal.corpusId]);
+    personal.capabilities = ['answer', 'status'];
     expect(load().has(personal.corpusId, 'search')).toBe(false);
     expect(load().list().find(corpus => corpus.corpusId === privateCorpus.corpusId)?.capabilities).toEqual(['status']);
   });

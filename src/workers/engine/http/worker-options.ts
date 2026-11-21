@@ -180,6 +180,8 @@ export interface EmailSourceWorkerOptions {
   connectorStores?: LocalConnectorStore[];
   /** Discover stores that ingestion created after boot; never creates an absent store. */
   refreshConnectorStores?: () => void;
+  /** Corpora enabled for search in the worker registry. */
+  searchableCorpusIds?: ReadonlySet<string>;
   /**
    * Per-tier stores (P1b): the sibling corpora of a corpus in a tiered store
    * set. `source_index_search` searches every tier of the named source unless

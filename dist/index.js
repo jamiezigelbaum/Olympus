@@ -25130,7 +25130,7 @@ class EmailClient {
       });
     return result;
   }
-  async requestSourceIndexSearch(body) {
+  async requestSourceIndexSearch(body, searchCorpora) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
@@ -25140,7 +25140,7 @@ class EmailClient {
     const data = asRecord8(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      body: JSON.stringify({ ...body, tier_corpus_ids: searchCorpora.map((corpus) => corpus.corpusId) })
     }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
@@ -25148,6 +25148,7 @@ class EmailClient {
   }
   async sourceIndexSearch(options, audience = "calling_model") {
     const corpusId = canonicalSourceCorpusId(options.corpusId);
+    const searchCorpora = createSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
     const data = await this.requestSourceIndexSearch({
       query: options.query,
       corpus_id: corpusId,
@@ -25172,9 +25173,9 @@ class EmailClient {
       ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
       ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
       ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
-    });
+    }, searchCorpora);
     return parseSourceIndexSearchResult(data, {
-      config: this.config,
+      searchCorpora,
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true
     });
@@ -25182,6 +25183,7 @@ class EmailClient {
   async sourceIndexSearchMany(corpusIds, options) {
     if (!corpusIds.length)
       throw new OperationError("invalid_params", "No source is configured for search.");
+    const searchCorpora = createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
     const response = await this.requestSourceIndexSearch({
       query: options.query,
       corpus_ids: corpusIds,
@@ -25189,12 +25191,12 @@ class EmailClient {
       retrieval_mode: options.retrievalMode,
       max_results: options.maxResults,
       include_locators: options.includeLocators
-    });
+    }, searchCorpora);
     if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
       throw new OperationError("email_error", "The worker did not return a search result for each requested source.");
     }
     return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord8(value), {
-      config: this.config,
+      searchCorpora,
       requestedCorpusId: corpusIds[index],
       includeLocators: options.includeLocators === true
     })]);
@@ -25691,22 +25693,30 @@ function parseSourceIndexSearchResult(value, context) {
   if (corpusId !== context.requestedCorpusId) {
     throw new OperationError("email_error", "source index search returned a different corpus than requested.");
   }
-  const searchCorpora = createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list("search");
-  const corpus = searchCorpora.find((entry) => entry.corpusId === corpusId);
+  const corpus = context.searchCorpora.find((entry) => entry.corpusId === corpusId);
   if (!corpus) {
     throw new OperationError("email_error", "source index search returned an unsupported corpus.");
   }
   const auditRecord = asRecord8(value.audit);
   const tierCorpora = Array.isArray(auditRecord.searched_corpora) ? auditRecord.searched_corpora.map((searchedId) => {
-    const entry = typeof searchedId === "string" ? createSourceCorpusRegistry(context.config.sourceIndex.corpusRegistry).list().find((candidate) => candidate.corpusId === searchedId) : undefined;
+    const entry = typeof searchedId === "string" ? context.searchCorpora.find((candidate) => candidate.corpusId === searchedId) : undefined;
     if (!entry || entry.sourceId !== corpus.sourceId) {
-      throw new OperationError("email_error", "source index search reported a corpus outside the requested source.");
+      throw new OperationError("email_error", "source index search reported a corpus outside the requested searchable corpora.");
     }
     return entry;
   }) : [corpus];
   const expectedTrustDomain = tierCorpora.some((entry) => entry.trustDomain === "secure_local") ? "secure_local" : tierCorpora.some((entry) => entry.trustDomain === "internal") ? "internal" : corpus.trustDomain;
   if (!Array.isArray(value.hits)) {
     throw new OperationError("email_error", "source index search hits must be an array.");
+  }
+  for (const hit of value.hits) {
+    const selected = asRecord8(hit).selected_item;
+    if (selected === undefined)
+      continue;
+    const hitCorpusId = asRecord8(selected).corpus_id;
+    if (!tierCorpora.some((entry) => entry.corpusId === hitCorpusId)) {
+      throw new OperationError("email_error", "source index search returned a hit outside its searched corpora.");
+    }
   }
   const audit = asRecord8(value.audit);
   const policy = asRecord8(value.policy);
