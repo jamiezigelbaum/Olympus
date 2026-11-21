@@ -3621,35 +3621,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(400, 'invalid_request', 'include_private_names is only available for a single Private search.');
           }
           const personalNamesOnly = record.include_private_names !== true;
-          const prepare = async (record: Record<string, unknown>) => {
-            const corpusId = canonicalRequestCorpusId(record);
-            if (!corpusId) {
-              throw new EmailSourceWorkerError(
-                400,
-                'invalid_request',
-                `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(', ')}.`,
-              );
-            }
-            const connectorStore = connectorStoresByCorpusId.get(corpusId);
-            const siblingIds = record.all_tiers === false || record.trust_domain !== undefined
-              ? []
-              : options.connectorStoreTierSiblings?.(corpusId) ?? [];
-            const searchableIds = [...new Set([corpusId, ...siblingIds])].filter(canSearch);
-            if (!searchableIds.length) {
-              throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'This corpus is not enabled for search.');
-            }
-            if (canSearch(corpusId) && !connectorStore) throw new EmailSourceWorkerError(
-              501, 'source_index_search_not_supported', `The connector store for ${corpusId} is not mounted.`,
-            );
-            if (!personalNamesOnly && connectorStore?.trustDomain !== 'secure_local') {
-              throw new EmailSourceWorkerError(400, 'invalid_request', 'include_private_names requires a Private corpus.');
-            }
+          const prepare = async (corpusId: string, ids: readonly string[], mounted = connectorStoresByCorpusId) => {
             const searchConnectorStore = async (store: LocalConnectorStore) => {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false) return undefined;
               const readScopeSignature = JSON.stringify(mandatoryScope);
               const searchRequest = parseConnectorStoreIndexSearchRequestRecord(
-                // A sibling tier is searched under its own corpus id.
                 { ...record, corpus_id: store.corpusId },
                 store,
                 connectorStoreAccountScopes.get(store.corpusId),
@@ -3736,12 +3713,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               };
             };
             const runs: Array<NonNullable<Awaited<ReturnType<typeof searchConnectorStore>>>> = [];
-            for (const id of searchableIds) {
-              const store = connectorStoresByCorpusId.get(id);
-              if (!store) continue; // A sibling can be mounted on demand.
+            for (const id of ids) {
+              const store = mounted.get(id);
+              if (!store) continue;
               const run = await searchConnectorStore(store);
               if (run) runs.push(run);
-              else if (id === corpusId) break;
+              else if (store.corpusId === corpusId) break;
             }
             const primary = runs[0];
             if (!primary) {
@@ -3867,7 +3844,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ));
               const safeResult = {
                 kind: 'source_index_search',
-                corpus_id: corpusIds === undefined ? corpusId : primary.store.corpusId,
+                corpus_id: corpusId,
                 retrieval_source: 'local_index',
                 // A hit's own tier is retrieval-internal (router.ts): not returned.
                 hits: releasedHits,
@@ -3932,18 +3909,50 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               return safeResult;
             };
           };
-          if (corpusIds === undefined) return json((await prepare(record))());
+          if (corpusIds === undefined) {
+            const corpusId = canonicalRequestCorpusId(record);
+            if (!corpusId) {
+              throw new EmailSourceWorkerError(
+                400,
+                'invalid_request',
+                `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(', ')}.`,
+              );
+            }
+            const connectorStore = connectorStoresByCorpusId.get(corpusId);
+            const siblingIds = record.all_tiers === false || record.trust_domain !== undefined
+              ? []
+              : options.connectorStoreTierSiblings?.(corpusId) ?? [];
+            const searchableIds = [...new Set([corpusId, ...siblingIds])].filter(canSearch);
+            if (!searchableIds.length) {
+              throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'This corpus is not enabled for search.');
+            }
+            if (canSearch(corpusId) && !connectorStore) throw new EmailSourceWorkerError(
+              501, 'source_index_search_not_supported', `The connector store for ${corpusId} is not mounted.`,
+            );
+            if (!personalNamesOnly && connectorStore?.trustDomain !== 'secure_local') {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'include_private_names requires a Private corpus.');
+            }
+            return json((await prepare(corpusId, searchableIds))());
+          }
           if (record.corpus_id !== undefined || !Array.isArray(corpusIds) || !corpusIds.length
             || !corpusIds.every(id => typeof id === 'string' && id.trim()) || new Set(corpusIds).size !== corpusIds.length) {
             throw new EmailSourceWorkerError(400, 'invalid_request', 'Supply distinct corpus_ids for a multi-source search.');
           }
-          const prepared = await Promise.allSettled(corpusIds.map(corpus_id => prepare({ ...record, corpus_id })));
+          const eligible = new Set(corpusIds.filter(canSearch));
+          options.refreshConnectorStores?.(eligible);
+          const mounted = new Map(connectorStores.map(store => [store.corpusId, store]));
+          const skipped: string[] = [];
+          const prepared = await Promise.allSettled(corpusIds.map(id => {
+            if (eligible.has(id) && mounted.has(id)) return prepare(id, [id], mounted);
+            skipped.push(id);
+            return null;
+          }));
           // Each release runs synchronously on this turn, before any results leave the worker.
           let firstFailure: unknown;
           const results = prepared.map(outcome => {
             if (outcome.status === 'rejected') {
               firstFailure ??= outcome.reason;
-            } else {
+            } else if (outcome.value) {
               try {
                 return outcome.value();
               } catch (error) {
@@ -3952,8 +3961,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }
             return null;
           });
-          if (results.every(result => result === null)) throw firstFailure;
-          return json({ results });
+          if (skipped.length < corpusIds.length && results.every(result => result === null)) throw firstFailure;
+          return json({ results, audit: { skipped_corpora: skipped } });
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/embed`) {

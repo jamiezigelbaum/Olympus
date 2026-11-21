@@ -5323,7 +5323,7 @@ export async function main(): Promise<void> {
         }
       : {}),
     connectorStores,
-    refreshConnectorStores: () => mountConfiguredSourceStores(),
+    refreshConnectorStores: mountConfiguredSourceStores,
     revokeSourceReads,
     searchableCorpusIds: new Set(sourceCorpusRegistry.ids('search')),
     connectorStoreTierSiblings: (corpusId: string) => [

@@ -324,7 +324,12 @@ describe('source storage, end to end on this host', () => {
     test(`a declared store ingested after boot is discovered by ${read} with the scheduler off`, async () => {
       const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
       const path = join(env.HOME!, 'late-reflect.sqlite');
-      env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON = JSON.stringify([{ dbPath: path, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' }]);
+      const corpus = { corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' };
+      env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON = JSON.stringify([{ dbPath: path, ...corpus }]);
+      env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH = join(env.HOME!, 'corpora.json');
+      put(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH, JSON.stringify({
+        schemaVersion: 2, corpora: [{ ...corpus, sourceId: 'reflect.notes', provider: 'reflect', capabilities: ['search', 'status'] }],
+      }));
       const worker = await boot(env);
       try {
         expect(worker.output(), listening(worker)).toContain('worker listening');
@@ -332,7 +337,7 @@ describe('source storage, end to end on this host', () => {
         expect(existsSync(path)).toBe(false);
         await writeStore(path, 'secure_local.reflect.notes', 'note', 'secure_local');
         if (read === 'status') expect((await ask(env, worker, '/v1/source/index/status', {})).status).toBe(200);
-        const search = await ask(env, worker, '/v1/source/index/search', { query: 'orchard', corpus_id: 'secure_local.reflect.notes' });
+        const search = await ask(env, worker, '/v1/source/index/search', { query: 'orchard', corpus_id: corpus.corpusId, include_private_names: true });
         expect(search.status, JSON.stringify(search.json)).toBe(200);
         expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'orchard-lab.txt' }) })]));
       } finally { await worker.stop(); }

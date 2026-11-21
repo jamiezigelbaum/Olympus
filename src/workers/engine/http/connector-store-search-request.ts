@@ -1,3 +1,4 @@
+import { DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS } from '../../../core/source-index/types.ts';
 import { X_BOOKMARKS_FOLDER_FILTER_CODEC } from '../../x-bookmarks/index.ts';
 import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../../local-files/approved-scope-filter.ts';
 import { LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC } from '../../local-files/locator-result-projector.ts';
@@ -315,7 +316,7 @@ export function parseConnectorStoreIndexSearchRequestRecord(
   }
   return {
     query: record.query,
-    maxResults: maxResults ?? 10,
+    maxResults: maxResults ?? DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS,
     ...(retrievalMode !== undefined ? { retrievalMode } : {}),
     ...(accountScope ? { accountScope } : {}),
     ...(chatScopeResolution?.kind === 'title' && !chatScopeResolution.resolved
