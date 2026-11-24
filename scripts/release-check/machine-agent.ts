@@ -1071,6 +1071,11 @@ function canaryMachineSample(): string {
 
 async function canarySmoke(questions: readonly ClientQuestion[]): Promise<never> {
   if (!questions.length) emit({ ok: false, detail: 'no questions configured in the canary accounts file' });
+  // A machine left with Private answers off never readies a private model, so waiting for one only costs the stall bound.
+  const startSettings = readCanarySmokeSettings(15_000);
+  if (startSettings?.private_answer_mode?.id === 'no-sensitive') {
+    emit({ ok: false, detail: 'Private answers are off on this machine (mode no-sensitive): the release set needs "Local with Venice fallback" (test setup)', modelWaitMs: 0, privateModel: installedCanaryPrivateRoute(startSettings).description });
+  }
   const wait = await waitForInstalledCanaryModels();
   const model = installedCanaryPrivateRoute(readCanarySmokeSettings(15_000)).description;
   if (wait.problem) emit({ ok: false, detail: wait.problem, modelWaitMs: wait.ms, privateModel: model });
