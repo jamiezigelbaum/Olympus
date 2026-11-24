@@ -3722,6 +3722,7 @@ export async function main(): Promise<void> {
       // where it stands in for the owner's local model.
       const usesDefaultLocal = (id: string) => sovereigntyEngine.source === 'env_bridge' && id === 'local-source-answer';
       localPrivateRoute = createLocalPrivateRoute({
+        privateRouteDisabled: () => sovereigntyEngine.config.routes.secure_local?.mode === 'disabled',
         firstMember: () => {
           const pool = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' });
           return (pool.explicitOrder ?? pool.members)[0];

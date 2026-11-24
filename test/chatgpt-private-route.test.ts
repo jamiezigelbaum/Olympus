@@ -54,6 +54,36 @@ describe('the owner\'s Private route for the panel', () => {
     expect(built).toBe(0);
   });
 
+  // test-mac, 24 Nov 2026: a policy with no Private answer route failed every Ask
+  // as "the Private answer model is not answering" after the 16 Nov chooser change.
+  test('a policy with no Private answer route has no private model to choose, and is not a failure', async () => {
+    let read = 0;
+    const route = createLocalPrivateRoute({
+      privateRouteDisabled: () => true,
+      firstMember: () => { read += 1; throw new Error('Sovereignty analyst route for secure_local is disabled.'); },
+      model: () => ({ model: fakeModel, modelId: 'big-local' }),
+      reachable: async () => true,
+      window: async () => ({ windowTokens: 32_768 }),
+      log: () => { throw new Error('a disabled route is not a failure to log'); },
+    });
+    expect(await route()).toBeUndefined();
+    expect(read).toBe(0);
+  });
+
+  test('an unreadable pool on a policy that has a Private route still fails closed', async () => {
+    const lines: string[] = [];
+    const route = createLocalPrivateRoute({
+      privateRouteDisabled: () => false,
+      firstMember: () => { throw new Error('unreadable'); },
+      model: () => ({ model: fakeModel, modelId: 'big-local' }),
+      reachable: async () => true,
+      window: async () => ({ windowTokens: 32_768 }),
+      log: (line) => { lines.push(line); },
+    });
+    expect(await route()).toEqual({ unavailable: true, modelId: 'the Private answer model' });
+    expect(lines).toHaveLength(1);
+  });
+
   // Jamie, 2026-11-16: "for my Olympus, we should never be using the small model".
   test('an owner model that is down is reported, never swapped for the built-in model, and reachability is asked at most every 30 s', async () => {
     let at = 0;
