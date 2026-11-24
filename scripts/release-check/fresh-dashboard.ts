@@ -552,6 +552,9 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
             const next=want ? radios.find(r=>r.value===want.model) : radios.find(r=>!r.checked);
             if (!next || next.disabled) continue;
             next.checked=true;
+            // The form lives in a sheet hidden until "Change model" opens it; open it so a refusal's Unlock button shows.
+            const sheet=form.closest('.sheet');
+            if (sheet && sheet.id && getComputedStyle(sheet).display==='none') document.querySelector('[data-sheet-toggle="#'+sheet.id+'"]')?.click();
             form.requestSubmit();
             return JSON.stringify({provider, from: current?.value||'', to: next.value});
           }
@@ -601,7 +604,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
             return shown === change.to;
           }, 'answer model save', 60_000);
         } catch {
-          throw new Error(`answer model save did not land: wanted ${change.provider} ${change.to}, the page shows ${shown || 'nothing'} (unlock pressed ${unlocked}x)`);
+          const message = await panel<string>(`[...document.querySelectorAll('form[data-model-choice] [data-action-message], form[data-judge-choice] [data-action-message]')].map(e=>e.textContent?.trim()).filter(Boolean).join(' | ')`, (value) => typeof value === 'string').catch(() => undefined);
+          throw new Error(`answer model save did not land: wanted ${change.provider} ${change.to}, the page shows ${shown || 'nothing'} (unlock pressed ${unlocked}x${message ? `; it said ${message}` : ''})`);
         }
         return change;
       },
