@@ -226,6 +226,7 @@ export interface EmailSourceWorkerOptions {
     recordId?: (request: Request) => string | undefined;
   };
   sourceDashboard?: {
+    syncFreshnessThresholdHours?: number;
     sovereigntyEngine: SovereigntyEngine;
     /** Pause the native capture reader while pairing or changing its capture grant. */
     withMessagingCapturePaused?<T>(source: 'telegram' | 'whatsapp', operation: () => Promise<T>): Promise<T>;

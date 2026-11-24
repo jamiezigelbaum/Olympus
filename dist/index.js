@@ -11482,6 +11482,9 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger();
   init_tier_ledger_path();
 });
+
+// src/control-ui-contract.ts
+var OLYMPUS_DASHBOARD_TOOL_METHOD = "olympus.dashboard.tool", OLYMPUS_DASHBOARD_PANEL_PATH = "/olympus/dashboard/panel";
 // src/workers/local-pacing.ts
 var GO_EASY_IDLE_FULL_SPEED_MS, GO_EASY_LOCAL_WORK_RECENT_MS;
 var init_local_pacing = __esm(() => {
@@ -13531,6 +13534,7 @@ var init_source_scope_approval = __esm(() => {
   init_file_lease();
   init_file_scope_sources();
   init_operation_error();
+  init_provider_account_identity();
 });
 
 // src/core/this-computer.ts
@@ -16343,7 +16347,7 @@ var init_model_stream2 = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/install.ts
-var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, DOWNLOAD_STALL_MS2, VERIFY_STALL_MS, EXTRACT_STALL_MS;
+var STALE_LOCK_MS2, BUILT_IN_REASONING_SPACE_HEADROOM_BYTES, SPACE_BACKOFF_MS, VERIFY_STALL_MS, EXTRACT_STALL_MS;
 var init_install = __esm(() => {
   init_pinned_download();
   init_olympus_layout();
@@ -16352,7 +16356,6 @@ var init_install = __esm(() => {
   STALE_LOCK_MS2 = 60 * 60000;
   BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
   SPACE_BACKOFF_MS = 15 * 60000;
-  DOWNLOAD_STALL_MS2 = 2 * 60000;
   VERIFY_STALL_MS = 2 * 60000;
   EXTRACT_STALL_MS = 2 * 60000;
 });
@@ -17093,7 +17096,7 @@ function verifyPinnedFiles(staging, asset, uid, label, tool) {
     }
   }
 }
-var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_STALL_MS3, ManagedToolsError;
+var ZKAPI_VERSION = "0.1.6-olympus5", ZKAPI_CONFINE_SHA256 = "875ef65f77f8b869ef283f56fe3ea1e61f06c3f439243d44e5430a7130208215", ZKAPI_CONFINE_PATH = "bin/zkapi-confine", ZKAPI_BUILD_RECORD = "share/zkapi-clientd/olympus-build.json", ZKAPI_REQUIRED, ZKAPI_RENAME, ZKAPI_CONFINE_PIN, TOR_RELEASE = "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24", MANAGED_TOOL_PINS, MANIFEST_FILE = "olympus-tool.json", MAX_UNPACKED_BYTES, DOWNLOAD_STALL_MS2, ManagedToolsError;
 var init_managed_tools = __esm(() => {
   init_file_lease();
   ZKAPI_REQUIRED = [
@@ -17161,7 +17164,7 @@ var init_managed_tools = __esm(() => {
     }
   };
   MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
-  DOWNLOAD_STALL_MS3 = 2 * 60 * 1000;
+  DOWNLOAD_STALL_MS2 = 2 * 60 * 1000;
   ManagedToolsError = class ManagedToolsError extends Error {
     code;
     tool;
@@ -20033,12 +20036,14 @@ var init_vocabulary = __esm(() => {
       embedding: {
         disk_full: "Couldn't download the search model: the disk is full.",
         network: "Couldn't download the search model: the network dropped.",
+        stalled: "Couldn't download the search model: the download stopped receiving data.",
         checksum: "Couldn't download the search model: the download was damaged.",
         unknown: "Couldn't download the search model."
       },
       answers: {
         disk_full: "Couldn't download the private model: the disk is full.",
         network: "Couldn't download the private model: the network dropped.",
+        stalled: "Couldn't download the private model: the download stopped receiving data after several attempts.",
         checksum: "Couldn't download the private model: the download was damaged.",
         unknown: "Couldn't download the private model."
       }
@@ -20121,6 +20126,7 @@ var init_vocabulary = __esm(() => {
     },
     modelNotWorkingBecause: "Not working: {reason}",
     modelInstallDownloading: "Downloading {model}",
+    modelInstallRetrying: "The download of {model} was interrupted. Retrying automatically…",
     modelInstallVerifying: "Checking {model}…",
     modelInstallLoading: "Starting {model}…",
     modelInstallFailed: "Couldn't download {model}: {reason}",
@@ -20128,6 +20134,7 @@ var init_vocabulary = __esm(() => {
     modelInstallReasons: {
       disk_full: "the disk is full",
       network: "the connection dropped",
+      stalled: "the download stopped receiving data",
       checksum: "the download was damaged",
       unknown: "something went wrong"
     },
@@ -20594,6 +20601,12 @@ var init_vocabulary = __esm(() => {
     accountRow: "Everything in {source}",
     exceptions: "Exceptions ({n})",
     foldersHeading: "Folders",
+    folderFilter: "Filter folders",
+    folderFilterPlaceholder: "Type a folder name",
+    folderNoMatch: "No matching folders.",
+    folderSelectAll: "Select all",
+    folderSelectNone: "Select none",
+    folderInclude: "Include {name}",
     thisFolder: "This folder",
     unknownFolder: "A folder not opened yet",
     insideFolder: "A folder inside {name}",
@@ -22533,6 +22546,23 @@ function buildSourceIngestionLedgerSnapshot(status, options = {}) {
     applyCorpus(row, corpus, now, nestedBands.has(corpus.corpus_id));
   }
   applyScheduler(rows, unassigned, assign, options.schedulerStatus, now);
+  for (const definition of DASHBOARD_SUPPORTED_SOURCES) {
+    if (definition.connect_kind !== "oauth")
+      continue;
+    const handles = options.connectedHandleRegistry?.handles.filter((handle) => handle.provider === definition.provider);
+    if (!handles?.length)
+      continue;
+    const sourceId = definition.ingestion_ledger_source_id;
+    const row = rows.get(sourceId) ?? emptyRow(sourceId);
+    row.configured = true;
+    rows.set(sourceId, row);
+    if (handles.some((handle) => handle.backendState?.status === "reauth_required")) {
+      row.stuck.broken = Math.max(row.stuck.broken, 1);
+      row.attention.push("needs reconnect");
+    } else if (options.syncFreshnessThresholdHours !== undefined && row.freshness_hours !== undefined && row.freshness_hours > options.syncFreshnessThresholdHours && !options.schedulerStatus?.sources.some((source) => source.source_id === definition.source_id)) {
+      row.attention.push(`stale sync: ${Math.round(row.freshness_hours)}h since last refresh`);
+    }
+  }
   applyDropboxBreakdown(rows, options.dropboxFailureBreakdown, now);
   const ordered = Object.keys(SOURCE_DEFINITIONS).map((sourceId) => finalizeRow(rows.get(sourceId) ?? emptyRow(sourceId), now));
   const unassignedCorpora = summarizeUnassigned(Array.from(unassigned.values()));
@@ -27966,6 +27996,14 @@ init_tiered_store_set();
 // src/core/linux-engine-service.ts
 init_file_lease();
 init_worker_auth();
+
+// src/core/lifecycle-artifact.ts
+init_atomic_file();
+init_operation_error();
+var MAX_UPGRADE_ARTIFACT_BYTES = 256 * 1024 * 1024;
+var MAX_UPGRADE_EXPANDED_BYTES = 64 * 1024 * 1024;
+
+// src/core/linux-engine-service.ts
 init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { chmodSync as chmodSync8, closeSync as closeSync6, constants as constants7, copyFileSync, existsSync as existsSync18, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync15, linkSync as linkSync2, mkdirSync as mkdirSync18, openSync as openSync5, readFileSync as readFileSync35, readlinkSync as readlinkSync4, readdirSync as readdirSync8, realpathSync as realpathSync8, renameSync as renameSync6, rmSync as rmSync12, rmdirSync, statSync as statSync19, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
@@ -28655,8 +28693,70 @@ init_olympus_layout();
 init_source_registry();
 
 // src/core/connect.ts
+init_source_scope_approval();
+init_mail_source_scope();
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
+var OAUTH_STATUS_HANDLES = {
+  google: () => oauthSourceDefinition("google").handles,
+  gmail: () => oauthSourceDefinition("gmail").handles,
+  "google-drive": () => oauthSourceDefinition("google-drive").handles,
+  dropbox: () => oauthSourceDefinition("dropbox").handles,
+  x: () => oauthSourceDefinition("x").handles,
+  evernote: () => [{ provider: "evernote", capability: "evernote.notes.sync" }]
+};
+var OAUTH_STATUS_SOURCES = Object.keys(OAUTH_STATUS_HANDLES);
+var DROPBOX_OAUTH_SCOPES = ["files.metadata.read", "files.content.read", "sharing.read", "account_info.read"];
+function oauthSourceDefinition(source) {
+  if (source === "dropbox") {
+    return {
+      authUrl: "https://www.dropbox.com/oauth2/authorize",
+      tokenUrl: "https://api.dropboxapi.com/oauth2/token",
+      scopes: DROPBOX_OAUTH_SCOPES,
+      handles: [{
+        handle: (role) => role === "personal" ? "dropbox.personal" : `dropbox.${role}`,
+        provider: "dropbox",
+        capability: "dropbox.files.sync",
+        trustDomain: "secure_local",
+        scopes: DROPBOX_OAUTH_SCOPES
+      }]
+    };
+  }
+  if (source === "x") {
+    return {
+      authUrl: "https://x.com/i/oauth2/authorize",
+      tokenUrl: "https://api.x.com/2/oauth2/token",
+      scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"],
+      handles: [{
+        handle: (role) => role === "personal" ? "x.bookmarks.personal" : `x.bookmarks.${role}`,
+        provider: "x",
+        capability: "x.bookmarks.sync",
+        trustDomain: "internal",
+        scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"]
+      }]
+    };
+  }
+  const gmail = {
+    handle: (role) => role === "personal" ? "gmail.personal" : `gmail.${role}`,
+    provider: "gmail",
+    capability: "gmail.email.sync",
+    trustDomain: "secure_local",
+    scopes: ["https://www.googleapis.com/auth/gmail.readonly", "openid"]
+  };
+  const drive = {
+    handle: (role) => role === "personal" ? "google_drive.personal" : `google_drive.${role}`,
+    provider: "google_drive",
+    capability: "google_drive.docs.sync",
+    trustDomain: "internal",
+    scopes: ["https://www.googleapis.com/auth/drive.readonly", "openid"]
+  };
+  return {
+    authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+    tokenUrl: "https://oauth2.googleapis.com/token",
+    scopes: source === "gmail" ? gmail.scopes : source === "google-drive" ? drive.scopes : [...new Set([...gmail.scopes, ...drive.scopes])],
+    handles: source === "gmail" ? [gmail] : source === "google-drive" ? [drive] : [gmail, drive]
+  };
+}
 var OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
 var KNOWN_OAUTH_ERROR_CODES = new Set([
   "invalid_request",
@@ -33460,12 +33560,6 @@ async function revalidateStdioSourceAnswer(ctx, result) {
 // src/core/control-ui-gateway.ts
 init_worker_transport();
 init_http_timeout();
-
-// src/control-ui-contract.ts
-var OLYMPUS_DASHBOARD_TOOL_METHOD = "olympus.dashboard.tool";
-var OLYMPUS_DASHBOARD_PANEL_PATH = "/olympus/dashboard/panel";
-
-// src/core/control-ui-gateway.ts
 init_worker_auth();
 init_http();
 var OLYMPUS_TAB_TOOL_NAMES = [

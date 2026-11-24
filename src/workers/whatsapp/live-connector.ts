@@ -232,7 +232,8 @@ interface SpoolMessage {
   senderName: string;
   /** The name saved in the phone's contacts, when the bridge read one. */
   senderContactName?: string;
-  fromMe: boolean;
+  /** Absent only when an export does not identify which sender is the owner. */
+  fromMe?: boolean;
   timestamp: string;
   text: string;
   mentions?: Record<string, string>;
@@ -949,7 +950,7 @@ function noteLine(index: WhatsAppSpoolIndex, line: string, place: SpoolPlace): v
   index.noteMatchKeys({
     chatJid: message.chatJid,
     id: message.id,
-    fromMe: message.fromMe,
+    fromMe: message.fromMe === true,
     ...(message.mediaType !== undefined ? { mediaType: message.mediaType } : {}),
     mediaSaved: message.mediaPath !== undefined,
     keys,
@@ -1318,12 +1319,32 @@ function whatsAppConversationSignals(jid: string): Readonly<Record<string, unkno
  * Groups and other ids have no person address and are left to the caller.
  */
 export function whatsAppAddressLabel(jid: string | undefined): string | undefined {
-  const match = /^(\d{5,20})(?::\d+)?@(s\.whatsapp\.net|lid)$/.exec(jid?.trim() ?? '');
+  const match = /^(\d{5,20})(?::\d+)?@(s\.whatsapp\.net|lid)$/.exec(jid?.trim().toLowerCase() ?? '');
   if (!match) return undefined;
   // A hidden (lid) id has no number to show. Its last four digits keep two
   // unsaved members of one group apart, in citations and for the people
   // index, which links same-named senders who share a conversation.
   return match[2] === 'lid' ? `Unsaved WhatsApp contact ·${match[1]!.slice(-4)}` : `+${match[1]}`;
+}
+
+function whatsAppSenderMetadata(message: SpoolMessage): Readonly<Record<string, unknown>> {
+  const senderId = message.senderJid.trim() || (
+    message.fromMe === false && whatsAppAddressLabel(message.chatJid) ? message.chatJid : undefined
+  );
+  // The bridge or an export can put an address in the name field too.
+  const names = [message.senderContactName?.trim(), message.senderName.trim()];
+  const name = names.find(value => value && !/@(?:s\.whatsapp\.net|lid)$/i.test(value));
+  const addresses = [senderId, ...names].map(whatsAppAddressLabel);
+  const senderLabel = name ?? addresses.find(label => label?.startsWith('+')) ?? addresses.find(Boolean);
+  return {
+    // The raw id stays the sender of last resort, as before 1.5, so an
+    // unchanged message keeps its names hash and is not judged again.
+    sender: senderLabel ?? senderId,
+    senderId,
+    senderLabel,
+    senderIsOwner: message.fromMe,
+    fromMe: message.fromMe,
+  };
 }
 
 function rawItemFromSpoolMessage(
@@ -1342,7 +1363,6 @@ function rawItemFromSpoolMessage(
   const text = spoolMessageText(message);
   const hasPreviewEnrichment = text !== resolveMentionText(message.text, message.mentions);
   const status = isWhatsAppStatusBroadcast(message.chatJid);
-  const senderName = message.senderContactName || message.senderName || whatsAppAddressLabel(message.senderJid);
   return {
     identity,
     mimeType: isMedia ? (message.mediaMime ?? 'application/octet-stream') : TEXT_MIME_TYPE,
@@ -1352,11 +1372,7 @@ function rawItemFromSpoolMessage(
       ...(message.mediaType === undefined && !redacted ? { textComplete: true } : {}),
       ...whatsAppConversationSignals(message.chatJid),
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || whatsAppAddressLabel(message.chatJid) || message.chatJid,
-      sender: senderName || message.senderJid,
-      senderId: message.senderJid || undefined,
-      senderLabel: senderName || message.senderJid || undefined,
-      senderIsOwner: message.fromMe,
-      fromMe: message.fromMe,
+      ...whatsAppSenderMetadata(message),
       sentAt: message.timestamp,
       ...(status ? { recordKind: 'status' } : {}),
       // Absent means "this emit says nothing about reactions" and preserves
@@ -1377,7 +1393,6 @@ function rawItemFromSpoolMessage(
 function rawItemFromChild(message: SpoolMessage, child: WhatsAppChildRecord, account: string, fetchedAt: string): RawItem {
   const parent = recordIdentity(message, account);
   const status = isWhatsAppStatusBroadcast(message.chatJid);
-  const senderName = message.senderContactName || message.senderName || whatsAppAddressLabel(message.senderJid);
   return {
     identity: childIdentity(parent, child),
     mimeType: child.mimeType,
@@ -1387,10 +1402,7 @@ function rawItemFromChild(message: SpoolMessage, child: WhatsAppChildRecord, acc
       title: child.name,
       ...whatsAppConversationSignals(message.chatJid),
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || whatsAppAddressLabel(message.chatJid) || message.chatJid,
-      sender: senderName || message.senderJid,
-      senderLabel: senderName || message.senderJid || undefined,
-      senderIsOwner: message.fromMe,
-      fromMe: message.fromMe,
+      ...whatsAppSenderMetadata(message),
       sentAt: message.timestamp,
       ...(message.mediaType === undefined ? {} : { mediaType: message.mediaType }),
       ...(child.waitingForDiskSpace ? { mediaState: 'waiting_for_disk_space' } : {}),

@@ -2712,7 +2712,7 @@ export function chatgptDashboardClient(
       : which === 'answers' ? (models.answers ? models.answers.install : undefined) : models.transcription;
     if (!source || typeof source !== 'object') return null;
     const stateName = source.state;
-    if (stateName !== 'downloading' && stateName !== 'verifying' && stateName !== 'loading' && stateName !== 'failed') return null;
+    if (stateName !== 'downloading' && stateName !== 'retrying' && stateName !== 'verifying' && stateName !== 'loading' && stateName !== 'failed') return null;
     const number = (value: unknown) => (typeof value === 'number' && isFinite(value) && value >= 0 ? value : -1);
     const reason = source.failedReason;
     return {
@@ -2824,7 +2824,7 @@ export function chatgptDashboardClient(
     } else if (entry.state === 'verifying') {
       text = fill(P.modelInstallVerifying, { model });
     } else {
-      const parts = [fill(P.modelInstallDownloading, { model })];
+      const parts = [fill(entry.state === 'retrying' ? P.modelInstallRetrying : P.modelInstallDownloading, { model })];
       if (entry.percent >= 0) parts.push(percent(entry.percent) + '%');
       if (entry.total > 0 && entry.done >= 0) parts.push(installBytes(entry.done, entry.total));
       text = parts.join(' · ');

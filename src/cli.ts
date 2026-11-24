@@ -155,7 +155,9 @@ import {
   connectOAuthSourceDetached,
   connectGuidedSession,
   connectOAuthSource,
+  connectedOAuthStatuses,
   listDetachedOAuthStates,
+  OAUTH_STATUS_SOURCES,
   runDetachedOAuthChildFromRequestFile,
   readApiKeyFromStdin,
   type ConnectSource,
@@ -497,6 +499,17 @@ async function main(): Promise<void> {
       throw new OperationError('invalid_params', 'Native worker service invocation has unexpected arguments.');
     }
     await runWorkerForeground(args[1] ? { managedInstanceId: args[1] } : {});
+    return;
+  }
+
+  if (args[0] === '__prefetch-private-model') {
+    const { prefetchPrivateModel } = await import('./core/private-model-prefetch.ts');
+    if (args[1]) {
+      await prefetchPrivateModel(args[1], process.env);
+    } else {
+      const paths = engineServicePaths();
+      await prefetchPrivateModel(paths.workerEnvPath, { ...paths.dataEnv, OLYMPUS_ENGINE_HOST: '1' });
+    }
     return;
   }
 
@@ -1551,7 +1564,7 @@ function printHelp(): void {
   console.log('  olympus connect telegram|whatsapp --pair');
   console.log('  olympus connect venice|readwise --api-key-prompt');
   console.log('  olympus connect gemini --api-key-prompt  # existing legacy installs only; see docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration');
-  console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
+  console.log('  olympus connect status [google|gmail|google-drive|dropbox|x|evernote]');
   console.log('  olympus connect finish <address>');
   console.log('  olympus connections add <name>');
   console.log('  olympus connections pair');
@@ -1597,7 +1610,7 @@ export const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connect venice': 'olympus connect venice --api-key-prompt',
   'connect readwise': 'olympus connect readwise --api-key-prompt',
   'connect gemini': 'olympus connect gemini --api-key-prompt',
-  'connect status': 'olympus connect status [google|gmail|google-drive|dropbox]',
+  'connect status': 'olympus connect status [google|gmail|google-drive|dropbox|x|evernote]',
   'connect finish': 'olympus connect finish <address>',
   'connections add': 'olympus connections add <name>',
   'connections pair': 'olympus connections pair',
@@ -2657,7 +2670,7 @@ async function runConnect(args: string[]): Promise<unknown> {
         'olympus connect telegram|whatsapp --pair',
         'olympus connect venice|readwise --api-key-prompt',
         'olympus connect gemini --api-key-prompt  # existing legacy installs only; see docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration',
-        'olympus connect status [google|gmail|google-drive|dropbox]',
+        'olympus connect status [google|gmail|google-drive|dropbox|x|evernote]',
         'olympus connect finish <address>',
       ],
     };
@@ -2677,7 +2690,7 @@ async function runConnect(args: string[]): Promise<unknown> {
   }
   if (rawSource === 'status') {
     const rawStatusSource = args[1] && !args[1]!.startsWith('--') ? args[1] : undefined;
-    const supportedStatusSources = ['google', 'gmail', 'google-drive', 'dropbox'] as const;
+    const supportedStatusSources = OAUTH_STATUS_SOURCES;
     if (rawStatusSource && !(supportedStatusSources as readonly string[]).includes(rawStatusSource)) {
       throw new OperationError(
         'invalid_params',
@@ -2689,6 +2702,7 @@ async function runConnect(args: string[]): Promise<unknown> {
     const statusOptions = parseConnectOptions(rawStatusSource ? args.slice(2) : args.slice(1));
     return {
       ok: true,
+      connections: connectedOAuthStatuses(statusSource, statusOptions.registryPath ?? handleRegistryPathFromEnv(process.env, true)!),
       states: listDetachedOAuthStates({
         ...(statusSource ? { source: statusSource } : {}),
         ...(statusOptions.oauthStateDir ? { stateDir: statusOptions.oauthStateDir } : {}),

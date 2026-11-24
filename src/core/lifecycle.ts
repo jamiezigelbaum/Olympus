@@ -16,7 +16,7 @@ import { bootProgressLine, readBootProgress, readFrontProgress, type BootProgres
 import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, startupCapMs, type EngineHeartbeat } from './engine-heartbeat.ts';
 import { olympusStoreBytes } from './upgrade-store-copies.ts';
 import { commitEngineStores, copyEngineStores, restoreEngineStores } from './engine-store-copies.ts';
-import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
+import { prefetchPrivateModelFromPackage, prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
 import { acquireLifecycleMutationLock } from './lifecycle-lock.ts';
 import { OperationError } from './operation-error.ts';
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './public-source-capabilities.ts';
@@ -338,6 +338,14 @@ function installOrUpgradeLifecycle(
   // is a configuration refusal, not a reason to install the new worker and then
   // roll back one that was never given a chance to answer.
   const readinessPort = action === 'upgrade' ? workerReadinessPort(effective) : undefined;
+  if (prepared) {
+    prefetchPrivateModelFromPackage({
+      bunBin: upgradeBun(effective),
+      cliPath: join(prepared.workingDirectory, 'dist', 'cli.js'),
+      workerEnvPath: preview.env_path,
+      env: { HOME: options.homeDir, PATH: process.env.PATH },
+    });
+  }
   const previousUnitBytes = readManagedFileSnapshot(preview.unit_path);
   const previousEnvBytes = readManagedFileSnapshot(preview.env_path);
   beginTransaction(action, effective, preview, before.state, prepared);
@@ -1062,13 +1070,16 @@ function prepareUpgradeArtifact(
   if (!options.artifactPath?.trim()) {
     throw new OperationError('invalid_params', 'olympus worker upgrade requires --artifact <path>.');
   }
-  const bunBin = options.bunBin ?? (typeof Bun !== 'undefined' ? Bun.which('bun') : null) ?? process.execPath;
   return prepareWorkerUpgradeArtifact({
     artifactPath: options.artifactPath,
     homeDir: options.homeDir,
-    bunBin,
+    bunBin: upgradeBun(options),
     dryRun,
   });
+}
+
+function upgradeBun(options: WorkerLifecycleOptions): string {
+  return options.bunBin ?? (typeof Bun !== 'undefined' ? Bun.which('bun') : null) ?? process.execPath;
 }
 
 function withPreparedUpgrade<T extends WorkerLifecycleOptions & { homeDir: string }>(

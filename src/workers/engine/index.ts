@@ -1285,17 +1285,25 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ?? process.env.OLYMPUS_CREDENTIAL_HEALTH_REPORT_PATH?.trim()
                 ?? defaultCredentialHealthReportPath(),
             );
+            const scopes = sourceDashboard.fileSourceScopes?.summaries();
             const view = buildSourceDashboardViewModel({
               sourceIndexStatus: sourceIndexDashboardStatus,
               ingestionLedger: buildSourceIngestionLedgerSnapshot(sourceIndexDashboardStatus, {
                 exclusions: exclusionSources,
                 ...(schedulerDashboardStatus ? { schedulerStatus: schedulerDashboardStatus } : {}),
+                connectedHandleRegistry: registry,
+                ...(sourceDashboard.syncFreshnessThresholdHours !== undefined ? {
+                  syncFreshnessThresholdHours: sourceDashboard.syncFreshnessThresholdHours,
+                } : {}),
                 // Same registry the page uses, so the health line and the cards
                 // agree on which source owns which corpus.
                 ...(sourceDashboard.corpusRegistry ? { sourceCorpusRegistry: sourceDashboard.corpusRegistry } : {}),
                 safeForCastor: true,
               }),
               ...(schedulerDashboardStatus ? { schedulerStatus: schedulerDashboardStatus } : {}),
+              ...(sourceDashboard.syncFreshnessThresholdHours !== undefined ? {
+                syncFreshnessThresholdHours: sourceDashboard.syncFreshnessThresholdHours,
+              } : {}),
               sovereigntyEngine: sourceDashboard.sovereigntyEngine,
               ...(sourceDashboard.modelSetup ? { modelSetup: sourceDashboard.modelSetup() } : {}),
               ...(sourceDashboard.corpusRegistry ? { sourceCorpusRegistry: sourceDashboard.corpusRegistry } : {}),
@@ -1335,14 +1343,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // The dispatch chain is this worker's to know. Without it the card
               // offered Sync now for a source nothing here can sync.
               syncNowAvailable: dashboardSourceSyncAvailable,
-              ...(sourceDashboard.fileSourceScopes
+              ...(scopes
                 ? {
                     fileSourceScopeStatus: Object.fromEntries(
-                      sourceDashboard.fileSourceScopes.summaries()
-                        .map((scope) => [scope.source_id, scope.status]),
+                      scopes.map((scope) => [scope.source_id, scope.status]),
                     ),
+                    fileSourceScopeConnected: Object.fromEntries(scopes.map((scope) => [scope.source_id, scope.connected])),
                     fileSourceScopeIngestionEnabled: Object.fromEntries(
-                      sourceDashboard.fileSourceScopes.summaries().map((scope) => [
+                      scopes.map((scope) => [
                         scope.source_id,
                         scope.ingestion_enabled ?? (scope.status === 'approved' && (
                           scope.whole_account_selected === true
@@ -4385,8 +4393,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   }
 
   /**
-   * Re-adopt the scheduler's sources when the handle registry has changed under
-   * this worker.
+   * Re-adopt the scheduler's sources when the handle registry or approved
+   * scopes have changed under this worker.
    *
    * Unpair parks the source's lane by rebuilding the scheduler without its
    * handle. Re-pairing happens in ANOTHER process — `olympus connect telegram`

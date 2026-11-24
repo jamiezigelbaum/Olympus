@@ -66,7 +66,7 @@ const DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
 const X_USER_ID = /^\d{1,32}$/;
 
 export class ProviderAccountIdentityError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly status?: number) {
     super(message);
     this.name = 'ProviderAccountIdentityError';
   }
@@ -254,6 +254,7 @@ export async function fetchProviderAccountId(options: {
   if (!response.ok) {
     throw new ProviderAccountIdentityError(
       `${providerLabel(options.provider)} refused the account lookup with status ${response.status}.`,
+      response.status,
     );
   }
   let payload: Record<string, unknown>;
@@ -313,7 +314,7 @@ async function fetchGoogleSubject(options: {
   } catch {
     throw new ProviderAccountIdentityError('Google did not answer the token lookup.');
   }
-  if (!response.ok) throw new ProviderAccountIdentityError(`Google refused the token lookup with status ${response.status}.`);
+  if (!response.ok) throw new ProviderAccountIdentityError(`Google refused the token lookup with status ${response.status}.`, response.status);
   let payload: Record<string, unknown>;
   try {
     const parsed = JSON.parse(text) as unknown;

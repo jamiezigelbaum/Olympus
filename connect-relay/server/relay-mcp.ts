@@ -40,6 +40,7 @@ import { DEMO_GRANT_REMOTE_TOOLS, toolCallableOn, toolsForSurface, type McpSurfa
 import type { CredentialSurface } from '../shared/tokens.ts';
 import type { AdmissionPriority } from './limits.ts';
 import { appClientCopy, appResourceMeta, type McpAppClient } from '../shared/mcp-app-client.ts';
+import { claudeAppTools } from '../shared/claude-app-tools.ts';
 import { OFFLINE_RETRY_AFTER_SECONDS, offlineErrorBody, offlineSentence } from '../shared/offline-result.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, notConnectedDashboard, offlineDashboard } from '../shared/dashboard-contract.ts';
 import DASHBOARD_RESOURCE_READ from './generated/chatgpt-dashboard.json';
@@ -122,7 +123,7 @@ export function catalogFor(surface: McpSurface, client?: McpAppClient): RelayCat
   }));
   return {
     ...CURRENT_CATALOG,
-    tools: appClientCopy(CHATGPT_TOOLS, client),
+    tools: claudeAppTools(CHATGPT_TOOLS, client),
     dashboard: contents(DASHBOARD_RESOURCE_CONTENTS),
     privateAnswer: contents(PRIVATE_ANSWER_RESOURCE_CONTENTS),
     privateQuestion: contents(PRIVATE_QUESTION_RESOURCE_CONTENTS),

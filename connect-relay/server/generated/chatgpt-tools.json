@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=67e3e683c2e2"
+          "resourceUri": "ui://olympus/dashboard?v=758e25bacd08"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=67e3e683c2e2",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=758e25bacd08",
         "openai/ui": {
           "entrypoints": [
             {
@@ -500,7 +500,7 @@
               ],
               "additionalProperties": false
             },
-            "maxItems": 100
+            "maxItems": 500
           },
           "whole_account_selected": {
             "type": "boolean"
@@ -1117,7 +1117,7 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=67e3e683c2e2",
+      "uri": "ui://olympus/dashboard?v=758e25bacd08",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },

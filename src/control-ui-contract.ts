@@ -20,6 +20,8 @@ export const OLYMPUS_DASHBOARD_PANEL_PATH = '/olympus/dashboard/panel' as const;
 
 /** A registered folder-scoped file source (`core/file-scope-sources.ts`); the registry validates it. */
 export type OlympusFolderScopeSourceId = string;
+/** Maximum explicit folder choices in one scope save. */
+export const FOLDER_SCOPE_SELECTION_LIMIT = 500;
 /** The mail source whose scope is a time window, categories, labels and sender rules. */
 export type OlympusMailScopeSourceId = 'gmail.email';
 

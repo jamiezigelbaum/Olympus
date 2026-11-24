@@ -59,7 +59,7 @@ import {
 } from '../../core/messaging-capture.ts';
 import { readyWhatsAppBridge } from '../../core/messaging-pairing.ts';
 import { unlinkHelper } from './dashboard/dashboard-messaging-service.ts';
-import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
+import { ModelSetupService, requiredModelProfiles, type ModelCredentialState, type ModelSetupView } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, mergeWorkerSetupEnv, readWorkerSetupEnv, readWorkerSetupEnvAsync, workerSetupEnvPath } from '../../core/worker-auth.ts';
@@ -128,7 +128,6 @@ import { runningBuiltInTranscriber, sharedBuiltInTranscriber, wireBuiltInTranscr
 import {
   answerPrivately,
   builtInPrivateModelStatus,
-  BUILT_IN_ANALYST_MODEL_ENV,
   withBuiltInFallback,
 } from '../../core/analyst-built-in.ts';
 import { createDelphiAnalystModel } from '../../core/analyst-delphi.ts';
@@ -140,7 +139,7 @@ import {
   createVenicePrivacyCategoryResolver,
   readVeniceTextCatalogModels,
 } from '../../core/venice-model-catalog.ts';
-import { builtInModelEnvValue, readModelChoices, resolveVeniceStrongest } from '../../core/model-choices.ts';
+import { resolveVeniceStrongest } from '../../core/model-choices.ts';
 import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT } from '../../core/consult-settings.ts';
 import { createModelChoicesBackend, LOCAL_PROFILE_ID, VENICE_PROFILE_ID } from './runtime/model-choices-backend.ts';
 import { createAnalystQueryPlanner } from '../../core/query-planner.ts';
@@ -399,9 +398,12 @@ import {
   buildSourceIngestionLedgerSnapshot,
 } from '../source-ingestion-ledger.ts';
 import {
+  connectedGrantGeneration,
   handleRegistryPathFromEnv,
+  readConnectedHandleRegistry,
   type ConnectedCredentialHandle,
 } from '../credential-broker/connected-handles.ts';
+import { EnvCredentialBroker } from '../credential-broker/index.ts';
 import {
   FileSourceScopeAuthority,
   createScopeBoundGoogleDriveContentScope,
@@ -567,7 +569,7 @@ import {
 } from './runtime/embedding-providers.ts';
 import { createStoreScopes, fileScopeCredentialHandle, registeredStoreReadScope } from './runtime/store-scope-policies.ts';
 import { createWorkerSharedBuiltInModel,
-  builtInModelWanted, createTierSnifferModel, stopBuiltInModelOnShutdown } from './runtime/judging-models.ts';
+  applyBuiltInModelChoice, builtInModelWanted, createTierSnifferModel, stopBuiltInModelOnShutdown } from './runtime/judging-models.ts';
 import {
   createEmailSourceConnectorFromEnv,
   createRefreshableReadwiseConnectorStoreRuntime,
@@ -866,10 +868,7 @@ export async function main(): Promise<void> {
   // sniffer before its runtime is resolved below.
   const localModelActivity = createLocalModelActivity();
   // The owner's built-in size from Privacy rules; an operator's env pin wins.
-  if (sovereigntyEngine.source === 'file' && sovereigntyEngine.path) {
-    const builtInChoice = builtInModelEnvValue(process.env, readModelChoices(sovereigntyEngine.path));
-    if (builtInChoice) process.env[BUILT_IN_ANALYST_MODEL_ENV] = builtInChoice;
-  }
+  applyBuiltInModelChoice(sovereigntyEngine, process.env);
   // With the engine split, only the background holds the built-in model (one
   // server per computer); the front's completions run there (judging-models.ts).
   const workerBuiltInModel = !builtInModelWanted(sovereigntyEngine, process.env) ? undefined : createWorkerSharedBuiltInModel(process.env, engineFront ? {
@@ -1233,7 +1232,13 @@ export async function main(): Promise<void> {
   const localModelDiscovery = new LocalModelDiscovery();
   const getModelSetup = () => {
     const status = workerBuiltInModel ? builtInPrivateModelStatus(process.env) : undefined;
-    const view = { ...modelSetup.getStatus(), ...macComputerSetupView(), ...(status?.enabled ? { private_model: { state: status.state, bytesDone: status.bytesDone, bytesTotal: status.bytesTotal ?? status.downloadBytes } } : {}) };
+    const view: ModelSetupView = {
+      ...modelSetup.getStatus(), ...macComputerSetupView(),
+      ...(status?.enabled ? { private_model: {
+        state: status.state, bytesDone: status.bytesDone, bytesTotal: status.bytesTotal,
+        ...(status.state === 'failed' ? { failedReason: modelInstallFailedReason(status.failure) } : {}),
+      } } : {}),
+    };
     const tinfoilStatus = readTinfoilStatus();
     if (tinfoilStatus && tinfoilStatus.state !== 'ready') {
       view.cards = view.cards.map(card => card.id === 'tinfoil' ? { ...card, state: 'needs_attention', detail: tinfoilStatus.reason } : card);
@@ -3478,7 +3483,7 @@ export async function main(): Promise<void> {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       ...(gmailTierOwnerRuleSource ? { ownerRuleSource: gmailTierOwnerRuleSource } : {}),
-      scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
+      scopeApproval: { generation: scopeRef.approvalGeneration ?? scopeRef.accountGeneration, revision: scopeRef.revision },
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
       },
@@ -4176,15 +4181,7 @@ export async function main(): Promise<void> {
     }
     return guard;
   };
-  const withSourceAccountGuard = (
-    source: SourceSchedulerSource | undefined,
-    lane: AccountGuardLane,
-  ): SourceSchedulerSource | undefined => {
-    if (!source) return source;
-    const guard = sourceAccountGuardFor(lane);
-    if (guard) laneGuards.set(source.sourceId, guard);
-    return source;
-  };
+  const schedulerCredentialBroker = new EnvCredentialBroker();
   // The X lane as the account guard sees it, shared by the scheduler lane and
   // the operator routes (Sync now, content recovery) that call the runtime
   // directly. Every X bookmarks read is addressed to the runtime's user id,
@@ -4200,10 +4197,29 @@ export async function main(): Promise<void> {
     ),
     readsAs: { accountId: readsAs },
   });
-  const schedulerSourcesForHandles = (handles: readonly ConnectedCredentialHandle[]): {
+  const schedulerSourcesForHandles = (registered: readonly ConnectedCredentialHandle[]): {
     sources: SourceSchedulerSource[];
     decisions: SourceSchedulerConstructionDecision[];
   } => {
+    const handles = registered.filter((handle) => handle.backendState?.status !== 'reauth_required');
+    const withSourceAccountGuard = (
+      source: SourceSchedulerSource | undefined,
+      lane: AccountGuardLane,
+    ): SourceSchedulerSource | undefined => {
+      if (!source) return source;
+      const guard = sourceAccountGuardFor(lane);
+      if (guard) laneGuards.set(source.sourceId, guard);
+      const handle = handles.find((entry) => entry.handle === lane.handle);
+      if (!handle) return source;
+      const oauthRecovery = schedulerCredentialBroker.sourceOAuthRecovery({
+        handle: handle.handle,
+        provider: handle.provider,
+        capability: lane.capability,
+        ...(handle.trustDomain ? { trustDomain: handle.trustDomain } : {}),
+        purpose: 'Recover a rejected source sync credential.',
+      }, handle.connectedAt, connectedGrantGeneration(handle.connectedAt, handle.providerAccountId));
+      return oauthRecovery ? { ...source, oauthRecovery } : source;
+    };
     mountSourceLanes(handles);
     if (whatsappConnectorStore && whatsappTierSet) whatsappConnectorStoreSync ??= createWhatsAppConnectorStoreSyncHandler({ tierSet: whatsappTierSet, store: whatsappConnectorStore, account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE, env: process.env, readChild: whatsappReadChild });
     const decisions: SourceSchedulerConstructionDecision[] = [];
@@ -4703,6 +4719,8 @@ export async function main(): Promise<void> {
               const status = await sourceIndexStatus.status({ ...PLAIN_STATUS_REQUEST }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
               sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
                 schedulerStatus,
+                ...(connectedHandleRegistryPath ? { connectedHandleRegistry: readConnectedHandleRegistry(connectedHandleRegistryPath) } : {}),
+                syncFreshnessThresholdHours: olympusConfig.worker.scheduler.freshnessThresholdHours,
                 sourceCorpusRegistry,
                 safeForCastor: true,
               }));
@@ -5318,6 +5336,9 @@ export async function main(): Promise<void> {
       ? {
           sourceDashboard: {
             sovereigntyEngine,
+            ...(olympusConfig.worker.scheduler.enabled ? {
+              syncFreshnessThresholdHours: olympusConfig.worker.scheduler.freshnessThresholdHours,
+            } : {}),
             systemReport: () => ({
               version: runningOlympusVersion(), os: process.platform, osVersion: release(),
               host: process.env.OLYMPUS_ENGINE_HOST === '1' ? 'standalone' : 'openclaw', engine: 'running',

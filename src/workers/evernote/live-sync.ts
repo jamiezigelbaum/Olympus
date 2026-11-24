@@ -57,7 +57,12 @@ import {
 } from '../connector-store/tiered-store-set.ts';
 import {
   markConnectedHandleReauthRequired,
+  ConnectedHandleGrantMutationError,
+  connectedGrantGeneration,
+  readConnectedHandleRegistry,
+  readConnectedHandleGrantEpoch,
   upsertConnectedHandle,
+  withConnectedHandleGrantCustody,
   type ConnectedCredentialHandle,
 } from '../credential-broker/connected-handles.ts';
 import {
@@ -246,6 +251,8 @@ export async function startEvernoteSignIn(input: {
   now?: () => Date;
 }): Promise<{ authorizationUrl: string; complete(code: string): Promise<ConnectedCredentialHandle> }> {
   const serverUrl = input.serverUrl ?? EVERNOTE_MCP_SERVER_URL;
+  const epoch = readConnectedHandleGrantEpoch(input.registryPath);
+  const previous = readConnectedHandleRegistry(input.registryPath).handles.find((handle) => handle.handle === EVERNOTE_HANDLE);
   const pending: McpPendingSignIn = await startMcpSignIn({
     serverUrl,
     scope: EVERNOTE_MCP_SCOPE,
@@ -260,20 +267,36 @@ export async function startEvernoteSignIn(input: {
     authorizationUrl: pending.authorizationUrl,
     async complete(code) {
       const credential = await pending.complete(code);
-      const key = evernoteCredentialKey();
-      await secretStoreMcpCredentials(input.secretStore, key).write(credential);
-      const handle: ConnectedCredentialHandle = {
-        handle: EVERNOTE_HANDLE,
-        provider: EVERNOTE_PROVIDER,
-        accountRole: EVERNOTE_ACCOUNT_ROLE,
-        trustDomain: 'secure_local',
-        allowedCapabilities: [EVERNOTE_SYNC_CAPABILITY],
-        scopes: [EVERNOTE_MCP_SCOPE],
-        tokenSecretRefs: [`store:${key}`],
-        connectedAt: (input.now ?? (() => new Date()))().toISOString(),
-      };
-      upsertConnectedHandle(handle, input.registryPath);
-      return handle;
+      const now = input.now ?? (() => new Date());
+      return withConnectedHandleGrantCustody(input.registryPath, { expectedEpoch: epoch }, async () => {
+        const current = readConnectedHandleRegistry(input.registryPath).handles.find((handle) => handle.handle === EVERNOTE_HANDLE);
+        if (current?.connectedAt !== previous?.connectedAt || current?.providerAccountId !== previous?.providerAccountId) {
+          throw new Error('Another connection change landed while signing in. Connect again.');
+        }
+        const connectedAt = new Date(Math.max(now().getTime(), current ? Date.parse(current.connectedAt) + 1 : 0));
+        const baseKey = evernoteCredentialKey();
+        // The registry switch activates the replacement. A failed registry
+        // write cannot put the new account's credential under the old grant.
+        const key = current ? `${baseKey}.${connectedAt.getTime()}` : baseKey;
+        const handle: ConnectedCredentialHandle = {
+          handle: EVERNOTE_HANDLE,
+          provider: EVERNOTE_PROVIDER,
+          accountRole: EVERNOTE_ACCOUNT_ROLE,
+          trustDomain: 'secure_local',
+          allowedCapabilities: [EVERNOTE_SYNC_CAPABILITY],
+          scopes: [EVERNOTE_MCP_SCOPE],
+          tokenSecretRefs: [`store:${key}`],
+          connectedAt: connectedAt.toISOString(),
+        };
+        await secretStoreMcpCredentials(input.secretStore, key).write(credential);
+        upsertConnectedHandle(handle, input.registryPath);
+        const previousRef = current?.tokenSecretRefs?.find((ref) => ref === `store:${baseKey}` || ref.startsWith(`store:${baseKey}.`));
+        if (previousRef) {
+          try { await input.secretStore.delete(previousRef.slice('store:'.length)); }
+          catch { console.warn('[olympus:evernote] could not remove the replaced sign-in'); }
+        }
+        return handle;
+      });
     },
   };
 }
@@ -345,8 +368,38 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
   const serverUrl = options.serverUrl ?? EVERNOTE_MCP_SERVER_URL;
   const passPath = resolvedRawPath(EVERNOTE_SOURCE_ID, 'evernote-pass.json', env);
   const credentialRef = options.handle.tokenSecretRefs?.find((ref) => ref.startsWith('store:'))?.slice('store:'.length) ?? evernoteCredentialKey(options.handle.accountRole);
+  const grant = connectedGrantGeneration(options.handle.connectedAt, options.handle.providerAccountId);
+  const credentials = secretStoreMcpCredentials(options.secretStore, credentialRef);
+  const currentGrant = () => readConnectedHandleRegistry(options.registryPath).handles.find((handle) => handle.handle === options.handle.handle);
+  const matchesGrant = (handle: ConnectedCredentialHandle | undefined): handle is ConnectedCredentialHandle =>
+    handle !== undefined && connectedGrantGeneration(handle.connectedAt, handle.providerAccountId) === grant;
+  const assertGrantCurrent = () => {
+    const current = currentGrant();
+    if (!matchesGrant(current)) throw new McpSourceError('cancelled');
+    if (current.backendState?.status === 'reauth_required') throw new McpSourceError('auth_revoked');
+  };
   const tokens = new McpTokenSource({
-    store: secretStoreMcpCredentials(options.secretStore, credentialRef),
+    store: {
+      ...credentials,
+      async read() {
+        const credential = await credentials.read();
+        assertGrantCurrent();
+        return credential;
+      },
+      async write(credential) {
+        try {
+          await withConnectedHandleGrantCustody(options.registryPath, {}, async () => {
+            assertGrantCurrent();
+            await credentials.write(credential);
+          });
+        } catch (error) {
+          if (error instanceof ConnectedHandleGrantMutationError && error.code === 'credential_grant_busy') {
+            throw new McpSourceError('cancelled', { cause: error });
+          }
+          throw error;
+        }
+      },
+    },
     serverUrl,
     ...(options.fetch ? { fetch: options.fetch } : {}),
     now,
@@ -357,7 +410,10 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
     resumesAt ??= new Date(now().getTime() + retryAfterMs).toISOString();
     providerStops.report(resumesAt, now());
   };
-  const authorized = mcpAuthorizedFetch(tokens, serverUrl, options.fetch);
+  const authorized = mcpAuthorizedFetch(tokens, serverUrl, (url, init) => {
+    assertGrantCurrent();
+    return (options.fetch ?? fetch)(url, init);
+  });
   const authorizedFetch: FetchLike = async (url, init) => {
     providerStops.resume(now());
     const response = await authorized(url, init);
@@ -457,16 +513,21 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
   let notebookList: { at: number; books: EvernoteNotebook[] } | undefined;
   let notebookListing: Promise<EvernoteNotebook[]> | undefined;
 
-  const failed = (file: PassFile, error: unknown): never => {
+  const failed = async (file: PassFile, error: unknown): Promise<never> => {
     const name = (error as { name?: string } | undefined)?.name;
     const kind = isMcpSourceError(error) ? error.kind
       : name === 'EvernoteListingIncomplete' ? 'listing_incomplete'
         : name === 'EvernoteAccountChanged' ? 'account_changed'
           : 'pass_failed';
     const state = isMcpSourceError(error) ? MCP_SOURCE_DASHBOARD_STATE[error.kind] : 'provider_error';
-    writePassFile(passPath, { ...file, status: { ...file.status, last_error: { kind, state, at: now().toISOString(), ...(kind === 'rate_limited' && resumesAt ? { resumesAt } : {}) } } });
-    // A refused or lost sign-in: the card says Reconnect.
-    if (isMcpSourceError(error) && AUTH_KINDS.has(error.kind)) markConnectedHandleReauthRequired(options.handle.handle, options.registryPath, now());
+    await withConnectedHandleGrantCustody(options.registryPath, {}, async () => {
+      if (!matchesGrant(currentGrant())) return;
+      // A refused or lost sign-in: the card says Reconnect.
+      if (isMcpSourceError(error) && AUTH_KINDS.has(error.kind)) {
+        markConnectedHandleReauthRequired(options.handle.handle, options.registryPath, now(), grant);
+      }
+      writePassFile(passPath, { ...file, status: { ...file.status, last_error: { kind, state, at: now().toISOString(), ...(kind === 'rate_limited' && resumesAt ? { resumesAt } : {}) } } });
+    });
     throw error;
   };
 

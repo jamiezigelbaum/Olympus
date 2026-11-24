@@ -3373,6 +3373,8 @@ export async function searchReleasedEvidence(input: {
       ...(item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {}),
       ...(cite?.title ? { title: cite.title } : {}),
       ...(cite?.sourceLabel ? { source_label: cite.sourceLabel } : {}),
+      ...(item.family === 'chat' && cite?.conversationLabel ? { conversation_label: cite.conversationLabel } : {}),
+      ...(item.family === 'chat' && cite?.authorLabel ? { author_label: cite.authorLabel } : {}),
       ...(cite?.uri ? { uri: cite.uri } : {}),
       ...(cite?.authoredAt ? { authored_at: cite.authoredAt } : {}),
       ...(cite?.updatedAt ? { updated_at: cite.updatedAt } : {}),

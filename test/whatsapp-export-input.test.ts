@@ -144,6 +144,8 @@ interface Row {
   parent: string | null;
   locator: string | null;
   tombstoned: number;
+  sender: string | null;
+  owner: number | null;
 }
 
 /** The lane's rows across its tier stores (each message goes where its content puts it), in the order they were first stored. */
@@ -154,7 +156,8 @@ function rows(target: Lane): Row[] {
     try {
       return db.query(`
         SELECT provider_item_id AS id, provider_conversation_id AS conversation, source_version AS version,
-          parent_local_item_id AS parent, deferred_locator AS locator, tombstoned, indexed_at AS seen
+          parent_local_item_id AS parent, deferred_locator AS locator, tombstoned, indexed_at AS seen,
+          sender_label AS sender, sender_is_owner AS owner
         FROM items ORDER BY item_pk
       `).all() as Array<Row & { seen: string }>;
     } finally {
@@ -195,7 +198,10 @@ describe('a WhatsApp export with no live capture on this computer', () => {
       { at: '2026-07-01T09:01:00', sender: 'Jamie Owner', text: 'Yes, see you there' },
     ], { style: 'android-24-dmy' });
     await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', exportText);
-    expect(rows(target).filter((row) => row.tombstoned === 0).length).toBeGreaterThanOrEqual(2);
+    expect(rows(target).filter((row) => row.tombstoned === 0).map(row => [row.sender, row.owner]).sort()).toEqual([
+      ['Jamie Owner', null],
+      ['Rowan Hale', null],
+    ]);
   });
 });
 
@@ -284,6 +290,22 @@ describe('a WhatsApp export beside live capture', () => {
     const findings = await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', chatText(renamed, { style: 'android-24-dmy' }));
     expect(findings.filter((finding) => finding.kind === WHATSAPP_INPUT_FINDINGS.nearMiss)).toHaveLength(1);
     expect(activeIds(target).filter((id) => id.startsWith('wx'))).toHaveLength(1);
+  });
+
+  test('a repeated reply cannot teach the importer that the chat partner is the owner', async () => {
+    const target = lane();
+    writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), [
+      spoolLine({ id: 'own-ok', timestamp: '2026-07-01T09:00:10Z', from_me: true, text: 'OK' }),
+      spoolLine({ id: 'peer-ok', timestamp: '2026-07-01T09:00:20Z', text: 'OK' }),
+    ].join(''));
+    await pullLive(target);
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', chatText([
+      { at: '2026-07-01T08:59:00', sender: 'Rowan Hale', text: 'Ferry at nine?' },
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'OK' },
+    ], { style: 'android-24-dmy' }));
+    const active = rows(target).filter(row => row.tombstoned === 0);
+    expect(active.some(row => row.id === 'peer-ok' && row.owner === 0)).toBe(true);
+    expect(active.filter(row => row.id.startsWith('wx'))).toMatchObject([{ sender: 'Rowan Hale', owner: null }]);
   });
 
   test('a chat whose name two live chats share is not merged into either', async () => {

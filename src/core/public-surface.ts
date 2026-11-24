@@ -270,6 +270,7 @@ export const V0_4_PUBLIC_CLI_GLOBALS = [
 export const V0_4_PACKAGE_INTERNAL_CLI_HELPERS = [
   '__oauth-detached-child',
   '__worker-service-run',
+  '__prefetch-private-model',
   '__relay-service-run',
   '__engine-run',
   '__engine-server-mode',

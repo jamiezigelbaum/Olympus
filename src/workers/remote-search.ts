@@ -125,9 +125,9 @@ export function remoteSearchExtension(
   request: RemoteSearchRequestContext = {},
 ): McpServerExtension {
   return {
-    tools: (listed) => [request.issueReadHandle
-      ? { ...REMOTE_SEARCH_TOOL, description: `${REMOTE_SEARCH_TOOL.description} Pass an item's read_handle to source_item_read to read more of it.` }
-      : REMOTE_SEARCH_TOOL, ...listed],
+    // The result explains how to use a read handle when it actually carries one.
+    // Keep the existing definition stable for clients that have approved it.
+    tools: (listed) => [REMOTE_SEARCH_TOOL, ...listed],
     call: async (call, next, signal) => {
       if (call.params.name === REMOTE_SEARCH_TOOL.name) {
         const signals = [signal, request.signal].filter((one): one is AbortSignal => one !== undefined);

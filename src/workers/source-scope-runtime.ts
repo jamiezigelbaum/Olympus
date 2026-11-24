@@ -46,12 +46,14 @@ import type { GmailConnectorScope } from './google-connectors/gmail.ts';
 export interface FileSourceScopePolicyRef {
   sourceId: FileSourceScopeId;
   accountGeneration: string;
+  approvalGeneration?: string;
   revision: string;
 }
 
 export interface MailSourceScopePolicyRef {
   sourceId: MailSourceScopeId;
   accountGeneration: string;
+  approvalGeneration?: string;
   revision: string;
 }
 
@@ -114,7 +116,12 @@ export class FileSourceScopeAuthority {
   mailPolicyRef(): MailSourceScopePolicyRef | undefined {
     const snapshot = this.mailSnapshot();
     if (snapshot.status !== 'approved' || !snapshot.accountGeneration) return undefined;
-    return { sourceId: 'gmail.email', accountGeneration: snapshot.accountGeneration, revision: snapshot.revision };
+    return {
+      sourceId: 'gmail.email',
+      accountGeneration: snapshot.accountGeneration,
+      ...(snapshot.approvalGeneration ? { approvalGeneration: snapshot.approvalGeneration } : {}),
+      revision: snapshot.revision,
+    };
   }
 
   assertCurrentMail(ref: MailSourceScopePolicyRef): ReturnType<typeof assertMailSourceScopeApproved> {
@@ -252,6 +259,7 @@ export class FileSourceScopeAuthority {
     return {
       sourceId,
       accountGeneration: snapshot.accountGeneration,
+      ...(snapshot.approvalGeneration ? { approvalGeneration: snapshot.approvalGeneration } : {}),
       revision: snapshot.revision,
     };
   }
@@ -362,7 +370,7 @@ export function fileSourceScopeContentFilters(
   const deniedKeys = approval.selections
     .filter((selection) => selection.state !== 'ingest')
     .map((selection) => selection.key);
-  const base = scopeStampFilter(definition, approval.accountGeneration, approval.revision);
+  const base = scopeStampFilter(definition, approval.approvalGeneration ?? approval.accountGeneration, approval.revision);
   if (approval.wholeAccount) {
     return {
       allowed: true,
@@ -396,7 +404,7 @@ export function fileSourceScopeMetadataFilters(
     .filter((selection) => (selection.state === 'metadata_only' || selection.state === 'on_demand'))
     .map((selection) => selection.key);
   const base: ConnectorStoreSearchFilters = {
-    ...scopeStampFilter(definition, approval.accountGeneration, approval.revision),
+    ...scopeStampFilter(definition, approval.approvalGeneration ?? approval.accountGeneration, approval.revision),
     ...scopeKeyFilter(definition, 'exclude', excludedKeys),
     ...scopeKeyFilter(definition, 'metadataOnly', metadataOnlyKeys),
   };
@@ -445,7 +453,7 @@ export function createScopeBoundGoogleDriveContentScope(input: {
 }): GoogleDriveContentScope {
   const current = (): FileSourceScopeApprovalSnapshot => input.authority.assertCurrent(input.ref);
   return {
-    generation: input.ref.accountGeneration,
+    generation: input.ref.approvalGeneration ?? input.ref.accountGeneration,
     revision: input.ref.revision,
     allowsMetadata(folderAncestorIds) {
       return fileSourceScopeAllowsMetadata(current(), folderAncestorIds);
@@ -462,7 +470,7 @@ export function createScopeBoundDropboxContentScope(input: {
 }): DropboxContentScope {
   const current = (): FileSourceScopeApprovalSnapshot => input.authority.assertCurrent(input.ref);
   return {
-    generation: input.ref.accountGeneration,
+    generation: input.ref.approvalGeneration ?? input.ref.accountGeneration,
     revision: input.ref.revision,
     assertCurrent() {
       current();

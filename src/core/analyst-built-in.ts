@@ -140,7 +140,7 @@ export interface BuiltInPrivateModelStatus extends BuiltInReasoningStatus {
 /**
  * What the dashboard shows for the built-in private model: whether it is on
  * for this machine, which model, and the install state from the status file
- * (`not_started` → `downloading` → `verifying` → `loading` → `ready`, or
+ * (`not_started` → `downloading` → `verifying` → `loading` → `ready`, with `retrying` during recovery, or
  * `failed` with a reason). Reads files only; never starts a download.
  */
 export function builtInPrivateModelStatus(
@@ -272,7 +272,9 @@ export function createBuiltInAnalystModel(options: BuiltInAnalystModelOptions = 
             'argus_unreachable',
             status.state === 'failed'
               ? `The built-in private model could not be installed: ${status.failure?.message ?? 'unknown error'}`
-              : `The built-in private model is still downloading (${status.percent}%).`,
+              : status.state === 'retrying'
+                ? status.label
+                : `The built-in private model is still downloading (${status.percent}%).`,
             'Private answers use the built-in model once its download finishes; nothing needs to be done.',
           );
         }
@@ -475,6 +477,8 @@ export interface PrivateEvidenceItem {
   /** Caller's stable id for the item; citations come back with it. */
   id: string;
   title?: string;
+  conversationLabel?: string;
+  authorLabel?: string;
   /** The Private text the answer may use. */
   text: string;
   /** Where the item lives (path, message link); shown with the citation. */
@@ -815,6 +819,8 @@ export function privateEvidencePack(question: string, evidence: readonly Private
       },
       citation: {
         ...(item.title ? { title: item.title } : {}),
+        ...(item.conversationLabel ? { conversationLabel: item.conversationLabel } : {}),
+        ...(item.authorLabel ? { authorLabel: item.authorLabel } : {}),
         ...(item.source ? { sourceLabel: item.source } : {}),
         ...(item.locator ? { uri: item.locator } : {}),
         ...(item.date ? { authoredAt: item.date } : {}),

@@ -8,6 +8,7 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
+import { createServer, type ServerResponse } from 'node:http';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +25,11 @@ import {
 } from '../src/core/analyst-built-in.ts';
 import type { Analyst, AnalystResult } from '../src/core/contracts.ts';
 import { OperationError } from '../src/core/operation-error.ts';
+import { modelInstallFailedReason } from '../src/core/model-install-failure.ts';
+import { renderModelSetupBlocker } from '../src/workers/dashboard/model-setup.ts';
+import { writeModelChoices } from '../src/core/model-choices.ts';
+import { prefetchPrivateModel } from '../src/core/private-model-prefetch.ts';
+import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import {
   BuiltInReasoningInstallError,
   installBuiltInReasoning,
@@ -591,6 +597,47 @@ describe('installer', () => {
     expect(requests).toHaveLength(2);
   });
 
+  for (const badChecksum of [false, true]) {
+    test(`update preparation uses the saved model choice and verifies the download (bad checksum: ${badChecksum})`, async () => {
+      const dir = tempDir();
+      const env = { HOME: dir, OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+      const policy = join(dir, 'sovereignty.json');
+      writeFileSync(policy, JSON.stringify(loadSovereigntyPreset('local-first')));
+      writeModelChoices(policy, { builtIn: 'small' });
+      const workerEnvPath = join(dir, 'worker.env');
+      writeFileSync(workerEnvPath, `OLYMPUS_SOVEREIGNTY_CONFIG='${policy}'\n`, { mode: 0o600 });
+      const { model, runtime } = specs(badChecksum ? { modelSha: '0'.repeat(64) } : {});
+      const { fetchImpl, requests } = server();
+      const lines: string[] = [];
+      const prepare = () => prefetchPrivateModel(workerEnvPath, env, {
+        totalMemoryBytes: 16 * GIB,
+        progress: line => lines.push(line),
+        install: options => {
+          expect(options.model).toBe(QWEN35_2B);
+          return installFixture({ ...options, model, runtime, platform: 'darwin-arm64', fetchImpl, extractArchive });
+        },
+      });
+      const liveStatusPath = join(dir, 'status.json');
+      const liveStatus = JSON.stringify({ state: 'ready', modelId: QWEN35_4B.modelId });
+      writeFileSync(liveStatusPath, liveStatus);
+      const modelPath = join(dir, model.modelId, model.file.name);
+      if (badChecksum) {
+        await expect(prepare()).rejects.toMatchObject({ reason: 'checksum_mismatch' });
+        expect(existsSync(modelPath)).toBe(false);
+        expect(lines).not.toContain('Private model verified for the update.');
+        expect(readBuiltInReasoningStatus(model, env).state).toBe('not_started');
+      } else {
+        await prepare();
+        expect(readFileSync(modelPath)).toEqual(Buffer.from(modelBytes));
+        expect(lines).toContain('Private model verified for the update.');
+        expect(readBuiltInReasoningStatus(model, env).state).toBe('ready');
+      }
+      expect(readFileSync(liveStatusPath, 'utf8')).toBe(liveStatus);
+      if (!badChecksum) await installFixture({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive });
+      expect(requests).toHaveLength(2);
+    });
+  }
+
   test('unpacking the server waits on a child, so the worker keeps answering meanwhile (#784)', async () => {
     const dir = tempDir();
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
@@ -616,15 +663,19 @@ describe('installer', () => {
     }
   });
 
-  test('a model that does not match its pinned digest is removed, never installed', async () => {
+  test('a corrupt saved prefix fails verification after resuming and is never installed', async () => {
     const dir = tempDir();
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
-    const { model, runtime } = specs({ modelSha: '0'.repeat(64) });
-    const { fetchImpl } = server();
+    const { model, runtime } = specs();
+    const { fetchImpl, requests } = server();
+    const modelDir = join(dir, 'test-model');
+    mkdirSync(modelDir);
+    writeFileSync(join(modelDir, 'test.gguf.partial'), modelBytes.slice(1, 1_001));
     const failure = await installFixture({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive })
       .catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(BuiltInReasoningInstallError);
     expect((failure as BuiltInReasoningInstallError).reason).toBe('checksum_mismatch');
+    expect(requests.at(-1)?.range).toBe('bytes=1000-4095');
     expect(existsSync(join(dir, 'test-model', 'test.gguf'))).toBe(false);
     expect(existsSync(join(dir, 'test-model', 'test.gguf.partial'))).toBe(false);
     expect(readBuiltInReasoningStatus(model, env)).toMatchObject({ state: 'failed', failure: { reason: 'checksum_mismatch' } });
@@ -638,6 +689,20 @@ describe('installer', () => {
     const installed = await installFixture({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive });
     expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
     expect(requests.at(-1)!.range).toBe('bytes=1000-4095');
+  });
+
+  test('a complete partial from an interrupted install is verified without downloading it again', async () => {
+    const dir = tempDir();
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    const { model, runtime } = specs();
+    const { fetchImpl, requests } = server();
+    const modelDir = join(dir, 'test-model');
+    mkdirSync(modelDir);
+    writeFileSync(join(modelDir, 'test.gguf.partial'), modelBytes);
+    const installed = await installFixture({ model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive });
+    expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
+    expect(requests.map(({ url }) => url)).toEqual([runtime.archives[0]!.url]);
+    expect(existsSync(join(modelDir, 'test.gguf.partial'))).toBe(false);
   });
 
   test('a stale "verifying" status over files already on disk is re-checked and ends ready, with real byte progress', async () => {
@@ -689,38 +754,104 @@ describe('installer', () => {
     expect(seen.at(-1)!.state).toBe('ready');
   });
 
-  test('a download that stops sending fails within the stall limit, and the retry resumes', async () => {
-    const dir = tempDir();
-    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
-    const { model, runtime } = specs();
-    let first = true;
-    const requests: Array<string | null> = [];
-    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith('llama.tar.gz')) return new Response(runtimeBytes);
-      const range = new Headers(init?.headers).get('range');
-      requests.push(range);
-      if (first) {
-        first = false;
-        // 1,000 bytes, then silence: the connection never closes.
-        let sent = false;
-        return new Response(new ReadableStream({
-          pull(controller) {
-            if (sent) return new Promise<void>(() => undefined);
-            sent = true;
-            controller.enqueue(modelBytes.slice(0, 1_000));
-          },
-        }));
+  async function stalledServer(serveModel: (response: ServerResponse, start: number) => void) {
+    const ranges: Array<string | undefined> = [];
+    const http = createServer((request, response) => {
+      if (request.url === '/llama.tar.gz') {
+        response.end(runtimeBytes);
+        return;
       }
-      const start = range ? Number(/bytes=(\d+)-/.exec(range)![1]) : 0;
-      return new Response(modelBytes.slice(start), { status: range ? 206 : 200, headers: range ? { 'Content-Range': `bytes ${start}-${modelBytes.length - 1}/${modelBytes.length}` } : {} });
-    }) as typeof fetch;
-    const lines: string[] = [];
-    const options = { model, runtime, env, platform: 'darwin-arm64', fetchImpl, extractArchive, downloadStallMs: 50, log: (line: string) => lines.push(line) };
-    const installed = await installFixture(options);
-    expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
-    expect(requests.at(-1)).toBe('bytes=1000-4095');
-    expect(readBuiltInReasoningStatus(model, env).state).toBe('ready');
+      const range = request.headers.range;
+      ranges.push(range);
+      const start = Number(/^bytes=(\d+)-/.exec(range ?? '')?.[1] ?? 0);
+      response.writeHead(206, { 'Content-Range': `bytes ${start}-${modelBytes.length - 1}/${modelBytes.length}` });
+      response.flushHeaders();
+      serveModel(response, start);
+    });
+    await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve));
+    const address = http.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a loopback port');
+    const base = `http://127.0.0.1:${address.port}`;
+    const { model, runtime } = specs();
+    model.file = { ...model.file, url: `${base}/test.gguf` };
+    const archive = runtime.archives[0]!;
+    return {
+      ranges,
+      model,
+      runtime: { ...runtime, archives: [{ ...archive, url: `${base}/llama.tar.gz` }] },
+      stop() {
+        http.close();
+        http.closeAllConnections();
+      },
+    };
+  }
+
+  function modelBlocker(model: BuiltInReasoningModelSpec, env: Record<string, string>) {
+    const status = readBuiltInReasoningStatus(model, env);
+    return renderModelSetupBlocker({
+      ready: false, checked_at: status.updatedAt, cards: [],
+      private_model: { ...status, failedReason: modelInstallFailedReason(status.failure) },
+    });
+  }
+
+  test('a Range server stalls mid-file, resumes from disk and completes even if the final response stays open', async () => {
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: tempDir() };
+    let stalledConnectionClosed = false;
+    let resumed: ServerResponse | undefined;
+    const fake = await stalledServer((response, start) => {
+      if (start === 0) {
+        response.on('close', () => { stalledConnectionClosed = true; });
+        response.write(modelBytes.subarray(0, 1_000));
+      } else resumed = response;
+    });
+    const retries: string[] = [];
+    const installed = installFixture({
+      model: fake.model, runtime: fake.runtime, env, platform: 'darwin-arm64', extractArchive, downloadStallMs: 200,
+      onProgress: (status) => { if (status.state === 'retrying') retries.push(status.failure!.reason); },
+    });
+    try {
+      await waitFor(() => resumed !== undefined);
+      const status = readBuiltInReasoningStatus(fake.model, env);
+      expect(status).toMatchObject({ state: 'retrying', bytesDone: runtimeBytes.length + 1_000 });
+      expect(modelBlocker(fake.model, env)).toContain('Retrying automatically');
+      expect(modelBlocker(fake.model, env)).not.toContain('data-model-retry');
+      const path = join(env.OLYMPUS_BUILT_IN_REASONING_DIR, 'test-model', 'test.gguf');
+      expect(readFileSync(`${path}.partial`)).toEqual(Buffer.from(modelBytes.subarray(0, 1_000)));
+      expect(existsSync(path)).toBe(false);
+      resumed!.write(modelBytes.subarray(1_000)); // Keep the body open after its pinned byte count.
+      expect(readFileSync((await installed).modelPath)).toEqual(Buffer.from(modelBytes));
+      await waitFor(() => stalledConnectionClosed);
+      expect(fake.ranges).toEqual(['bytes=0-4095', 'bytes=1000-4095']);
+      expect(retries).toEqual(['download_stalled']);
+      expect(readBuiltInReasoningStatus(fake.model, env).state).toBe('ready');
+    } finally {
+      fake.stop();
+      await installed.catch(() => undefined);
+    }
+  });
+
+  test('repeated stalls expose the reason and Try again, and a new install attempt keeps the saved prefix', async () => {
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: tempDir() };
+    let recover = false;
+    const fake = await stalledServer((response, start) => {
+      if (recover) response.end(modelBytes.subarray(start));
+      else if (start === 0) response.write(modelBytes.subarray(0, 1_000));
+    });
+    const options = {
+      model: fake.model, runtime: fake.runtime, env, platform: 'darwin-arm64', extractArchive, downloadStallMs: 100,
+    };
+    try {
+      await expect(installFixture(options)).rejects.toMatchObject({ reason: 'download_stalled' });
+      expect(fake.ranges).toEqual(['bytes=0-4095', 'bytes=1000-4095', 'bytes=1000-4095', 'bytes=1000-4095']);
+      expect(modelBlocker(fake.model, env)).toContain('stopped receiving data after several attempts');
+      expect(modelBlocker(fake.model, env)).toContain('data-model-retry');
+      recover = true;
+      const installed = await installFixture(options);
+      expect(readFileSync(installed.modelPath)).toEqual(Buffer.from(modelBytes));
+      expect(fake.ranges.at(-1)).toBe('bytes=1000-4095');
+    } finally {
+      fake.stop();
+    }
   });
 
   test('a disk without room for the model plus 2 GB headroom gets no download, and a status saying how much is needed', async () => {

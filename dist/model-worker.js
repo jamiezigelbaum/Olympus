@@ -1567,7 +1567,7 @@ var WRITE_SLICE_BYTES = 64 * 1024;
 var READ_RETRIES = 3;
 var RETRY_DELAY_MS = 250;
 
-class InterruptedRead extends Error {
+class InterruptedTransfer extends Error {
 }
 async function downloadPinnedFile(options) {
   const { fetchImpl, url, target, partial, expectedBytes, algorithm, encoding, noun, stallMs, error } = options;
@@ -1595,7 +1595,8 @@ async function downloadPinnedFile(options) {
   try {
     if (existsSync5(partial)) {
       const size = statSync2(partial).size;
-      if (size > 0 && size < expectedBytes) {
+      if (size > 0 && size <= expectedBytes) {
+        options.onCheckPartial?.();
         await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
         options.onProgress(size);
@@ -1608,9 +1609,10 @@ async function downloadPinnedFile(options) {
       const end = Math.min(expectedBytes - 1, start + REQUEST_BYTES - 1);
       const controller = new AbortController;
       let timer;
+      const stall = new Error(`no data for ${stallMs / 1000} s`);
       const armStall = () => {
         clearTimeout(timer);
-        timer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
+        timer = setTimeout(() => controller.abort(stall), stallMs);
       };
       let response;
       let reader;
@@ -1624,7 +1626,10 @@ async function downloadPinnedFile(options) {
             headers: { Range: `bytes=${start}-${end}`, "Accept-Encoding": "identity" }
           }), controller.signal);
         } catch (cause) {
-          throw error("download_failed", `Could not reach the download server for the ${noun} (${message(cause)}).`);
+          throw new InterruptedTransfer(`could not reach the download server: ${message(cause)}`);
+        }
+        if (response.status === 408 || response.status === 429 || response.status >= 500) {
+          throw new InterruptedTransfer(`HTTP ${response.status}`);
         }
         if (response.status !== 200 && response.status !== 206 || !response.body) {
           throw error("download_failed", `The ${noun} download failed (HTTP ${response.status}).`);
@@ -1661,9 +1666,13 @@ async function downloadPinnedFile(options) {
           armStall();
           let part;
           try {
-            part = await untilAborted(bodyReader.read(), controller.signal);
+            do {
+              part = await untilAborted(bodyReader.read(), controller.signal);
+            } while (!part.done && part.value.byteLength === 0);
           } catch (cause) {
-            throw new InterruptedRead(message(cause));
+            throw new InterruptedTransfer(message(cause));
+          } finally {
+            clearTimeout(timer);
           }
           if (part.done)
             return false;
@@ -1686,17 +1695,21 @@ async function downloadPinnedFile(options) {
           }
           return true;
         };
-        while (await readNext()) {}
+        while (received <= responseEnd && await readNext()) {}
         if (received !== responseEnd + 1)
           throw mismatch(`${url} did not match its pinned size; nothing was installed.`);
+        retries = 0;
       } catch (cause) {
-        if (!(cause instanceof InterruptedRead))
+        if (!(cause instanceof InterruptedTransfer))
           throw cause;
+        const reason = controller.signal.reason === stall ? "download_stalled" : "download_failed";
+        const detail = `The ${noun} download was interrupted (${cause.message}).`;
         if (retries >= READ_RETRIES) {
-          throw error("download_failed", `The ${noun} download was interrupted (${cause.message}).`);
+          throw error(reason, detail);
         }
         retries += 1;
         retry = true;
+        options.onRetry?.(reason, detail);
       } finally {
         clearTimeout(timer);
         if (reader) {
@@ -2407,7 +2420,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     stallMs,
     verifyStallMs: 2 * 60000,
     keepPartial: false,
-    error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
+    error: (reason, message) => new BuiltInEmbeddingInstallError(reason === "download_stalled" ? "download_failed" : reason, message),
     onStart: () => reporter.set("downloading", label),
     onProgress: (bytes) => reporter.advance(bytes, label)
   });
@@ -7417,7 +7430,7 @@ var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
 var RUNTIME_UNPACK_FACTOR = 4;
 var SPACE_BACKOFF_MS = 15 * 60000;
 var PROGRESS_WRITE_INTERVAL_MS2 = 500;
-var DOWNLOAD_STALL_MS2 = 2 * 60000;
+var DOWNLOAD_STALL_MS2 = 60000;
 var VERIFY_STALL_MS = 2 * 60000;
 var EXTRACT_STALL_MS = 2 * 60000;
 var LOG_PREFIX = "[built-in-model]";
@@ -7771,8 +7784,10 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
     diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname12(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
     write: space.write,
-    onStart: () => reporter.set("downloading", label),
-    onProgress: (bytes) => reporter.advance(bytes, label)
+    onStart: () => reporter.startDownload(label),
+    onCheckPartial: () => reporter.set("verifying", `Checking saved data for the ${space.noun}`),
+    onProgress: (bytes) => reporter.advance(bytes, label),
+    onRetry: (reason, message) => reporter.retry(reason, message)
   });
 }
 function hashInto(path, hash, stallMs, onProgress) {
@@ -7919,11 +7934,31 @@ class ProgressReporter2 {
     this.status = { ...this.status, bytesTotal, bytesDone: 0 };
     this.set("downloading", `Downloading the ${this.noun}`, 0);
   }
+  startDownload(label) {
+    if (this.status.state !== "retrying")
+      this.set("downloading", label);
+  }
+  retry(reason, message) {
+    this.status = {
+      ...this.status,
+      state: "retrying",
+      label: reason === "download_stalled" ? `The ${this.noun} download stopped receiving data. Retrying…` : `The ${this.noun} download was interrupted. Retrying…`,
+      failure: { reason, message }
+    };
+    this.emit(true);
+  }
   advance(bytes, label) {
     const bytesDone = Math.max(0, this.status.bytesDone + bytes);
     const percent = this.status.bytesTotal > 0 ? Math.min(99, Math.floor(bytesDone / this.status.bytesTotal * 100)) : 0;
-    this.status = { ...this.status, bytesDone, percent, label, state: "downloading" };
-    this.emit(false);
+    this.status = { ...this.status, bytesDone, percent };
+    if (this.status.state === "retrying" && bytes < 0)
+      this.emit(true);
+    else if (this.status.state !== "downloading")
+      this.set("downloading", label);
+    else {
+      this.status = { ...this.status, label, state: "downloading" };
+      this.emit(false);
+    }
   }
   verifying(label, bytesDone, bytesTotal) {
     const percent = bytesTotal > 0 ? Math.min(99, Math.floor(bytesDone / bytesTotal * 100)) : 0;

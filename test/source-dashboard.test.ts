@@ -431,7 +431,7 @@ describe('multi-source source dashboard', () => {
       answer_readiness: { state: 'ready', label: 'Ready for questions' },
     });
     expect(view.sources.find((source) => source.source_id === 'google_drive.docs')).toMatchObject({
-      connection: { state: 'reauth_required', label: 'reauth required' },
+      connection: { state: 'reauth_required', label: 'needs reconnect' },
       // The ACTION verb became Reauthenticate; this readiness sentence is a
       // different string and the view model still writes it as it was.
       answer_readiness: { state: 'needs_attention', label: 'Reauthenticate this source' },
@@ -887,7 +887,7 @@ describe('multi-source source dashboard', () => {
     });
     const dropbox = view.sources.find((source) => source.source_id === 'dropbox.files');
     expect(dropbox?.connection.state).toBe('reauth_required');
-    expect(dropbox?.connection.label).toBe('reauth required');
+    expect(dropbox?.connection.label).toBe('needs reconnect');
     expect(dropbox?.connection.action.kind).toBe('needs_setup');
     if (dropbox?.connection.action.kind !== 'needs_setup') throw new Error('expected Dropbox setup action');
     expect(dropbox.connection.action.source).toBe('dropbox');
@@ -1107,7 +1107,7 @@ describe('multi-source source dashboard', () => {
 
     const gmail = view.sources.find((source) => source.source_id === 'gmail.email');
     expect(gmail?.connection.state).toBe('reauth_required');
-    expect(gmail?.connection.label).toBe('reauth required');
+    expect(gmail?.connection.label).toBe('needs reconnect');
     expect(gmail?.connection.action.kind).toBe('oauth');
     if (gmail?.connection.action.kind !== 'oauth') throw new Error('expected Gmail OAuth action');
     expect(gmail.connection.action.source).toBe('gmail');

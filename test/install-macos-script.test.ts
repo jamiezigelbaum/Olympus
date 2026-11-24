@@ -179,7 +179,7 @@ function harness(shell = '/bin/sh'): Harness {
 
   // The Bun the installer downloads: --version answers, anything else runs as sh.
   const fakeBun = join(root, 'fake-bun');
-  writeExecutable(fakeBun, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "\${FAKE_BUN_VERSION:-${BUN_PIN}}"; exit 0; fi\nexec /bin/sh "$@"\n`);
+  writeExecutable(fakeBun, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "\${FAKE_BUN_VERSION:-${BUN_PIN}}"; exit 0; fi\nif [ "$1" = "--no-env-file" ]; then shift; fi\nexec /bin/sh "$@"\n`);
   const bunZip = zipBun(root, fakeBun);
 
   writeExecutable(join(bin, 'curl'), `#!/bin/sh
@@ -235,6 +235,13 @@ exec /bin/mv "$@"
     // never proves healthy), FAKE_FAIL_RESTORE fails every install, and
     // FAKE_UNHEALTHY fails every `engine verify`.
     writeFileSync(join(staging, 'package', 'dist', 'cli.js'), [
+      'if [ "$1" = __prefetch-private-model ]; then',
+      `  cat "${app}/package.json" > "${root}/prefetch-previous"`,
+      `  if [ -n "$FAKE_PREFETCH_FAIL" ]; then exit 1; fi`,
+      `  echo "${version}" > "${root}/prefetch-complete"`,
+      "  echo 'Private model verified for the update.'",
+      '  exit 0',
+      'fi',
       `echo "${version} $*" >> "${log}"`,
       // FAKE_BLOCK_VERSION: that version's install waits (after saying so in <root>/blocked) until <root>/release exists.
       `if [ "$2" = install ] && [ "$FAKE_BLOCK_VERSION" = "${version}" ]; then : > "${root}/blocked"; while [ ! -e "${root}/release" ]; do sleep 0.1; done; fi`,
@@ -411,6 +418,25 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expect(readFileSync(join(h.home, '.zprofile'), 'utf8').match(/Olympus installer/g)).toHaveLength(1);
     expect(leftovers(h.support)).toEqual([]);
   });
+
+  for (const failPrefetch of [false, true]) {
+    shellTest(`the staged release prepares its private model before the swap (failure: ${failPrefetch})`, () => {
+      const h = harness(shell);
+      expectSucceeded(h.run(V1));
+      expect(existsSync(join(h.root, 'prefetch-previous'))).toBe(false);
+      const updated = h.run(V2, failPrefetch ? { FAKE_PREFETCH_FAIL: '1' } : {});
+      expectSucceeded(updated);
+      expect(JSON.parse(readFileSync(join(h.root, 'prefetch-previous'), 'utf8')).version).toBe(V1);
+      expect(appVersion(h.app)).toBe(V2);
+      if (failPrefetch) {
+        expect(updated.stdout).toContain('Olympus will continue the update');
+        expect(existsSync(join(h.root, 'prefetch-complete'))).toBe(false);
+      } else {
+        expect(updated.stdout).toContain('Private model verified for the update.');
+        expect(readFileSync(join(h.root, 'prefetch-complete'), 'utf8').trim()).toBe(V2);
+      }
+    }, 15_000);
+  }
 
   shellTest('running the same release again checks the engine against the verified download, and repairs it when it does not prove that build', () => {
     const h = harness(shell);
@@ -1167,6 +1193,9 @@ esac
     expect(plist).toContain(`<string>${V1}+`);
     expect(existsSync(join(home, '.olympus', 'engine.json'))).toBe(true);
     expect(readFileSync(join(launchd, 'calls'), 'utf8')).toContain(`bootstrap gui/${process.getuid!()} ${plistPath}`);
+    // This installer fixture fakes the engine. Real checksum verification is
+    // exercised with small model files in analyst-built-in.test.ts.
+    writeFileSync(join(home, '.config', 'olympus', 'worker.env'), '\nOLYMPUS_BUILT_IN_ANALYST=off\n', { flag: 'a' });
     // The `olympus` command runs the installed engine CLI.
     const verify = await sh([join(home, '.local', 'bin', 'olympus'), 'engine', 'verify']);
     expectSucceeded(verify);

@@ -11,6 +11,9 @@ import type { LocalConnectorStore } from '../src/workers/connector-store/index.t
 import { storeEmbeddingScope, type EmbeddingReadScope } from '../src/workers/connector-store/embedding-scope.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import type { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
+import { createEvernoteNotebookScopeBrowser, type SourceFolderScopeBrowser } from '../src/workers/source-scope-browser.ts';
+import { normalizeConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
+import { fileSourceScopeContentFilters } from '../src/workers/source-scope-runtime.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { cleanups.splice(0).reverse().forEach((close) => close()); });
@@ -20,7 +23,7 @@ const revision = '11111111-1111-4111-8111-111111111111';
 const selection = { key: 'opaque-folder', state: 'metadata_only' as const, ancestor_keys: [] };
 const approval = { action: 'approve_source_scope_and_start', source_id: SOURCE, account_generation: generation, expected_scope_revision: revision, selections: [selection], whole_account: false, explicit_whole_account_confirmation: false };
 
-function fixture() {
+function fixture(scopeBrowser?: SourceFolderScopeBrowser) {
   const dir = mkdtempSync(join(tmpdir(), 'scope-transport-')); cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   const rules = join(dir, 'rules.json'); writeFileSync(rules, JSON.stringify({ schemaVersion: 1, rules: [] }));
   const calls: { browses: unknown[]; approvals: unknown[] } = { browses: [], approvals: [] };
@@ -37,13 +40,56 @@ function fixture() {
       fileSourceScopes: {
         summaries: () => [{ source_id: SOURCE, disposition_source_id: 'google_drive.personal', label: 'Google Drive', connected: true, status: 'scope_pending', account_generation: generation, scope_revision: revision }, { source_id: 'dropbox.files', disposition_source_id: 'dropbox.personal', label: 'Dropbox', connected: true, status: 'scope_pending', account_generation: generation, scope_revision: revision }],
         async browse(input) { calls.browses.push(input); return browser; },
-        async approveAndStart(input) { calls.approvals.push(input); return { ok: true, result: { approved: true } }; },
+        async approveAndStart(input) {
+          const selections = scopeBrowser ? await scopeBrowser.validateSelections(input.selections) : input.selections;
+          calls.approvals.push({ ...input, selections });
+          return { ok: true, result: { approved: true } };
+        },
       },
     },
   });
   cleanups.push(() => worker.close());
   return { calls, fetch: withWorkerBearerAuth(worker.fetch, { authToken: 'fixture-worker-secret' }) };
 }
+
+test('one scope request carries 300 owned notebook ids and a shared or missing id refuses the batch', async () => {
+  const notebooks = Array.from({ length: 300 }, (_, i) => ({ id: `nb-${i}`, label: `Notebook ${i}`, owned: true }));
+  let listings = 0;
+  const browser = createEvernoteNotebookScopeBrowser({
+    listNotebooks: async () => {
+      listings++;
+      return [...notebooks, { id: 'nb-shared', label: 'Shared notebook', owned: false }];
+    },
+  });
+  const f = fixture(browser);
+  const headers = await session(f.fetch);
+  const selections = notebooks.map(({ id }) => ({ key: id, state: 'ingest' as const }));
+  const save = (choices: typeof selections) => f.fetch(new Request('http://worker.test/dashboard/dispositions', {
+    method: 'POST', headers, body: JSON.stringify({ ...approval, source_id: browser.sourceId, selections: choices }),
+  }));
+
+  const saved = await save(selections);
+  expect(saved.status).toBe(200);
+  expect(listings).toBe(1);
+  expect(f.calls.approvals).toEqual([{
+    sourceId: browser.sourceId, accountGeneration: generation, expectedRevision: revision,
+    selections: selections.map((choice) => ({ ...choice, ancestorKeys: [] })),
+    wholeAccount: false, explicitWholeAccountConfirmation: false,
+  }]);
+  const scope = fileSourceScopeContentFilters({
+    sourceId: browser.sourceId, accountGeneration: generation, revision, status: 'approved',
+    selections, wholeAccount: false,
+  });
+  expect(scope.allowed && normalizeConnectorStoreSearchFilters(scope.filters)?.sourceScopeFolderAnyKeys)
+    .toEqual(notebooks.map(({ id }) => id));
+
+  for (const key of ['nb-shared', 'nb-missing']) {
+    const refused = await save([...selections.slice(0, -1), { key, state: 'ingest' }]);
+    expect(refused.ok).toBe(false);
+    expect(f.calls.approvals).toHaveLength(1);
+  }
+  expect(listings).toBe(3);
+});
 
 async function session(fetch: ReturnType<typeof fixture>['fetch']) {
   const response = await fetch(new Request('http://worker.test/dashboard/control/session', { method: 'POST', headers: { Authorization: 'Bearer fixture-worker-secret', Origin: 'http://worker.test' } }));

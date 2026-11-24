@@ -25,6 +25,7 @@ import {
   googleSubjectLabel,
 } from '../src/core/provider-account-identity.ts';
 import { JsonCredentialOAuth2StateStore } from '../src/workers/credential-broker/index.ts';
+import { FileSourceScopeAuthority, fileSourceScopeMetadataFilters } from '../src/workers/source-scope-runtime.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -147,6 +148,36 @@ async function seedPreviousGrant(install: ReturnType<typeof installDir>, withSta
 }
 
 describe('Dropbox connect records the account its grant belongs to', () => {
+  test('an OAuth reconnect keeps an approved folder scope and the stored-item stamp for the same account', async () => {
+    const install = installDir();
+    const server = await dropboxServer({ tokenAccountId: 'dbid:main-account' });
+    try {
+      await connectDropbox(install, server.baseUrl);
+      const sourceId = 'dropbox.files';
+      const authority = new FileSourceScopeAuthority({ registryPath: install.registryPath });
+      const pending = authority.snapshot(sourceId);
+      authority.approve({
+        sourceId, accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision,
+        wholeAccount: false, explicitWholeAccountConfirmation: false,
+        selections: [{ key: '/projects', state: 'ingest' }],
+      });
+      const oldRef = authority.policyRef(sourceId)!;
+      await connectDropbox(install, server.baseUrl);
+      const current = authority.snapshot(sourceId);
+      expect(current).toMatchObject({
+        status: 'approved', revision: oldRef.revision, approvalGeneration: oldRef.accountGeneration,
+        selections: [{ key: '/projects', state: 'ingest' }],
+      });
+      expect(current.accountGeneration).not.toBe(oldRef.accountGeneration);
+      expect(fileSourceScopeMetadataFilters(current)).toMatchObject({
+        allowed: true, filters: { sourceScopeGeneration: oldRef.accountGeneration },
+      });
+      expect(() => authority.assertCurrent(oldRef)).toThrow();
+    } finally {
+      server.close();
+    }
+  });
+
   test('from the token response, with account_info.read requested', async () => {
     const install = installDir();
     const server = await dropboxServer({ tokenAccountId: 'dbid:main-account' });

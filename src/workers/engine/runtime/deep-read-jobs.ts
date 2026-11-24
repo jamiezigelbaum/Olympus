@@ -33,6 +33,7 @@ import type { Analyst, AnalystResult, EvidenceCandidate } from '../../../core/co
 import { DeepReadRefused } from '../../../core/deep-read-refused.ts';
 export { DeepReadRefused } from '../../../core/deep-read-refused.ts';
 import { runDeepRead, planDeepReadSections, type DeepReadProgress } from '../../../core/deep-read.ts';
+import { conversationCitationTitle } from '../../../core/parent-label.ts';
 import { providerSourceLabel } from '../../../core/remote-result.ts';
 import type { SourceItemIdentity, SourceTrustDomain } from '../../../core/source-index/types.ts';
 import type { StoredPrivateAnswer, WaitingQuestionStore } from '../../../core/waiting-private-questions.ts';
@@ -51,6 +52,7 @@ export interface DeepReadStore {
     providerThreadId?: string; after?: string; before?: string;
   }): Array<{ sourceItem: SourceItemIdentity; authoredAt?: string }>;
   activeLocalItemRow(localItemId: string): unknown;
+  itemNames?: LocalConnectorStore['itemNames'];
   observeOnDemandRead?: LocalConnectorStore['observeOnDemandRead'];
 }
 
@@ -393,9 +395,15 @@ export async function readDeepReadSet(
     if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0) continue;
     readItems.add(key);
     corpusIds.add(member.corpusId);
+    const names = family === 'chat' ? holder?.itemNames?.(member.sourceItem) : undefined;
+    const conversationLabel = family === 'chat' ? names?.title ?? selected.conversation_label : undefined;
+    const title = names?.title ?? (set.whole === 'conversation' ? selected.conversation_label ?? selected.title : selected.title);
+    const authoredAt = names?.authoredAt ?? member.authoredAt;
     const citation = {
-      ...(selected.conversation_label && set.whole === 'conversation' ? { title: selected.conversation_label } : selected.title ? { title: selected.title } : {}),
-      ...(member.authoredAt ? { authoredAt: member.authoredAt } : {}),
+      ...(title ? { title } : {}),
+      ...(conversationLabel ? { conversationLabel } : {}),
+      ...(names?.sender ? { authorLabel: names.sender } : {}),
+      ...(authoredAt ? { authoredAt } : {}),
     };
     // One candidate per passage, so a long document spreads over sections in order.
     for (const chunk of content.chunks) {
@@ -458,11 +466,16 @@ export function createDeepReadJobs(options: {
     const stored: StoredPrivateAnswer = {
       status: result.citations.length ? 'answered' : 'not_found',
       ...(result.citations.length ? { answer: `${result.answer}\n\n${readFooter(view, result)}` } : {}),
-      citations: [...cited.values()].map(candidate => ({
-        ...(candidate.provenance.citation?.title ? { title: candidate.provenance.citation.title } : {}),
-        ...(providerSourceLabel(candidate.provenance.sourceItem.provider) ? { source: providerSourceLabel(candidate.provenance.sourceItem.provider)! } : {}),
-        ...(candidate.provenance.citation?.authoredAt ? { date: candidate.provenance.citation.authoredAt.slice(0, 10) } : {}),
-      })),
+      citations: [...cited.values()].map(candidate => {
+        const citation = candidate.provenance.citation;
+        const title = conversationCitationTitle(citation?.title, citation?.conversationLabel, citation?.authorLabel);
+        const source = providerSourceLabel(candidate.provenance.sourceItem.provider);
+        return {
+          ...(title ? { title } : {}),
+          ...(source ? { source } : {}),
+          ...(citation?.authoredAt ? { date: citation.authoredAt.slice(0, 10) } : {}),
+        };
+      }),
       unanswered: [...result.unanswered],
       leftOut: [],
       read: [...cited.values()].map(candidate => inboxEvidenceIdentity({ corpusId: corpusOf(candidate), trustDomain: candidate.trustDomain, trustTier: candidate.trustTier, provenance: candidate.provenance })),

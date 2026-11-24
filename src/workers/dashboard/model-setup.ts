@@ -264,12 +264,23 @@ function renderEngineServerMode(view: ModelSetupView): string {
 function privateModelWords(view: ModelSetupView | undefined): string {
   const model = view?.private_model;
   if (!model || model.state === 'ready' || model.state === 'not_started' || model.state === 'disabled') return '';
-  if (model.state === 'failed') return 'The private answer model download failed. Check your connection and available space, then try again.';
-  if (model.state !== 'downloading') return 'Getting the private answer model ready…';
+  if (model.state === 'failed') {
+    if (model.failedReason === 'stalled') return 'The private answer model download stopped receiving data after several attempts.';
+    if (model.failedReason === 'network') return 'The private answer model download could not finish because of a connection problem.';
+    if (model.failedReason === 'checksum') return 'The private answer model download was damaged.';
+    if (model.failedReason === 'disk_full') return 'The disk is too full to download the private answer model.';
+    return 'The private answer model download failed. Check your connection and available space, then try again.';
+  }
+  const retrying = model.state === 'retrying';
+  if (!retrying && model.state !== 'downloading') return 'Getting the private answer model ready…';
+  const label = retrying
+    ? 'The private answer model download was interrupted. Retrying automatically…'
+    : 'Downloading the private answer model';
   const done = model.bytesDone; const total = model.bytesTotal;
-  if (typeof done !== 'number' || typeof total !== 'number' || !Number.isFinite(done) || !Number.isFinite(total) || total <= 0 || done < 0) return 'Downloading the private answer model…';
+  if (typeof done !== 'number' || typeof total !== 'number' || !Number.isFinite(done) || !Number.isFinite(total) || total <= 0 || done < 0) return retrying ? label : label + '…';
   const scale = total >= 1e9 ? 1e9 : 1e6;
-  return `Downloading the private answer model: ${(Math.min(done, total) / scale).toFixed(1)} of ${(total / scale).toFixed(1)} ${scale === 1e9 ? 'GB' : 'MB'}`;
+  const progress = `${(Math.min(done, total) / scale).toFixed(1)} of ${(total / scale).toFixed(1)} ${scale === 1e9 ? 'GB' : 'MB'}`;
+  return retrying ? `${label} ${progress} saved.` : `${label}: ${progress}`;
 }
 
 export function dashboardModelsBlockedReason(view: ModelSetupView | undefined): string {

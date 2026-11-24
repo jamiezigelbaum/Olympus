@@ -38,6 +38,7 @@ import { localAnalystPromptBytesForWindow } from '../source-index/local-analyst-
 import { SourceModelPolicyDeniedError } from '../../core/source-model-policy.ts';
 import { EVIDENCE_COPY_SIMILARITY, evidenceDateValue, evidenceVersionGroups, evidenceVersions } from '../../core/evidence-versions.ts';
 import type { SourceFamily } from '../../core/source-index/types.ts';
+import { conversationCitationTitle } from '../../core/parent-label.ts';
 import {
   NoPrivateEvidenceError,
   checkPrivateEvidence,
@@ -470,7 +471,7 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
         // depth re-read dropped).
         if (!entry) continue;
         const item = entry.item;
-        const title = citation.title ?? item?.title;
+        const title = conversationCitationTitle(citation.title ?? item.title, item.conversationLabel, item.authorLabel);
         let links: PrivateSourceLinks | undefined;
         try {
           links = entry?.hit && options.sourceLinks ? options.sourceLinks(entry.hit) : undefined;
@@ -582,6 +583,8 @@ export function privateEvidence(
     const citation = record(provenance?.citation);
     const content = record(hit.internalContent);
     const title = string(citation?.title) ?? string(hit.title);
+    const conversationLabel = string(citation?.conversationLabel);
+    const authorLabel = string(citation?.authorLabel);
     const chunks = Array.isArray(hit.chunks)
       ? hit.chunks.filter((chunk): chunk is string => typeof chunk === 'string' && chunk.trim() !== '').map((chunk) => chunk.trim())
       : [];
@@ -602,6 +605,8 @@ export function privateEvidence(
       id: items.some((item) => item.id === id) ? `${id}#${index + 1}` : id,
       text,
       ...(title ? { title } : {}),
+      ...(conversationLabel ? { conversationLabel } : {}),
+      ...(authorLabel ? { authorLabel } : {}),
       ...(locator ? { locator } : {}),
       ...(source ? { source } : {}),
       ...(date ? { date } : {}),

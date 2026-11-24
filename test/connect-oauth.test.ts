@@ -156,7 +156,7 @@ describe('olympus connect OAuth authorization-code flow', () => {
       now: new Date('2026-07-07T12:00:00.000Z'),
     });
     expect(terminalDashboard.sources.find((source) => source.source_id === 'gmail.email')?.connection)
-      .toMatchObject({ state: 'reauth_required', label: 'reauth required' });
+      .toMatchObject({ state: 'reauth_required', label: 'needs reconnect' });
     terminal.cleanup();
 
     const transient = await connectAndRefreshWithMode('dropbox', 'server_error');

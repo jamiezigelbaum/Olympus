@@ -11,6 +11,7 @@ import {
   type FileScopeSourceDefinition,
 } from './file-scope-sources.ts';
 import { OperationError, SourceScopeApprovalRequiredError } from './operation-error.ts';
+import { compareProviderAccounts, namesAccountByAddressOnly } from './provider-account-identity.ts';
 
 export interface SourceScopeConnectedHandle {
   handle: string;
@@ -50,6 +51,8 @@ export interface FileSourceScopeApprovalSnapshot {
   sourceId: FileSourceScopeId;
   status: 'scope_pending' | 'approved';
   accountGeneration?: string;
+  /** Original scope stamp, retained across a verified reconnect. */
+  approvalGeneration?: string;
   revision: string;
   selections: FileSourceScopeSelection[];
   wholeAccount: boolean;
@@ -68,6 +71,7 @@ type FolderPermissions = Pick<FileSourceScopeApprovalSnapshot, 'selections' | 'w
 interface PersistedFileSourceScopeApproval {
   source_id: FileSourceScopeId;
   account_generation: string;
+  grant_generation?: string;
   revision: string;
   status: 'approved';
   selections: FileSourceScopeSelection[];
@@ -130,8 +134,8 @@ export function fileSourceScopeIdForProvider(provider: string): FileSourceScopeI
 }
 
 /**
- * An opaque generation for the exact connected grant. Reconnecting under the
- * same account still changes connectedAt, invalidating prior approval and work.
+ * An opaque generation for the exact connected grant. Reconnecting fences
+ * in-flight work even when an approval is carried to the replacement grant.
  */
 export function connectedFileSourceAccountGeneration(
   sourceId: FileSourceScopeId,
@@ -173,14 +177,74 @@ export function connectedSourceScopeAccountGeneration(
   const handles = pin ? eligible.filter((handle) => handle.handle === pin) : eligible;
   if (handles.length !== 1) return undefined;
   const handle = handles[0]!;
-  const generation = createHash('sha256').update(JSON.stringify([
+  return { generation: scopeGrantGeneration(sourceId, handle), handle };
+}
+
+function scopeGrantGeneration(sourceId: string, handle: SourceScopeConnectedHandle): string {
+  return createHash('sha256').update(JSON.stringify([
     sourceId,
     handle.handle,
     handle.providerAccountId ?? '',
     handle.accountRole ?? '',
     handle.connectedAt,
   ])).digest('hex');
-  return { generation, handle };
+}
+
+/** Carry only an approval that belongs to the replaced grant of the same account. */
+export function carrySourceScopeApproval<T extends {
+  approvals: { source_id: string; account_generation: string; grant_generation?: string }[];
+}>(input: {
+  sourceId: string;
+  previous: SourceScopeConnectedHandle;
+  current: SourceScopeConnectedHandle;
+  /** Account independently verified using the replaced grant itself. */
+  verifiedPreviousAccountId?: string | undefined;
+  statePath: string;
+  read: (path: string) => { kind: 'valid'; state: T } | { kind: 'missing' | 'malformed' };
+}): void {
+  const { sourceId, previous, current, statePath, read } = input;
+  const previousAccount = previous.providerAccountId && !namesAccountByAddressOnly(previous.providerAccountId)
+    ? previous.providerAccountId
+    : input.verifiedPreviousAccountId;
+  const currentAccount = current.providerAccountId;
+  if (previous.handle !== current.handle || previous.provider !== current.provider
+    || !previousAccount || !currentAccount
+    || namesAccountByAddressOnly(previousAccount) || namesAccountByAddressOnly(currentAccount)
+    || compareProviderAccounts(previousAccount, currentAccount) !== 'same'
+    || !existsSync(statePath)) return;
+  const previousGeneration = scopeGrantGeneration(sourceId, previous);
+  const currentGeneration = scopeGrantGeneration(sourceId, current);
+  if (previousGeneration === currentGeneration) return;
+  withFileLeaseSync(statePath, (lease) => {
+    const saved = read(statePath);
+    if (saved.kind !== 'valid') return;
+    const approval = saved.state.approvals.find((entry) => entry.source_id === sourceId
+      && (entry.grant_generation ?? entry.account_generation) === previousGeneration);
+    if (!approval) return;
+    approval.grant_generation = currentGeneration;
+    lease.commit(() => writePrivateFileAtomicSync(statePath, `${JSON.stringify(saved.state, null, 2)}\n`));
+  });
+}
+
+export function carryFileSourceScopeApproval(
+  registryPath: string,
+  previous: SourceScopeConnectedHandle,
+  current: SourceScopeConnectedHandle,
+  verifiedPreviousAccountId?: string,
+): void {
+  const sourceId = fileSourceScopeIdForProvider(current.provider);
+  const definition = sourceId && getFileScopeSource(sourceId);
+  if (!definition || definition.account !== 'provider_account') return;
+  const capability = fileScopeSourceCapability(definition);
+  if (!previous.allowedCapabilities.includes(capability) || !current.allowedCapabilities.includes(capability)) return;
+  carrySourceScopeApproval({
+    sourceId: definition.sourceId,
+    previous,
+    current,
+    verifiedPreviousAccountId,
+    statePath: defaultFileSourceScopeStatePath(registryPath),
+    read: readState,
+  });
 }
 
 export function readFileSourceScopeApproval(input: {
@@ -203,7 +267,7 @@ export function readFileSourceScopeApproval(input: {
   if (!approval) {
     return pendingSnapshot(input.sourceId, `missing:${account.generation}`, account.generation, 'missing');
   }
-  if (approval.account_generation !== account.generation) {
+  if ((approval.grant_generation ?? approval.account_generation) !== account.generation) {
     return pendingSnapshot(
       input.sourceId,
       `stale:${approval.revision}:${account.generation}`,
@@ -215,6 +279,7 @@ export function readFileSourceScopeApproval(input: {
     sourceId: input.sourceId,
     status: 'approved',
     accountGeneration: account.generation,
+    ...(approval.grant_generation ? { approvalGeneration: approval.account_generation } : {}),
     revision: approval.revision,
     selections: approval.selections,
     wholeAccount: approval.whole_account,
@@ -481,6 +546,8 @@ function parseApproval(value: unknown): PersistedFileSourceScopeApproval {
   if (
     typeof record.source_id !== 'string' || !isFileSourceScopeId(record.source_id)
     || typeof record.account_generation !== 'string' || !/^[a-f0-9]{64}$/.test(record.account_generation)
+    || (record.grant_generation !== undefined
+      && (typeof record.grant_generation !== 'string' || !/^[a-f0-9]{64}$/.test(record.grant_generation)))
     || typeof record.revision !== 'string'
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(record.revision)
     || record.status !== 'approved'
@@ -500,6 +567,7 @@ function parseApproval(value: unknown): PersistedFileSourceScopeApproval {
   return {
     source_id: record.source_id,
     account_generation: record.account_generation,
+    ...(typeof record.grant_generation === 'string' ? { grant_generation: record.grant_generation } : {}),
     revision: record.revision,
     status: 'approved',
     selections,

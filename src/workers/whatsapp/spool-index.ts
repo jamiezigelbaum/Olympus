@@ -358,10 +358,11 @@ export class WhatsAppSpoolIndex {
     return this.db.query(`SELECT 1 FROM live_keys WHERE ${column} = ? LIMIT 1`).get(key) !== null;
   }
 
-  /** Whether the owner sent a live message with this key without a sender. */
-  ownerSentUnsent(precision: TimePrecision, key: string): boolean {
+  /** Whether a senderless key singles out one live message, sent by the owner. */
+  uniqueOwnerSentUnsent(precision: TimePrecision, key: string): boolean {
     const column = precision === 'second' ? 'unsent_s' : 'unsent_m';
-    return this.db.query(`SELECT 1 FROM live_keys WHERE ${column} = ? AND from_me = 1 LIMIT 1`).get(key) !== null;
+    const rows = this.db.query(`SELECT from_me FROM live_keys WHERE ${column} = ? LIMIT 2`).all(key) as { from_me: number }[];
+    return rows.length === 1 && rows[0]?.from_me === 1;
   }
 
   /** The live chats by this name. */

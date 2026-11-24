@@ -1,6 +1,7 @@
 import { isPendingPrivacyPolicy } from './first-run-privacy.ts';
 import { modelEndpointFetch } from './model-transport.ts';
 import { fetchBoundedText, isAbortError } from './http-timeout.ts';
+import type { ModelInstallFailedReason } from './model-install-failure.ts';
 import type {
   SovereigntyConfig,
   SovereigntyModelProfile,
@@ -22,7 +23,7 @@ export interface ModelSetupView {
   ready: boolean;
   checked_at: string;
   privacy_choice_pending?: boolean;
-  private_model?: { state: string; bytesDone?: number; bytesTotal?: number };
+  private_model?: { state: string; bytesDone?: number; bytesTotal?: number; failedReason?: ModelInstallFailedReason };
   cards: ModelSetupCard[];
   attention?: string;
   /** Existing embedding providers kept for compatibility, never new setup choices. */

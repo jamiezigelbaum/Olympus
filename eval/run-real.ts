@@ -39,7 +39,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystOutputAnswer, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withPromptBudget, ANALYST_NOTES_SYSTEM_START, type AnalystEvidenceFormat, type AnalystModel, type AnalystReadingNotes } from '../src/core/analyst.ts';
+import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystOutputAnswer, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withAuthorRule, withPromptBudget, ANALYST_NOTES_SYSTEM_START, type AnalystEvidenceFormat, type AnalystModel, type AnalystReadingNotes } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
   DEFAULT_VENICE_ANALYST_MODEL,
@@ -1071,7 +1071,11 @@ export interface EvalPromptLayout {
 
 export function evalPromptLayout(sent: EvidencePack, options: AnalystOptions, evidenceFormat: AnalystEvidenceFormat = 'full'): EvalPromptLayout {
   const bytes = (candidates: EvidencePack['candidates']) => analystPromptBytes({ ...sent, candidates }, options, evidenceFormat);
-  const fixedBytes = bytes([]);
+  // A chat seat adds the author rule to the system text once per prompt, so it
+  // is fixed text, not part of the seat's header.
+  const ruleBytes = new TextEncoder().encode(withAuthorRule('', sent)).length;
+  const emptyBytes = bytes([]);
+  const fixedBytes = emptyBytes + ruleBytes;
   return {
     evidenceFormat,
     promptBytes: analystPromptBytes(sent, options, evidenceFormat),
@@ -1080,7 +1084,8 @@ export function evalPromptLayout(sent: EvidencePack, options: AnalystOptions, ev
     extractionGapCount: sent.coverage.extractionGaps.length,
     seats: sent.candidates.map((candidate) => {
       const header = bytes([{ ...candidate, chunks: [] }]);
-      return { headerBytes: header - fixedBytes, passageBytes: bytes([candidate]) - header };
+      const seatRuleBytes = new TextEncoder().encode(withAuthorRule('', { ...sent, candidates: [candidate] })).length;
+      return { headerBytes: header - emptyBytes - seatRuleBytes, passageBytes: bytes([candidate]) - header };
     }),
     fullPromptBytes: analystPromptBytes(sent, options),
     compactPromptBytes: analystPromptBytes(sent, options, 'compact'),

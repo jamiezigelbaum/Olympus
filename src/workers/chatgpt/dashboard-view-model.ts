@@ -83,6 +83,7 @@ import {
   DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
   DASHBOARD_MANY_UNREADABLE_LABEL,
+  DASHBOARD_NEEDS_RECONNECT,
   dashboardUnreadableMoreLabel,
   DASHBOARD_RETRYING_ON_ITS_OWN,
 } from '../dashboard/vocabulary.ts';
@@ -158,6 +159,7 @@ const KNOWN_CONNECTION_LABELS = new Set([
   'connection state unreadable',
   'awaiting browser consent',
   'reauth required',
+  DASHBOARD_NEEDS_RECONNECT,
   'syncing',
   'connected',
   'connected · live session not checked',
@@ -242,7 +244,7 @@ export interface ChatGptDashboardOptions {
 }
 
 export interface BuiltInPrivateModelView {
-  state: 'not_started' | 'downloading' | 'verifying' | 'loading' | 'ready' | 'failed';
+  state: 'not_started' | ModelInstall['state'] | 'loading';
   /** 0-100. */
   percent?: number;
   bytesDone?: number;
@@ -267,6 +269,7 @@ export function buildChatGptDashboardViewModel(
     const connecting = connectingFor(definition, card, now);
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...(degraded ? { degradedCredentials: degraded } : {}) });
     const credentials = credentialProblem(scrubbed, degraded);
+    const choosingScope = scopePending(scrubbed);
     // What an import source's imports need from the person (an import that
     // stopped, a request, held items no model can judge, an unreadable
     // record) is Needs you whatever the progress says, each with its own
@@ -290,13 +293,13 @@ export function buildChatGptDashboardViewModel(
     // A credential problem (a provider refusal, a degraded or expired sign-in)
     // is Needs you whatever the progress or indexing state: its fix is the
     // owner's, never the engine's.
-    let status: DashboardStatus = connecting || credentials || missingScope(scrubbed) ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
+    let status: DashboardStatus = connecting || credentials || choosingScope || missingScope(scrubbed) ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
     // A source working normally (a stage unfinished, nothing stalled) offers
     // no action: the only fix this page had for it was "Check again", a
     // button over work that needs nothing (owner fresh-install test,
     // 2026-10-01). A real fix (reconnect, choose folders) still stands.
     if (imports.length > 0) status = 'Needs you';
-    else if (!connecting && !credentials && (status === 'Needs you' || status === 'Failing') && progress && progress.stage !== 'done'
+    else if (!connecting && !credentials && !choosingScope && (status === 'Needs you' || status === 'Failing') && progress && progress.stage !== 'done'
       && !progress.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress).fix)) {
       status = 'Working';
     }
@@ -304,7 +307,7 @@ export function buildChatGptDashboardViewModel(
     // or a sync is retrying on its own (#1044): nothing for the owner to do,
     // so not Needs you; a parked source shows its wait under In progress.
     const stopped = stops.some((stop) => limitStopSubjects(stop).includes(definition.source_id));
-    if (!connecting && !credentials && imports.length === 0 && (status === 'Needs you' || status === 'Failing')
+    if (!connecting && !credentials && !choosingScope && imports.length === 0 && (status === 'Needs you' || status === 'Failing')
       && ownerHasNothingToDo(scrubbed, stopped, degraded)) {
       // Many unreadable files are Olympus's problem, said on the row with its See why: a finished source stays Fresh.
       status = scrubbed.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL && (!progress || progress.stage === 'done') ? 'Fresh' : 'Working';
@@ -524,8 +527,9 @@ function withProviderRejection(card: DashboardSourceCard): DashboardSourceCard {
   const schedule = card.schedule;
   if (!schedule || schedule.consecutive_failures <= 0 || schedule.last_error_kind !== 'credential_reauth_required') return card;
   if (schedule.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason)) return card;
-  if (!CONNECTED_STATES.has(card.connection.state)) return card;
-  return { ...card, connection: { ...card.connection, state: 'reauth_required', label: 'reauth required' } };
+  if (!CONNECTED_STATES.has(card.connection.state) || scopePending(card)) return card;
+  if (Date.parse(card.connection.connected_at ?? '') > Date.parse(schedule.last_attempt_at ?? '')) return card;
+  return { ...card, connection: { ...card.connection, state: 'reauth_required', label: DASHBOARD_NEEDS_RECONNECT } };
 }
 
 /**
@@ -1337,7 +1341,7 @@ function embeddingFromModelSetup(setup: ModelSetupView | undefined): DashboardVi
   return { kind: 'custom', state: failed ? 'failed' : 'ready' };
 }
 
-const PRIVATE_MODEL_INSTALLING = new Set<BuiltInPrivateModelView['state']>(['downloading', 'verifying']);
+const PRIVATE_MODEL_INSTALLING = new Set<BuiltInPrivateModelView['state']>(['downloading', 'retrying', 'verifying']);
 
 function builtInAnswers(model: BuiltInPrivateModelView | undefined): DashboardViewModelV1['models']['answers'] {
   if (!model) return undefined;
@@ -1357,7 +1361,7 @@ function builtInAnswers(model: BuiltInPrivateModelView | undefined): DashboardVi
  */
 function builtInInstall(model: BuiltInPrivateModelView): ModelInstall {
   if (model.state === 'failed') return { state: 'failed', failedReason: model.failedReason ?? 'unknown' };
-  const state = model.state === 'verifying' ? 'verifying' as const : 'downloading' as const;
+  const state = model.state === 'verifying' || model.state === 'retrying' ? model.state : 'downloading';
   const bytes = Number.isFinite(model.bytesTotal) && (model.bytesTotal ?? 0) > 0
     ? { bytesDone: Math.max(0, Math.floor(model.bytesDone ?? 0)), bytesTotal: Math.floor(model.bytesTotal!) }
     : {};

@@ -1,6 +1,10 @@
 import { OperationError } from '../../core/operation-error.ts';
 import { answerModelRequiredResult } from '../answer-model-required.ts';
 import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
+import { claudeAppTools } from '../../../connect-relay/shared/claude-app-tools.ts';
+import { handleMcpCallTool } from '../../mcp/server.ts';
+import { listMcpTools } from '../../mcp/tools.ts';
+import type { RemoteAccessAuthorization } from '../remote-access-recheck.ts';
 import { createReleaseCapture, notePrivateQuestion, recordAppRequest, runWithReleaseCapture, sourceAnswerQuestion } from '../../core/app-release-capture.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWithheldReasonOffThread, ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from '../../core/release-manifest.ts';
 /**
@@ -431,7 +435,8 @@ export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSur
   else if (askToolListed(ctx)) tools.push(SOURCE_ANSWER_RESULT_TOOL);
   if (askToolListed(ctx)) tools.push(ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL);
   tools.push(...SETUP_TOOLS, LIMITS_TOOL);
-  return appClientCopy(options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools, options.appClient);
+  const visible = options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools;
+  return options.appClient ? claudeAppTools(visible, options.appClient, listMcpTools(ctx.config, 'remote')) : visible;
 }
 
 /** Answer tools stay listed wherever the operations are exposed remotely. */
@@ -691,6 +696,7 @@ async function runChatGptTool(
           if (typeof args.remember !== 'boolean') throw new ChatGptSurfaceError('invalid_params');
           params.remember = args.remember;
         }
+        if (options.appClient && args.timeoutMs !== undefined) params.timeoutMs = args.timeoutMs;
         return askAnonymouslyToolResult(await runOperation(ASK_ANONYMOUSLY_TOOL.name, ctx, params));
       }
       case OPEN_PRIVATE_QUESTION_TOOL.name: {
@@ -1130,14 +1136,19 @@ export function createChatGptMcpServer(
   options: ChatGptSurfaceOptions,
   /** The same caller's context without the request's signal (see callChatGptTool). */
   makeDetachedContext?: () => OperationContext,
+  authorized?: RemoteAccessAuthorization,
 ): Server {
   const server = new Server(
     { name: 'olympus', version: VERSION },
     { capabilities: { tools: {}, resources: {} } },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listChatGptTools(makeOperationContext(), options) }));
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
-    callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal, makeDetachedContext));
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    if (options.appClient && request.params.name === SOURCE_STATUS_TOOL.name) {
+      return handleMcpCallTool(request, makeOperationContext, 'remote', authorized);
+    }
+    return callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal, makeDetachedContext);
+  });
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: CHATGPT_RESOURCES.map((resource) => ({ ...resource })) }));
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri, options.appClient));

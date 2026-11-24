@@ -193,6 +193,8 @@ test('install refuses a package without the Linux state compatibility declaratio
 });
 test('install copies scratch inputs into a durable generation, receipts the launcher, and commits only after health',async()=>{
  const l=layout(),checkout=packageAt(l.home,'v1');let linked=false,active=false,enabled=false;
+ const prefetchMarker=join(l.home,'prefetch-before-stop');
+ let modelPreparedBeforeStop=false;
  // Exercise the installed shell launcher with the real shared data resolver.
  writeFileSync(join(checkout,'dist/cli.js'), `import { resolveRemoteConnectionsDbPathForCli } from ${JSON.stringify(join(import.meta.dir,'../src/core/remote-connections.ts'))}; console.log(resolveRemoteConnectionsDbPathForCli());`);
  const exec:EngineExec=(command,args)=>{
@@ -202,7 +204,11 @@ test('install copies scratch inputs into a durable generation, receipts the laun
   if(args.includes('olympus-worker.service'))return good('LoadState=not-found');
   if(args.includes('--property=Version'))return good('256');
   if(args.includes('show'))return linked?good(`LoadState=loaded\nActiveState=${active?'active':'inactive'}\nUnitFileState=${enabled?'enabled':'disabled'}\nMainPID=${active?42:0}\nControlGroup=${active?'/user.slice/engine':''}\nResult=success\nExecMainStatus=0\nFragmentPath=${l.unitPath}\n`):good('LoadState=not-found');
-  if(args.includes('link'))linked=true;if(args.includes('enable'))enabled=true;if(args.includes('disable')){enabled=false;active=false;}if(args.includes('start'))active=true;if(args.includes('stop'))active=false;
+  if(args.includes('link'))linked=true;if(args.includes('enable'))enabled=true;if(args.includes('disable')){enabled=false;active=false;}if(args.includes('start'))active=true;
+  if(args.includes('stop')){
+   if(active) modelPreparedBeforeStop=existsSync(prefetchMarker);
+   active=false;
+  }
   return good();
  };
  const runtime=runtimeAt(l.home);
@@ -236,7 +242,20 @@ test('install copies scratch inputs into a durable generation, receipts the laun
  mkdirSync(transaction.backupDir,{mode:0o700});writeFileSync(join(transaction.backupDir,'partial'),'',{mode:0o600});const backup=statSync(transaction.backupDir);
  writeFileSync(journalPath,JSON.stringify({...transaction,phase:'qualified',backupDevice:backup.dev,backupInode:backup.ino}),{mode:0o600});
  expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(true);expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(false);
- const upgraded=installEngine({...options,fromCheckout:packageAt(l.home,'v2')}),interrupted=JSON.parse(readFileSync(journalPath,'utf8'));expect(interrupted.generationCreated).toBe(true);
+ const incoming=packageAt(l.home,'v2'), originalLauncher=readFileSync(l.launcherPath,'utf8');
+ writeFileSync(join(incoming,'dist/cli.js'),`
+  import { readFileSync, writeFileSync } from 'node:fs';
+  if (process.argv[2] === '__prefetch-private-model') {
+   writeFileSync(${JSON.stringify(prefetchMarker)}, JSON.stringify({
+    workerEnvPath: process.argv[3], launcher: readFileSync(${JSON.stringify(l.launcherPath)}, 'utf8'),
+   }));
+   process.exit(1);
+  }
+ `);
+ const upgraded=installEngine({...options,fromCheckout:incoming}),interrupted=JSON.parse(readFileSync(journalPath,'utf8'));expect(interrupted.generationCreated).toBe(true);
+ expect(modelPreparedBeforeStop).toBe(true);
+ expect(JSON.parse(readFileSync(prefetchMarker,'utf8'))).toEqual({workerEnvPath:l.workerEnvPath,launcher:originalLauncher});
+ expect(active).toBe(true);
  rmSync(interrupted.generationPath,{recursive:true});writeFileSync(journalPath,JSON.stringify({...interrupted,phase:'rollback_required',before:{...interrupted.before,active:false}}),{mode:0o600});
  expect((await recoverInterruptedLinuxEngineInstall(options)).recovered).toBe(true);expect(upgraded.program.build).not.toBe(installedResult.program.build);
  expect(JSON.parse(readFileSync(l.receiptPath,'utf8')).ownedEmptyParents).toEqual(parentReceipt.ownedEmptyParents);

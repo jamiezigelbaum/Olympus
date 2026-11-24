@@ -8,7 +8,8 @@ const REQUEST_BYTES = 256 * 1024 ** 2;
 const WRITE_SLICE_BYTES = 64 * 1024;
 const READ_RETRIES = 3;
 const RETRY_DELAY_MS = 250;
-type Failure = 'download_failed' | 'checksum_mismatch' | 'disk_write_failed';
+type TransferFailure = 'download_failed' | 'download_stalled';
+type Failure = TransferFailure | 'checksum_mismatch' | 'disk_write_failed';
 
 interface PinnedDownloadOptions {
   fetchImpl: typeof fetch;
@@ -28,7 +29,9 @@ interface PinnedDownloadOptions {
   diskError?: (error: unknown) => Error;
   write?: (fd: number, bytes: Uint8Array) => void;
   onStart: () => void;
+  onCheckPartial?: () => void;
   onProgress: (delta: number) => void;
+  onRetry?: (reason: TransferFailure, message: string) => void;
   /**
    * Returns the thread to the event loop once a slice has run (the worker's
    * control-path headroom). Fetch reads ahead, so buffered chunks resolve as
@@ -38,7 +41,7 @@ interface PinnedDownloadOptions {
   turn?: () => Promise<void> | undefined;
 }
 
-class InterruptedRead extends Error {}
+class InterruptedTransfer extends Error {}
 
 /** The caller holds the install lock. Only a verified file is renamed into place. */
 export async function downloadPinnedFile(options: PinnedDownloadOptions): Promise<void> {
@@ -65,7 +68,8 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
   try {
     if (existsSync(partial)) {
       const size = statSync(partial).size;
-      if (size > 0 && size < expectedBytes) {
+      if (size > 0 && size <= expectedBytes) {
+        options.onCheckPartial?.();
         await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
         options.onProgress(size);
@@ -77,9 +81,10 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
       const end = Math.min(expectedBytes - 1, start + REQUEST_BYTES - 1);
       const controller = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const stall = new Error(`no data for ${stallMs / 1000} s`);
       const armStall = (): void => {
         clearTimeout(timer);
-        timer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
+        timer = setTimeout(() => controller.abort(stall), stallMs);
       };
       let response: Response | undefined;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -92,7 +97,10 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
             headers: { Range: `bytes=${start}-${end}`, 'Accept-Encoding': 'identity' },
           }), controller.signal);
         } catch (cause) {
-          throw error('download_failed', `Could not reach the download server for the ${noun} (${message(cause)}).`);
+          throw new InterruptedTransfer(`could not reach the download server: ${message(cause)}`);
+        }
+        if (response.status === 408 || response.status === 429 || response.status >= 500) {
+          throw new InterruptedTransfer(`HTTP ${response.status}`);
         }
         if ((response.status !== 200 && response.status !== 206) || !response.body) {
           throw error('download_failed', `The ${noun} download failed (HTTP ${response.status}).`);
@@ -123,8 +131,13 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
         const readNext = async (): Promise<boolean> => {
           armStall();
           let part: Awaited<ReturnType<typeof bodyReader.read>>;
-          try { part = await untilAborted(bodyReader.read(), controller.signal); }
-          catch (cause) { throw new InterruptedRead(message(cause)); }
+          try {
+            do {
+              part = await untilAborted(bodyReader.read(), controller.signal);
+            } while (!part.done && part.value.byteLength === 0);
+          }
+          catch (cause) { throw new InterruptedTransfer(message(cause)); }
+          finally { clearTimeout(timer); }
           if (part.done) return false;
           if (received + part.value.byteLength > responseEnd + 1) {
             throw mismatch(`${url} is larger than its pinned size or requested range.`);
@@ -140,17 +153,21 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
           }
           return true;
         };
-        while (await readNext()) { /* consume and release one chunk at a time */ }
+        // The pinned count and digest prove completion. A server that has sent
+        // the entire range may still leave the response open indefinitely.
+        while (received <= responseEnd && await readNext()) { /* consume and release one chunk at a time */ }
         if (received !== responseEnd + 1) throw mismatch(`${url} did not match its pinned size; nothing was installed.`);
+        retries = 0;
       } catch (cause) {
-        if (!(cause instanceof InterruptedRead)) throw cause;
-        // Even a stream that errors after delivering the final byte must be
-        // observed as a failure once the retry budget has been spent.
+        if (!(cause instanceof InterruptedTransfer)) throw cause;
+        const reason = controller.signal.reason === stall ? 'download_stalled' : 'download_failed';
+        const detail = `The ${noun} download was interrupted (${cause.message}).`;
         if (retries >= READ_RETRIES) {
-          throw error('download_failed', `The ${noun} download was interrupted (${cause.message}).`);
+          throw error(reason, detail);
         }
         retries += 1;
         retry = true;
+        options.onRetry?.(reason, detail);
       } finally {
         clearTimeout(timer);
         // Do not await cancellation: a wedged underlying source can itself

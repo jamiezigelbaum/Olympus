@@ -29,6 +29,7 @@ import { randomBytes as setupRandomBytes } from 'node:crypto';
 import { parsePrivacyProfileInput, privacyRuleId } from '../classification/privacy-profile.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { getFileScopeSource } from '../../core/file-scope-sources.ts';
+import { FOLDER_SCOPE_SELECTION_LIMIT } from '../../control-ui-contract.ts';
 import type {
   OlympusFolderScopeBrowseResult,
   OlympusMailScopeDraft,
@@ -276,7 +277,7 @@ export const SCOPE_SET_TOOL: ToolDefinition = {
       source_id: { type: 'string', enum: [...SCOPE_SOURCE_IDS] },
       account_generation: { type: 'string', maxLength: 256 },
       scope_revision: { type: 'string', maxLength: 256 },
-      selections: { type: 'array', items: SELECTION_SCHEMA, maxItems: 100 },
+      selections: { type: 'array', items: SELECTION_SCHEMA, maxItems: FOLDER_SCOPE_SELECTION_LIMIT },
       whole_account_selected: { type: 'boolean' },
       confirm_whole_account: { type: 'boolean' },
       mail: MAIL_DRAFT_SCHEMA,
@@ -672,7 +673,7 @@ async function scopeList(backend: ChatGptSetupBackend, args: Record<string, unkn
 }
 
 /** Folders per page of `olympus_scope_list`, after sorting. */
-export const SCOPE_LIST_PAGE_SIZE = 100;
+export const SCOPE_LIST_PAGE_SIZE = 500;
 /**
  * Provider pages read for one level before sorting. A level larger than this
  * lists what was read and says so (`truncated`), never silently.
@@ -914,7 +915,7 @@ function parseDraft(value: unknown): OlympusMailScopeDraft {
 }
 
 function parseSelections(value: unknown): OlympusSourceScopeSelection[] {
-  if (!Array.isArray(value) || value.length > 100) throw new ChatGptSurfaceError('invalid_params');
+  if (!Array.isArray(value) || value.length > FOLDER_SCOPE_SELECTION_LIMIT) throw new ChatGptSurfaceError('invalid_params');
   return value.map((entry) => {
     const record = typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? entry as Record<string, unknown> : {};
     const key = requiredString(record.key);

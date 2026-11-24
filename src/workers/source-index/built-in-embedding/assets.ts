@@ -732,7 +732,7 @@ async function downloadVerified(
     digest: expected.kind === 'sha256' ? expected.expected : expected.expected.slice(algorithm.length + 1),
     encoding: expected.kind === 'sha256' ? 'hex' : 'base64',
     noun: 'built-in search model', stallMs, verifyStallMs: 2 * 60_000, keepPartial: false,
-    error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
+    error: (reason, message) => new BuiltInEmbeddingInstallError(reason === 'download_stalled' ? 'download_failed' : reason, message),
     onStart: () => reporter.set('downloading', label),
     onProgress: (bytes) => reporter.advance(bytes, label),
   });

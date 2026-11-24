@@ -503,6 +503,14 @@ main() {
     die "the Bun runtime at $BUN could not be made executable." "Details may be in $LOG. Email $SUPPORT_EMAIL."
   fi
 
+  # The helper can restart the engine too, so prepare the next release's
+  # model before touching it or swapping the app.
+  if [ -f "$APP/dist/cli.js" ] && ! same_package "$RELEASE" "$APP"; then
+    if ! (cd "$RELEASE" && "$BUN" --no-env-file "$RELEASE/dist/cli.js" __prefetch-private-model) </dev/null 8>&-; then
+      step "Private model preparation did not finish. Olympus will continue the update and download the model if needed after restart."
+    fi
+  fi
+
   HELPER_CHANGED=0
   if [ "$MACOS_HELPER_NAME" != none ]; then
     if [ "$HELPER_READY" = 1 ] && [ ! -L "$SUPPORT/Olympus Engine.app" ] && [ -d "$SUPPORT/Olympus Engine.app" ] && [ -x "$SUPPORT/Olympus Engine.app/Contents/MacOS/OlympusEngineHost" ] && diff -rq "$WORK/helper/Olympus Engine.app" "$SUPPORT/Olympus Engine.app" >/dev/null 2>&1 \

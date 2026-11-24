@@ -40,7 +40,7 @@ import { ownerRuleMatches, type OwnerTierRule } from '../src/workers/classificat
 import { pathPrefixMatches } from '../src/core/location-rules.ts';
 import { createChatGptSetupBackend, readChatGptPrivacySettings } from '../src/workers/chatgpt/setup-backend.ts';
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
-import { SetupBackendError, type ChatGptSetupBackend } from '../src/workers/chatgpt/setup-tools.ts';
+import { SCOPE_LIST_PAGE_SIZE, SetupBackendError, type ChatGptSetupBackend } from '../src/workers/chatgpt/setup-tools.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
@@ -319,7 +319,7 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
       const index = input.cursor ? Number(input.cursor.slice(1)) : 0;
       const names = state.pages[index] ?? [];
       return {
-        source_id: 'google_drive.docs',
+        source_id: input.sourceId,
         account_generation: 'gen-1',
         scope_revision: state.revision,
         status: 'scope_pending',
@@ -734,7 +734,7 @@ describe('setup tools over the remote handler', () => {
   test('olympus_scope_list sorts a whole level by name, numbers numerically, before paging; cursors hold across pages', async () => {
     // Provider order is arbitrary and spans provider pages.
     const names = ['Apps', '4 Archive', '2 Areas', '10 Later', '1 Projects', '3 Resources'];
-    for (let i = 0; i < 230; i++) names.push(`Folder ${i}`);
+    for (let i = 0; i < SCOPE_LIST_PAGE_SIZE + 230; i++) names.push(`Folder ${i}`);
     backendState.pages = [names.slice(0, 3), names.slice(3, 120), names.slice(120)];
     const client = await connectClient();
     try {
@@ -745,9 +745,9 @@ describe('setup tools over the remote handler', () => {
         const result = await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs', ...(cursor ? { cursor } : {}) });
         expect(result.isError).toBeFalsy();
         const ui = result._meta?.[SCOPE_UI_META_KEY] as { nodes: Array<{ name: string }>; next_cursor?: string };
-        expect(ui.nodes.length).toBeLessThanOrEqual(100);
+        expect(ui.nodes.length).toBeLessThanOrEqual(SCOPE_LIST_PAGE_SIZE);
         expect(result.structuredContent?.has_more).toBe(ui.next_cursor !== undefined);
-        if (pages === 0) expect((ui as { remaining?: number }).remaining).toBe(236 - 100);
+        if (pages === 0) expect((ui as { remaining?: number }).remaining).toBe(names.length - SCOPE_LIST_PAGE_SIZE);
         expect((ui as { truncated?: true }).truncated).toBeUndefined();
         listed.push(...ui.nodes.map((node) => node.name));
         cursor = ui.next_cursor;
@@ -755,7 +755,7 @@ describe('setup tools over the remote handler', () => {
         // A folder added mid-way sorts into place without repeating or skipping the rest.
         if (pages === 1) backendState.pages[2]!.push('0 Inbox', 'Zz new');
       } while (cursor && pages < 10);
-      expect(pages).toBe(3);
+      expect(pages).toBe(2);
       expect(listed.slice(0, 6)).toEqual(['1 Projects', '2 Areas', '3 Resources', '4 Archive', '10 Later', 'Apps']);
       expect(listed).toContain('Zz new');
       expect(listed).not.toContain('0 Inbox'); // sorts before the cursor: it shows on the next fresh listing
@@ -764,6 +764,28 @@ describe('setup tools over the remote handler', () => {
       expect(listed.indexOf('Folder 10')).toBeGreaterThan(listed.indexOf('Folder 9'));
       // A cursor is bound to its level and its own format.
       expect((await call(client, 'olympus_scope_list', { source_id: 'google_drive.docs', cursor: 'p1' })).isError).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('olympus_scope_list returns 300 folders together and scope_set forwards them in one approval', async () => {
+    backendState.pages = [Array.from({ length: 300 }, (_, index) => `Notebook ${index}`)];
+    const client = await connectClient();
+    try {
+      const source_id = 'evernote.notes';
+      const result = await call(client, 'olympus_scope_list', { source_id });
+      expect(result.structuredContent).toMatchObject({ shown: 300, has_more: false });
+      const listed = result._meta?.[SCOPE_UI_META_KEY] as { nodes: Array<{ key: string }> };
+      const selections = listed.nodes.map(({ key }) => ({ key, state: 'ingest' }));
+      const save = await call(client, 'olympus_scope_set', {
+        source_id, account_generation: 'gen-1', scope_revision: 'rev-1', selections,
+      });
+      expect(save.structuredContent).toMatchObject({ status: 'saved', source_id });
+      expect(backendState.folderApprovals).toEqual([{
+        sourceId: source_id, accountGeneration: 'gen-1', expectedRevision: 'rev-1',
+        selections: [...selections, { key: 'folder-secret', state: 'exclude' }], wholeAccount: false,
+      }]);
     } finally {
       await client.close();
     }

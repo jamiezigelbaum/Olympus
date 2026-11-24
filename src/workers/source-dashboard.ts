@@ -55,6 +55,7 @@ import {
   DASHBOARD_CAPTURE_STALE_LABEL,
   DASHBOARD_MANY_UNREADABLE_LABEL,
   DASHBOARD_MEDIA_STORAGE_COPY,
+  DASHBOARD_NEEDS_RECONNECT,
   dashboardCaptureHelperNextAction,
   dashboardCaptureProblem,
   dashboardNoneReadSentence,
@@ -1456,6 +1457,7 @@ export interface SourceDashboardHistorySample {
 }
 
 export interface SourceDashboardBuildOptions {
+  syncFreshnessThresholdHours?: number;
   modelSetup?: ModelSetupView;
   sourceIndexStatus: SourceIndexStatusResult;
   ingestionLedger?: SourceIngestionLedgerSnapshot;
@@ -1571,6 +1573,7 @@ export interface SourceDashboardBuildOptions {
   syncNowAvailable?: (source: DashboardSyncSource) => boolean;
   /** Explicit-scope state for folder-capable sources; keys absent for every other family. */
   fileSourceScopeStatus?: Readonly<Record<string, 'scope_pending' | 'approved'>>;
+  fileSourceScopeConnected?: Readonly<Record<string, boolean>>;
   fileSourceScopeIngestionEnabled?: Readonly<Record<string, boolean>>;
   /**
    * How many archives are imported (or being removed), and whether one is
@@ -2561,16 +2564,23 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
 export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptions): SourceDashboardViewModel {
   const now = options.now ?? new Date();
   const statusCorpora = recheckedUnreadableCorpora(options.sourceIndexStatus.corpora, options.unreadableRecheck);
+  const report = options.credentialHealth;
+  const currentCredentialHealth = report && {
+    ...report,
+    results: report.results.filter((result) => !probeEvidencePredatesReconnect(
+      result, options.connectedHandleRegistry?.handles ?? [], now,
+    )),
+  };
   const degradedCredentials = [
     ...(options.sourceIndexStatus.degraded_credentials ?? []),
-    ...credentialHealthDegradations(options.credentialHealth, now),
+    ...credentialHealthDegradations(currentCredentialHealth, now),
   ];
   // A report the probe stopped refreshing describes a world that may already
   // have been repaired, so it stops driving card state. The staleness itself is
   // reported above, in the degraded-credentials list.
-  const credentialHealth = options.credentialHealth
-    && !credentialHealthReportIsStale(options.credentialHealth, now)
-    ? options.credentialHealth
+  const credentialHealth = currentCredentialHealth
+    && !credentialHealthReportIsStale(currentCredentialHealth, now)
+    ? currentCredentialHealth
     : undefined;
   const schedulerByCorpus = new Map(
     options.schedulerStatus?.sources.map((source) => [source.corpus_id, source]) ?? [],
@@ -2612,7 +2622,9 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.connectedHandleRegistryUnreadable === true,
       unpairedSources.get(definition.source_id),
       options.fileSourceScopeStatus?.[definition.source_id],
+      options.fileSourceScopeConnected?.[definition.source_id],
       options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,
+      options.syncFreshnessThresholdHours,
       definition.source_id === ARCHIVE_IMPORTS_CARD_ID ? options.importedArchives : options.importedArchivesByCard?.[definition.source_id],
       captureRuntime?.paired_at,
     );
@@ -2896,7 +2908,9 @@ function sourceCardFromDefinition(
   registryUnreadable: boolean,
   unpaired: DashboardUnpairedSourceState | undefined,
   fileSourceScopeStatus: 'scope_pending' | 'approved' | undefined,
+  fileSourceScopeConnected: boolean | undefined,
   fileSourceScopeIngestionEnabled: boolean,
+  syncFreshnessThresholdHours: number | undefined,
   importedArchives?: DashboardImportedArchives,
   capturePairedAt?: string,
 ): DashboardSourceCard {
@@ -2922,12 +2936,18 @@ function sourceCardFromDefinition(
   const queue = throughput?.state === 'stalled'
     ? { ...baseQueue, label: 'Needs attention' as const, needs_attention: baseQueue.needs_attention + 1 }
     : baseQueue;
-  const refreshFreshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
+  const scopeHandles = handlesForDefinition(definition, registry);
+  const fallbackThreshold = definition.connect_kind === 'oauth'
+    && scopeHandles.some((handle) => backendStatus(handle) !== 'reauth_required')
+    ? syncFreshnessThresholdHours
+    : undefined;
+  const refreshFreshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now, fallbackThreshold);
   const captureFreshness = schedulerCaptureFreshness(schedulers, now, capturePairedAt);
   const mediaStorage = schedulerMediaStorage(schedulers);
   const freshness = captureFreshness ? { ...refreshFreshness, capture: captureFreshness } : refreshFreshness;
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === 'embedding_lane_disabled');
-  const schedule = scheduleFromSchedulers(schedulers);
+  const connectedAt = latestIsoTimestamp(scopeHandles.map((handle) => handle.connectedAt));
+  const schedule = scheduleFromSchedulers(schedulers, connectedAt);
   // A provider refusing requests is a credential problem the broker has not
   // latched yet: the connection may read connected while every scheduled sync
   // 401s. The card must still carry the real reconnect control, or the detail
@@ -2978,6 +2998,8 @@ function sourceCardFromDefinition(
     baseConnection.state = 'reauth_required';
     baseConnection.label = 'Reconnect Google to continue syncing';
     if (baseConnection.action.kind === 'oauth') baseConnection.action.label = 'Reconnect Google';
+  } else if (baseConnection.state === 'reauth_required' && definition.connect_kind === 'oauth') {
+    baseConnection.label = DASHBOARD_NEEDS_RECONNECT;
   } else if (googleSignInMoved(definition, registry, baseConnection.state)) {
     baseConnection.google_signin_moved = true;
   }
@@ -2990,7 +3012,7 @@ function sourceCardFromDefinition(
   const unpairable = pairedSession && unpaired === undefined
     && (baseConnection.handles.length > 0 || baseConnection.state !== 'not_connected');
   const connectedFolderSource = fileSourceScopeStatus !== undefined
-    && baseConnection.handles.length > 0
+    && (fileSourceScopeConnected ?? baseConnection.handles.length > 0)
     && baseConnection.state !== 'reauth_required';
   // Mail chooses a window, categories and senders rather than folders; the
   // gate, the waiting state and the banner are the same machinery.
@@ -3401,13 +3423,16 @@ function runOrderKey(refresh: SourceIndexLastRefresh): number {
 
 function scheduleFromSchedulers(
   schedulers: SourceSchedulerSourceStatus[],
+  connectedAt?: string,
 ): DashboardSourceSchedule | undefined {
   // The same status arrives twice when a definition matches both by corpus and
   // by source id, which would double every failure count on the card.
   const tasks = [...new Set(schedulers)].flatMap((scheduler) => scheduler.tasks);
   if (tasks.length === 0) return undefined;
   const failing = tasks
-    .filter((task) => task.consecutive_failures > 0)
+    .filter((task) => task.consecutive_failures > 0
+      && !(task.last_error_kind === 'credential_reauth_required'
+        && Date.parse(connectedAt ?? '') > Date.parse(task.last_attempt_at ?? '')))
     .sort((left, right) => (Date.parse(right.last_attempt_at ?? '') || 0) - (Date.parse(left.last_attempt_at ?? '') || 0));
   const missingFolders = tasks.flatMap(task => task.last_error_kind === 'scope_root_missing' && task.missing_scope_path ? [task.missing_scope_path] : []);
   const lastErrorKind = failing.find((task) => task.last_error_kind)?.last_error_kind;
@@ -3418,7 +3443,7 @@ function scheduleFromSchedulers(
   const nextRunAt = earliestIsoTimestamp(tasks.map((task) => task.next_run_at));
   return {
     running: tasks.some((task) => task.running),
-    consecutive_failures: tasks.reduce((sum, task) => sum + task.consecutive_failures, 0),
+    consecutive_failures: failing.reduce((sum, task) => sum + task.consecutive_failures, 0),
     ...(lastSuccessAt ? { last_success_at: lastSuccessAt } : {}),
     ...(lastAttemptAt ? { last_attempt_at: lastAttemptAt } : {}),
     ...(nextRunAt ? { next_run_at: nextRunAt } : {}),
@@ -3779,6 +3804,7 @@ function aggregateFreshness(
   corpora: SourceIndexStatusCorpus[],
   definition: DashboardSupportedSourceDefinition,
   now: Date,
+  fallbackThreshold?: number,
 ): DashboardSourceCard['freshness'] {
   const stale = cards.some((card) => card.freshness.stale) || schedulers.some((scheduler) => scheduler.stale_sync_anomaly);
   const schedulerHours = schedulers
@@ -3802,7 +3828,12 @@ function aggregateFreshness(
   }
   const completedAt = latestCompletedAt(corpora);
   if (completedAt) {
-    return { label: `Last checked ${relativeTime(completedAt, now)}`, stale };
+    const checked = `Last checked ${relativeTime(completedAt, now)}`;
+    const hours = Math.max(0, (now.getTime() - completedAt.getTime()) / 3_600_000);
+    if (fallbackThreshold !== undefined && hours > fallbackThreshold) {
+      return { label: `${checked}; refresh is late`, hours, threshold_hours: fallbackThreshold, stale: true };
+    }
+    return { label: checked, stale };
   }
   // "answers questions directly, nothing to sync" is the answer-lane line, and
   // only a definition that can answer without syncing may claim it. Keying it

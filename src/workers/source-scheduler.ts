@@ -89,6 +89,7 @@ import {
   CREDENTIAL_REFRESH_BUSY_RETRY_MS,
   CredentialBrokerError,
   isCredentialRefreshBusyError,
+  type SourceOAuthRecovery,
 } from './credential-broker/index.ts';
 import { GO_EASY_TRICKLE_EMBED_ITEMS } from './local-pacing.ts';
 import { LIVE_NEW_ITEMS_INTERVAL_MS } from './live-source-cadence.ts';
@@ -103,6 +104,7 @@ export type SourceSchedulerCadence = 'manual' | 'continuous';
  * while one poisoned timestamp cannot park a live source indefinitely.
  */
 export const SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS = 48 * 60 * 60 * 1_000;
+const SOURCE_SCHEDULER_MAX_ERROR_BACKOFF_MS = 60 * 60 * 1_000;
 /**
  * How soon a task runs again when its pass left work ready to do now (a
  * candidate scan not finished, a full batch processed), and how soon a
@@ -304,6 +306,8 @@ export interface SourceSchedulerTaskRunResult {
   checkpoint?: string | null;
   /** A structured provider/cost guard deferral; never inferred from free-form text. */
   retryAt?: SourceSchedulerRetryAt;
+  /** The task deferred before it could check the source. */
+  deferred?: true;
   /**
    * More work is ready right now (a backlog): run this task again within
    * seconds instead of waiting out its interval. A retryAt deferral wins.
@@ -347,6 +351,7 @@ export interface SourceSchedulerSource {
   intervalMs: number;
   freshnessThresholdHours: number;
   tasks: SourceSchedulerTask[];
+  oauthRecovery?: SourceOAuthRecovery;
   lastSyncCompletedAt?(): string | undefined;
   /**
    * Set by withEmbeddingSweep: the degraded reason a successful sync task
@@ -533,6 +538,7 @@ interface SchedulerTaskState {
   running: boolean;
   nextRunAt: number;
   retryNotBeforeAt?: number | undefined;
+  resetRetry?: true;
   bootstrapLastSuccessAt?: string;
   checkpoint?: string;
   consecutiveFailures: number;
@@ -672,8 +678,9 @@ export class SourceScheduler {
     this.sources = this.filterAllowedSources(sources);
     this.states = this.sources.flatMap((source) => source.tasks.map((task) => {
       const previous = existing.get(schedulerStateKey(source, task));
-      if (!previous) {
-        const state = this.createTaskState(source, task, firstRun);
+      if (!previous || previous.source.oauthRecovery?.generation !== source.oauthRecovery?.generation) {
+        const state = this.createTaskState(source, task, firstRun, previous !== undefined);
+        if (!this.stateStore && previous?.checkpoint) state.checkpoint = previous.checkpoint;
         newWorkDue ||= taskCadence(source, task) === 'continuous' && state.nextRunAt <= firstRun;
         return state;
       }
@@ -927,7 +934,11 @@ export class SourceScheduler {
   async runDueTasks(now: Date = this.now()): Promise<SourceSchedulerStatus> {
     if (!this.enabled) return this.status(now);
     const dueAt = now.getTime();
-    this.applyPendingUnparks(dueAt);
+    try {
+      this.applyPendingUnparks(dueAt);
+    } catch (error) {
+      console.error(`[olympus:source-scheduler] unpark_read_failed error_kind=${safeSchedulerErrorKind(error)}`);
+    }
     if (this.askHolds()) {
       this.scheduleContinueWake(dueAt + SOURCE_SCHEDULER_ASK_RECHECK_MS);
       return this.status(now);
@@ -1097,7 +1108,7 @@ export class SourceScheduler {
       this.busyConcurrencyKeys.add(concurrencyKey);
       try {
         for (const state of group) {
-          if (state.running) continue;
+          if (state.running || !this.states.includes(state)) continue;
           state.running = true;
           try {
             await this.runTaskSharingThread(state, dueAt, provenance);
@@ -1165,7 +1176,7 @@ export class SourceScheduler {
       for (const hold of holds) hold.preempt?.();
       try { await Promise.all(holds.map(hold => hold.done)); }
       finally { delete state.waitReason; }
-      if (this.stops !== stops) return;
+      if (this.stops !== stops || !this.states.includes(state)) return;
     }
     this.executingStates.add(state);
     changeMemoryCounter(`tasks_${state.task.kind}`, 1);
@@ -1217,11 +1228,14 @@ export class SourceScheduler {
           this.applyPersistedState(state, this.stateStore.recordAttempt({
             ...schedulerTaskStateKey(state.source, state.task),
             attemptedAt,
+            ...(state.resetRetry ? { resetRetry: state.resetRetry } : {}),
           }));
+          delete state.resetRetry;
         }
       }
       const startedCheckpoint = state.checkpoint;
       const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance, stopsAtStart);
+      if (!this.states.includes(state)) return;
       const completedAt = this.now().toISOString();
       // The streak is derived BEFORE state.lastResult is replaced, so it reads
       // the previous run's counts. It is carried inside the counts the
@@ -1234,6 +1248,7 @@ export class SourceScheduler {
           : { ...result, counts: { ...result.counts, zero_change_runs: zeroChangeRuns } },
       );
       const retryAt = normalizeRetryAt(result.retryAt, completedAt);
+      const preserveLastSuccess = runningTask.kind === 'sync' && result.deferred === true;
       // A structured provider deferral is the more specific explanation and
       // keeps precedence; the traversal gate fills the silence otherwise.
       const degradedReason = retryAt?.degradedReason
@@ -1273,6 +1288,7 @@ export class SourceScheduler {
         this.applyPersistedState(state, this.stateStore.recordSuccess({
           ...schedulerTaskStateKey(state.source, state.task),
           completedAt,
+          ...(preserveLastSuccess ? { preserveLastSuccess } : {}),
           resultStatus: result.status,
           ...(normalizedResult.counts ? { counts: normalizedResult.counts } : {}),
           ...(normalizedResult.warnings ? { warnings: normalizedResult.warnings } : {}),
@@ -1286,7 +1302,7 @@ export class SourceScheduler {
         delete state.lastErrorHash;
         delete state.lastErrorKind;
         state.lastCompletedAt = completedAt;
-        state.lastSuccessAt = completedAt;
+        if (!preserveLastSuccess) state.lastSuccessAt = completedAt;
         state.lastResult = normalizedResult;
         if (retryAt?.effectiveIntervalMs) state.effectiveIntervalMs = retryAt.effectiveIntervalMs;
         else delete state.effectiveIntervalMs;
@@ -1315,6 +1331,7 @@ export class SourceScheduler {
       if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
+      if (!this.states.includes(state)) return;
       if (this.stops !== stopsAtStart) {
         this.recordShutdownInterruption(state);
         return;
@@ -1325,8 +1342,10 @@ export class SourceScheduler {
       const warnings = safeSchedulerWarnings(error);
       const failureCounts = error instanceof SourceSchedulerTaskFailure ? error.counts : undefined;
       const completedAt = this.now().toISOString();
-      const retryAt = safeNormalizeFailureRetryAt(error, completedAt, this.errorBackoffMs);
-      const notBeforeAt = retryAt?.at ?? new Date(Date.parse(completedAt) + this.errorBackoffMs).toISOString();
+      const backoffMs = Math.min(SOURCE_SCHEDULER_MAX_ERROR_BACKOFF_MS,
+        this.errorBackoffMs * 2 ** Math.min(state.consecutiveFailures, 20));
+      const retryAt = safeNormalizeFailureRetryAt(error, completedAt, backoffMs);
+      const notBeforeAt = retryAt?.at ?? new Date(Date.parse(completedAt) + backoffMs).toISOString();
       if (this.stateStore) {
         try {
           this.applyPersistedState(state, this.stateStore.recordFailure({
@@ -1418,7 +1437,7 @@ export class SourceScheduler {
     ]));
     for (const request of this.stateStore.pendingUnparks()) {
       const state = states.get(`${request.sourceId}\n${request.corpusId}\n${request.taskId}`);
-      if (!state || state.running) continue;
+      if (!state || state.running || state.resetRetry) continue;
       state.pendingUnpark = request;
       // One immediate run uses the normal configured interval afterward. No
       // persistent cadence field is changed by the control request.
@@ -1433,49 +1452,77 @@ export class SourceScheduler {
     provenance: SourceSchedulerRunProvenance,
     stopsAtStart: number,
   ): Promise<SourceSchedulerTaskRunResult> {
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= this.maxTransientRetries; attempt += 1) {
+    const run = () => task.run({
+      ...schedulerTaskStateKey(state.source, task),
+      attemptedAt,
+      consecutiveFailures: state.consecutiveFailures,
+      ...(provenance === 'operator' ? { provenance } : {}),
+      ...(state.checkpoint ? { checkpoint: state.checkpoint } : {}),
+      ...(state.lastSuccessAt ? { lastSuccessAt: state.lastSuccessAt } : {}),
+      effectiveIntervalMs: state.effectiveIntervalMs ?? taskIntervalMs(state.source, task),
+      // A task must not receive an advisory for a budget already reset.
+      ...(reportedDegradedReason(state.degradedReason, state.lastCompletedAt, new Date(attemptedAt))
+        ? { degradedReason: state.degradedReason }
+        : {}),
+    });
+    const oauth = task.kind === 'sync' ? state.source.oauthRecovery : undefined;
+    let refreshed = false;
+    let attempts = 1;
+    const isCurrent = () => this.stops === stopsAtStart && this.states.includes(state);
+    for (;;) {
       try {
-        return await task.run({
-          ...schedulerTaskStateKey(state.source, task),
-          attemptedAt,
-          consecutiveFailures: state.consecutiveFailures,
-          // Only an operator run marks itself: a scheduled context stays
-          // byte-identical to what tasks received before provenance existed,
-          // and the X adapter reads a missing marker as scheduled (R62).
-          ...(provenance === 'operator' ? { provenance } : {}),
-          ...(state.checkpoint ? { checkpoint: state.checkpoint } : {}),
-          ...(state.lastSuccessAt ? { lastSuccessAt: state.lastSuccessAt } : {}),
-          effectiveIntervalMs: state.effectiveIntervalMs ?? taskIntervalMs(state.source, task),
-          // Same expiry as the status report: a task must not be handed an
-          // advisory about a budget that has already reset under it.
-          ...(reportedDegradedReason(state.degradedReason, state.lastCompletedAt, new Date(attemptedAt))
-            ? { degradedReason: state.degradedReason }
-            : {}),
-        });
+        return await run();
       } catch (error) {
         if (error instanceof SourceSchedulerTaskDeferral) {
           return {
-            status: 'idle', retryAt: error.retryAt,
+            status: 'idle', deferred: true, retryAt: error.retryAt,
             ...(error.counts ? { counts: error.counts } : {}),
             ...(error.warnings?.length ? { warnings: error.warnings } : {}),
           };
         }
-        lastError = error;
-        if (safeSchedulerRetryAt(error) || !isTransientError(error) || attempt >= this.maxTransientRetries) break;
-        // A stopped scheduler starts no new attempt.
-        if (this.stops !== stopsAtStart) break;
+        if (!isCurrent()) throw error;
+        if (oauth && isProviderCredentialRejection(error)) {
+          if (!refreshed) {
+            refreshed = true;
+            console.info(`[olympus:source-scheduler] credential_refresh source_id=${state.source.sourceId} task_id=${task.id}`);
+            let refreshedOAuth: boolean;
+            try {
+              refreshedOAuth = await oauth.refresh();
+            } catch (refreshError) {
+              // Only a terminal answer needs the owner. A rate limit or a lost
+              // answer (credential_refresh_failed) keeps the grant and retries
+              // on the normal schedule; repeated failures still surface.
+              if (!(refreshError instanceof CredentialBrokerError)
+                || (refreshError.code !== 'credential_reauth_required' && refreshError.code !== 'credential_missing')) {
+                throw refreshError;
+              }
+              await oauth.requireReconnect();
+              throw reconnectTaskFailure();
+            }
+            if (!refreshedOAuth || !isCurrent()) throw error;
+            continue;
+          }
+          await oauth.requireReconnect();
+          throw reconnectTaskFailure();
+        }
+        if (oauth && error instanceof CredentialBrokerError
+          && (error.code === 'credential_reauth_required' || error.code === 'credential_missing')) {
+          await oauth.requireReconnect();
+          throw reconnectTaskFailure();
+        }
+        if (safeSchedulerRetryAt(error) || !isTransientError(error) || attempts >= this.maxTransientRetries) throw error;
+        attempts += 1;
         await this.sleep(this.errorBackoffMs);
-        if (this.stops !== stopsAtStart) break;
+        if (!isCurrent()) throw error;
       }
     }
-    throw lastError;
   }
 
   private createTaskState(
     source: SourceSchedulerSource,
     task: SourceSchedulerTask,
     firstRun: number,
+    replacedGrant = false,
   ): SchedulerTaskState {
     const key = schedulerTaskStateKey(source, task);
     let persisted = this.stateStore?.get(key);
@@ -1539,6 +1586,20 @@ export class SourceScheduler {
         firstRun,
       });
       if (bootstrapResult) state.lastResult = normalizeTaskResult(bootstrapResult);
+    }
+    const connectedAt = parseSchedulerTimestamp(source.oauthRecovery?.connectedAt);
+    const attemptedAt = parseSchedulerTimestamp(persisted?.lastAttemptAt ?? persisted?.lastCompletedAt);
+    if (task.kind === 'sync' && connectedAt !== undefined
+      && (replacedGrant || attemptedAt === undefined || attemptedAt < connectedAt)) {
+      if (this.stateStore && persisted) state.resetRetry = true;
+      state.nextRunAt = firstRun;
+      state.consecutiveFailures = 0;
+      delete state.lastErrorHash;
+      delete state.lastErrorKind;
+      delete state.degradedReason;
+      delete state.retryNotBeforeAt;
+      delete state.effectiveIntervalMs;
+      if (state.lastResult?.status === 'failed') delete state.lastResult;
     }
     return state;
   }
@@ -1610,7 +1671,10 @@ export class SourceScheduler {
     const taskLastSyncCompletedAt = latestCompletedAt(sourceStates
       .filter((state) => state.task.kind === 'sync')
       .map((state) => state.lastSuccessAt));
-    const lastSyncCompletedAt = source.lastSyncCompletedAt?.() ?? taskLastSyncCompletedAt;
+    const storeLastSyncCompletedAt = source.lastSyncCompletedAt?.();
+    const lastSyncCompletedAt = source.oauthRecovery
+      ? taskLastSyncCompletedAt ?? storeLastSyncCompletedAt
+      : storeLastSyncCompletedAt ?? taskLastSyncCompletedAt;
     const freshnessHours = freshnessHoursFrom(lastSyncCompletedAt, now);
     const taskStatuses = sourceStates.map((state) => this.taskStatus(state, now));
     return {
@@ -3387,6 +3451,12 @@ function isProviderCredentialRejection(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if ((error as { status?: unknown }).status === 401) return true;
   return /\bHTTP 401\b/.test(error.message);
+}
+
+function reconnectTaskFailure(): SourceSchedulerTaskFailure {
+  return new SourceSchedulerTaskFailure('The source needs to reconnect before it can sync.', {
+    errorKind: 'credential_reauth_required',
+  });
 }
 
 function mapExplicitSchedulerErrorKind(value: string): string {

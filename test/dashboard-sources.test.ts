@@ -75,7 +75,7 @@ describe('Sources page', () => {
     const doc = new Window().document;
     doc.body.innerHTML = renderDashboardConnectPage(view(), unlockedOptions);
     const dropbox = doc.querySelector('[data-source-row="dropbox.files"]')!;
-    expect(dropbox.textContent).toContain('needs sign-in');
+    expect(dropbox.textContent).toContain('needs reconnect');
     expect(dropbox.querySelector('.logodot.attention')).not.toBeNull();
     const signIn = dropbox.querySelector('button[data-dialog-open="add-source"]')!;
     expect(signIn.getAttribute('data-source-open')).toBe('dropbox.files');

@@ -74,6 +74,8 @@ import {
 } from './source-account-binding.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { assertTelegramHistoryAccount, followProviderAccountRename } from './provider-account-history.ts';
+import { carryFileSourceScopeApproval } from './source-scope-approval.ts';
+import { carryMailSourceScopeApproval } from './mail-source-scope.ts';
 
 const DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
@@ -1074,6 +1076,32 @@ async function completeOAuthSourceConnection(
       // handed out again by this process, whatever is left of its lifetime.
       for (const handle of handles) invalidateMintedCredentialSessions(handle);
 
+      const connectedNow = readConnectedHandleRegistry(prepared.registryPath).handles;
+      for (const current of connectedNow) {
+        if (!handles.includes(current.handle)) continue;
+        const previous = registryBefore?.find((entry) => entry.handle === current.handle);
+        if (!previous) continue;
+        const proof = replacedGrants.get(current.handle);
+        const verifiedGrantAccount = proof?.grantConnectedAt === previous.connectedAt
+          && proof.recordedAccountId === previous.providerAccountId
+          ? proof.ownAccountId
+          : undefined;
+        const boundSource = accountBoundSourceIdForProvider(current.provider);
+        const binding = boundSource && bindingsBefore.kind === 'ok' ? bindingsBefore.bindings.sources[boundSource] : undefined;
+        const verifiedBinding = binding?.bound_grant === previous.connectedAt && !binding.reconnected_at && !binding.purge_required
+          ? binding.provider_account_id
+          : undefined;
+        const verifiedPreviousAccountId = verifiedGrantAccount ?? verifiedBinding;
+        try {
+          carryFileSourceScopeApproval(prepared.registryPath, previous, current, verifiedPreviousAccountId);
+          carryMailSourceScopeApproval(prepared.registryPath, previous, current, verifiedPreviousAccountId);
+        } catch {
+          // The grant is already stored. A scope that could not be carried
+          // stays pending, with the picker available to approve it again.
+          console.warn('[olympus:connect] saved scope could not be carried to the replacement grant');
+        }
+      }
+
       // Only once the new grant is fully stored (Codex round 1 on 6475d315):
       // recorded first, a connect that then failed to store its credential left
       // the previous account connected with a purge marker that would delete
@@ -1914,6 +1942,33 @@ export function oauthAuthorizeOrigin(source: ConnectOAuthOptions['source']): str
   return new URL(oauthSourceDefinition(source).authUrl).origin;
 }
 
+const OAUTH_STATUS_HANDLES = {
+  google: () => oauthSourceDefinition('google').handles,
+  gmail: () => oauthSourceDefinition('gmail').handles,
+  'google-drive': () => oauthSourceDefinition('google-drive').handles,
+  dropbox: () => oauthSourceDefinition('dropbox').handles,
+  x: () => oauthSourceDefinition('x').handles,
+  evernote: () => [{ provider: 'evernote', capability: 'evernote.notes.sync' }],
+};
+type OAuthStatusSource = keyof typeof OAUTH_STATUS_HANDLES;
+export const OAUTH_STATUS_SOURCES = Object.keys(OAUTH_STATUS_HANDLES) as OAuthStatusSource[];
+
+/** Current grants are independent of the short-lived detached callback files. */
+export function connectedOAuthStatuses(
+  source: OAuthStatusSource | undefined,
+  registryPath: string,
+): Array<{ handle: string; provider: string; status: 'connected' | 'needs_reconnect' }> {
+  const definitions = (source ? [source] : OAUTH_STATUS_SOURCES).flatMap((entry) => OAUTH_STATUS_HANDLES[entry]());
+  return readConnectedHandleRegistry(registryPath).handles
+    .filter((handle) => definitions.some((definition) => handle.provider === definition.provider
+      && handle.allowedCapabilities.includes(definition.capability)))
+    .map((handle) => ({
+      handle: handle.handle,
+      provider: handle.provider,
+      status: handle.backendState?.status === 'reauth_required' ? 'needs_reconnect' : 'connected',
+    }));
+}
+
 const DROPBOX_OAUTH_SCOPES = ['files.metadata.read', 'files.content.read', 'sharing.read', 'account_info.read'];
 
 function oauthSourceDefinition(source: ConnectOAuthOptions['source']): OAuthSourceDefinition {
@@ -2473,7 +2528,7 @@ export function readDetachedOAuthState(path: string): DetachedOAuthState | undef
 
 export function listDetachedOAuthStates(options: {
   stateDir?: string;
-  source?: ConnectOAuthOptions['source'];
+  source?: OAuthStatusSource;
   pidAlive?: (pid: number) => boolean;
 } = {}): DetachedOAuthState[] {
   const stateDir = options.stateDir ?? defaultDetachedOAuthStateDir();

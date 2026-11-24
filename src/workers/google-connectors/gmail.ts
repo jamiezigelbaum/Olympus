@@ -1324,7 +1324,9 @@ class RestGmailApiClient implements GmailApiClient {
         await this.sleep(gmailRetryDelayMs(response, attempt));
         continue;
       }
-      throw new Error(`Gmail API request failed (${response.status}): ${safeProviderDetail(text)}`);
+      throw Object.assign(new Error(`Gmail API request failed (${response.status}): ${safeProviderDetail(text)}`), {
+        status: response.status,
+      });
     }
   }
 }

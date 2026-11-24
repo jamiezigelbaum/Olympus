@@ -3599,7 +3599,7 @@ var WRITE_SLICE_BYTES = 64 * 1024;
 var READ_RETRIES = 3;
 var RETRY_DELAY_MS = 250;
 
-class InterruptedRead extends Error {
+class InterruptedTransfer extends Error {
 }
 async function downloadPinnedFile(options) {
   const { fetchImpl, url, target, partial, expectedBytes, algorithm, encoding, noun, stallMs, error } = options;
@@ -3627,7 +3627,8 @@ async function downloadPinnedFile(options) {
   try {
     if (existsSync6(partial)) {
       const size = statSync4(partial).size;
-      if (size > 0 && size < expectedBytes) {
+      if (size > 0 && size <= expectedBytes) {
+        options.onCheckPartial?.();
         await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
         options.onProgress(size);
@@ -3640,9 +3641,10 @@ async function downloadPinnedFile(options) {
       const end = Math.min(expectedBytes - 1, start + REQUEST_BYTES - 1);
       const controller = new AbortController;
       let timer;
+      const stall = new Error(`no data for ${stallMs / 1000} s`);
       const armStall = () => {
         clearTimeout(timer);
-        timer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
+        timer = setTimeout(() => controller.abort(stall), stallMs);
       };
       let response;
       let reader;
@@ -3656,7 +3658,10 @@ async function downloadPinnedFile(options) {
             headers: { Range: `bytes=${start}-${end}`, "Accept-Encoding": "identity" }
           }), controller.signal);
         } catch (cause) {
-          throw error("download_failed", `Could not reach the download server for the ${noun} (${message(cause)}).`);
+          throw new InterruptedTransfer(`could not reach the download server: ${message(cause)}`);
+        }
+        if (response.status === 408 || response.status === 429 || response.status >= 500) {
+          throw new InterruptedTransfer(`HTTP ${response.status}`);
         }
         if (response.status !== 200 && response.status !== 206 || !response.body) {
           throw error("download_failed", `The ${noun} download failed (HTTP ${response.status}).`);
@@ -3693,9 +3698,13 @@ async function downloadPinnedFile(options) {
           armStall();
           let part;
           try {
-            part = await untilAborted(bodyReader.read(), controller.signal);
+            do {
+              part = await untilAborted(bodyReader.read(), controller.signal);
+            } while (!part.done && part.value.byteLength === 0);
           } catch (cause) {
-            throw new InterruptedRead(message(cause));
+            throw new InterruptedTransfer(message(cause));
+          } finally {
+            clearTimeout(timer);
           }
           if (part.done)
             return false;
@@ -3718,17 +3727,21 @@ async function downloadPinnedFile(options) {
           }
           return true;
         };
-        while (await readNext()) {}
+        while (received <= responseEnd && await readNext()) {}
         if (received !== responseEnd + 1)
           throw mismatch(`${url} did not match its pinned size; nothing was installed.`);
+        retries = 0;
       } catch (cause) {
-        if (!(cause instanceof InterruptedRead))
+        if (!(cause instanceof InterruptedTransfer))
           throw cause;
+        const reason = controller.signal.reason === stall ? "download_stalled" : "download_failed";
+        const detail = `The ${noun} download was interrupted (${cause.message}).`;
         if (retries >= READ_RETRIES) {
-          throw error("download_failed", `The ${noun} download was interrupted (${cause.message}).`);
+          throw error(reason, detail);
         }
         retries += 1;
         retry = true;
+        options.onRetry?.(reason, detail);
       } finally {
         clearTimeout(timer);
         if (reader) {
@@ -4408,7 +4421,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     stallMs,
     verifyStallMs: 2 * 60000,
     keepPartial: false,
-    error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
+    error: (reason, message) => new BuiltInEmbeddingInstallError(reason === "download_stalled" ? "download_failed" : reason, message),
     onStart: () => reporter.set("downloading", label),
     onProgress: (bytes) => reporter.advance(bytes, label)
   });
@@ -13844,6 +13857,9 @@ function stripDataUrlPrefix(dataUrl) {
 
 // src/workers/connector-store/local-index.ts
 import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
+
+// src/control-ui-contract.ts
+var FOLDER_SCOPE_SELECTION_LIMIT = 500;
 
 // src/workers/classification/tier-classifier.ts
 import { createHash as createHash8 } from "node:crypto";
@@ -28405,13 +28421,19 @@ class LocalConnectorStore {
   }
   itemNames(identity) {
     const row = this.db.query(`
-      SELECT title, sender_label, sender_id, authored_at FROM items
+      SELECT title, sender_label, sender_id, sender_is_owner, authored_at FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
         AND tombstoned = 0
     `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
     if (!row)
       return;
-    const sender = row.sender_label?.trim() || row.sender_id?.trim();
+    const senderRow = {
+      sourceItem: identity,
+      senderId: row.sender_id?.trim() || undefined,
+      authorLabel: row.sender_label?.trim() || undefined,
+      senderIsOwner: row.sender_is_owner === 1
+    };
+    const sender = citationAuthorLabel(senderRow, this.personCitationName(senderRow));
     return {
       ...row.title?.trim() ? { title: row.title.trim() } : {},
       ...sender ? { sender } : {},
@@ -36727,6 +36749,12 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
 var lexicalContentPreference = connectorStoreContentPreference(new Set);
+var OWNER_AUTHOR_LABEL = "You";
+function citationAuthorLabel(row, personName) {
+  if (row.senderIsOwner === true)
+    return OWNER_AUTHOR_LABEL;
+  return personName ?? row.authorLabel;
+}
 function assertConnectorStoreStorageProfile(profile) {
   if (profile.trustDomain !== "secure_local")
     return;
@@ -37806,8 +37834,8 @@ function connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent, chunkColu
 function normalizeScopePaths(values) {
   if (values === undefined)
     return [];
-  if (!Array.isArray(values) || values.length > 100) {
-    throw new Error("Connector store locator path scopes must be an array of at most 100 strings.");
+  if (!Array.isArray(values) || values.length > FOLDER_SCOPE_SELECTION_LIMIT) {
+    throw new Error(`Connector store locator path scopes must be an array of at most ${FOLDER_SCOPE_SELECTION_LIMIT} strings.`);
   }
   return [...new Set(values.map((value) => normalizeConnectorStoreLocatorPathScope(value)))];
 }
@@ -37843,8 +37871,8 @@ function normalizeSourceScopeObservation(value) {
 function normalizeScopeFolderKeys(values) {
   if (values === undefined)
     return [];
-  if (!Array.isArray(values) || values.length > 100) {
-    throw new Error("Connector store source scope folder keys must be an array of at most 100 strings.");
+  if (!Array.isArray(values) || values.length > FOLDER_SCOPE_SELECTION_LIMIT) {
+    throw new Error(`Connector store source scope folder keys must be an array of at most ${FOLDER_SCOPE_SELECTION_LIMIT} strings.`);
   }
   return [...new Set(values.map((value) => normalizeBoundedFilterString(value, "source scope folder key")))];
 }

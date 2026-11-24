@@ -7,6 +7,8 @@ import {
 import { type SourceStorageNoticeKind, sourceStorageNotices } from '../../../core/source-registry.ts';
 import { statSync } from 'node:fs';
 import { normalizeSecretRef } from '../../../core/secret-store.ts';
+import { defaultMailSourceScopeStatePath } from '../../../core/mail-source-scope.ts';
+import { defaultFileSourceScopeStatePath } from '../../../core/source-scope-approval.ts';
 import type { ArchiveImportDashboard } from '../../archive-import/dashboard.ts';
 import type { V04PublicSourceId } from '../../../core/public-source-capabilities.ts';
 import type { SourceScheduler } from '../../source-scheduler.ts';
@@ -240,19 +242,18 @@ export function assertDashboardSourceMayRead(
  * already gives — never a 500 out of a manual read.
  */
 /**
- * A cheap fingerprint of the handle registry: modification time and size.
- *
- * Enough to notice that another process rewrote it, which is all the scheduler
- * refresh needs. An absent registry is its own stamp, so removing the file is a
- * change like any other.
+ * Fingerprint the scheduler's connection and scope inputs. A saved scope must
+ * reach the background even if the front's reload message was lost.
  */
 export function dashboardRegistryStamp(registryPath: string): string {
-  try {
-    const stat = statSync(registryPath);
-    return `${stat.mtimeMs}:${stat.size}`;
-  } catch {
-    return 'absent';
-  }
+  return [registryPath, defaultFileSourceScopeStatePath(registryPath), defaultMailSourceScopeStatePath(registryPath)].map((path) => {
+    try {
+      const stat = statSync(path);
+      return `${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+    } catch {
+      return 'absent';
+    }
+  }).join('|');
 }
 
 function dashboardSourceHasConnectedHandle(sourceId: V04PublicSourceId, registryPath: string): boolean {
