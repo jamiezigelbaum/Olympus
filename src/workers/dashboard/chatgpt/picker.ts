@@ -68,6 +68,7 @@ export interface ChatGptPickerConfig {
   tools: typeof CHATGPT_PICKER_TOOLS;
   mailArgs: typeof CHATGPT_PICKER_MAIL_ARGS;
   scopeMetaKey: string;
+  folderSelectionLimit: number;
   copy: typeof DASHBOARD_CHATGPT_PICKER_COPY;
   connectHost: string;
   mailSourceId: string;
@@ -292,8 +293,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   /** The whole-account row's key in focus keys (never a provider key). */
   const ACCOUNT = '@account';
   /** olympus_scope_set accepts at most this many explicit rules (its input schema's maxItems). */
-  const MAX_RULES = 100;
-  /** Pick mode reads up to this many pages of one level by itself (100 folders a page). */
+  const folderLimit = kit.config.folderSelectionLimit;
+  /** Pick mode reads up to this many pages of one level by itself. */
   const PICK_PAGES = 20;
 
   function handles(fix: Any): boolean {
@@ -509,7 +510,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     for (const folder of (options && options.selected) || []) {
       if (folder && typeof folder.key === 'string' && folder.key && taken.indexOf(folder.key) < 0) selected.set(folder.key, String(folder.name || ''));
     }
-    const limit = options && typeof options.limit === 'number' && isFinite(options.limit) ? Math.max(0, Math.floor(options.limit)) : MAX_RULES;
+    const limit = options && typeof options.limit === 'number' && isFinite(options.limit) ? Math.max(0, Math.floor(options.limit)) : 100;
     openScope(sourceId, sourceLabel, words.title, '', '', undefined,
       { words, taken: taken.slice(), done, selected, limit, filter: '', filterAt: null, pages: new Map() });
   }
@@ -521,6 +522,19 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   }
 
+  function filterField(label: string, placeholder: string, key: string, value: string, change: (text: string) => void): HTMLElement {
+    const field = add(el('label', 'field checklist-filter'), el('span', 'field-label', label));
+    const input = el('input', 'text') as HTMLInputElement;
+    input.type = 'search';
+    input.setAttribute('autocomplete', 'off');
+    input.spellcheck = false;
+    input.placeholder = placeholder;
+    input.value = value;
+    input.setAttribute('data-key', key);
+    input.addEventListener('input', () => change(input.value));
+    return add(field, input);
+  }
+
   function checklist(list: ChatGptChecklist): HTMLElement {
     const words = list.words;
     const wrap = el('div', 'checklist');
@@ -529,18 +543,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const open = shown.filter((item) => !item.taken);
     const full = list.selected.size >= list.limit;
     if (list.items.length > 8 || list.filter) {
-      const field = el('label', 'field checklist-filter');
-      add(field, el('span', 'field-label', words.filter));
-      const input = el('input', 'text') as HTMLInputElement;
-      input.type = 'search';
-      input.setAttribute('autocomplete', 'off');
-      input.spellcheck = false;
-      input.placeholder = fill(words.filterPlaceholder, { n: kit.count(list.items.length) });
-      input.value = list.filter;
-      input.setAttribute('data-key', list.keyPrefix + 'filter');
-      input.addEventListener('input', () => list.setFilter(input.value));
-      add(field, input);
-      add(wrap, field);
+      add(wrap, filterField(words.filter, fill(words.filterPlaceholder, { n: kit.count(list.items.length) }),
+        list.keyPrefix + 'filter', list.filter, list.setFilter));
     }
     const bar = el('div', 'checklist-bar');
     const unticked = open.filter((item) => !list.selected.has(item.key));
@@ -1229,7 +1233,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       access: new Map(),
       wholeWords: null,
       ancestors: new Map(), own: new Map(), whole: false, wholeConfirmed: false,
-      path: [], lastSeg: '',
+      path: [], lastSeg: '', folderFilters: new Map<string, string>(),
       // mail
       draft: null, labels: [], categories: [], suggestions: [], sampleSize: 0, estimate: null,
       // pick mode (privacy): one folder, no choices, no save
@@ -1275,11 +1279,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   // ---- folders -----------------------------------------------------------
-  // One level per screen: the root (the whole-account row, the exceptions,
-  // the top-level folders) or a folder (its own choice, then its folders).
-  // Every row carries one segmented control (Full, Names only, Skip): a tap
-  // sets that folder's own choice and a second tap clears it. Only explicit
-  // rules are stored; inherited choices and Mixed are derived on every render.
+  // One level per screen: the root (whole account, top-level folders, exceptions)
+  // or a folder (its own choice, then its folders).
+  // Checkboxes set inclusion and the segments set how much each folder can
+  // be read. Only explicit rules are stored; inherited choices are derived.
   function list(parentKey: string, append: boolean, after?: () => void): void {
     const cursor = append ? (parentKey ? p.cursors.get(parentKey) : p.rootCursor) : '';
     const args: Any = { source_id: p.id };
@@ -1330,9 +1333,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     }
     const trail: string[] = parentKey ? trailOf(parentKey) : [];
     const previous: Any[] = append ? (parentKey ? p.branches.get(parentKey) || [] : p.roots) : [];
-    const seen: Record<string, boolean> = {};
-    for (const node of previous) seen[node.key] = true;
-    const fresh = page.nodes.filter((node: Any) => !seen[node.key] && trail.indexOf(node.key) < 0);
+    const seen = new Set(previous.map((node) => node.key));
+    const fresh = page.nodes.filter((node: Any) => !seen.has(node.key) && trail.indexOf(node.key) < 0);
     for (const node of fresh) {
       p.catalog.set(node.key, node);
       p.ancestors.set(node.key, trail);
@@ -1463,28 +1465,29 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     return true;
   }
 
-  function descendants(key: string): string[] {
-    const out: string[] = [];
-    p.own.forEach((_state: string, other: string) => {
-      if (other !== key && (p.ancestors.get(other) || []).indexOf(key) >= 0) out.push(other);
-    });
-    return out;
-  }
-
   /**
-   * Derived from the known rules below a folder, never stored: the first
-   * choice inside that gives different access. Not included and Skip both
-   * mean Olympus reads nothing, so an unchosen folder whose folders are only
-   * skipped is not Mixed.
+   * Find the first differing rule for each ancestor in one pass over the
+   * rules. An unchosen folder and a skipped folder both grant no access.
    */
-  function mixed(key: string): string {
-    const access = (state: string) => (state === 'exclude' ? '' : state);
-    const mine = access(effective(key));
-    for (const other of descendants(key)) {
-      const theirs = effective(other);
-      if (access(theirs) !== mine) return theirs || 'exclude';
-    }
-    return '';
+  function mixedFolders(): Map<string, string> {
+    const mixed = new Map<string, string>();
+    const access = new Map<string, string>();
+    const readState = (key: string) => {
+      if (!access.has(key)) {
+        const state = effective(key);
+        access.set(key, state === 'exclude' ? '' : state);
+      }
+      return access.get(key)!;
+    };
+    p.own.forEach((_state: string, key: string) => {
+      const state = readState(key);
+      for (const ancestor of p.ancestors.get(key) || []) {
+        if (ancestor !== key && !mixed.has(ancestor) && readState(ancestor) !== state) {
+          mixed.set(ancestor, state || 'exclude');
+        }
+      }
+    });
+    return mixed;
   }
 
   function stateName(state: string): string {
@@ -1541,7 +1544,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     } else {
       if (value && STATES.indexOf(value) < 0) return;
       if (value && !allowed(key, value)) return;
-      if (value && !p.own.has(key) && p.own.size >= MAX_RULES) return;
+      if (value && !p.own.has(key) && p.own.size >= folderLimit) return;
       if (value) p.own.set(key, value);
       else p.own.delete(key);
       p.edited = true;
@@ -1550,6 +1553,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       const tapped = focus.slice(focus.lastIndexOf(':') + 1);
       if (!value && tapped && !allowed(key, tapped)) focus = 'picker:seg:' + key + ':' + effective(key);
     }
+    folderChoicesChanged(focus);
+  }
+
+  function folderChoicesChanged(focus: string): void {
     // The connect line is a one-time hello; a refreshed-view warning stays until the next save.
     if (p.notice && p.notice !== Q.conflict) p.notice = '';
     p.saveError = '';
@@ -1675,7 +1682,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   function canSaveFolders(): boolean {
-    if (!p.loaded || p.saving || !p.generation || !p.revision || p.own.size > MAX_RULES) return false;
+    if (!p.loaded || p.saving || !p.generation || !p.revision || p.own.size > folderLimit) return false;
     if (p.whole) return p.wholeConfirmed;
     return anyChosen() || p.edited;
   }
@@ -1814,7 +1821,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const from = inherited(key);
     const now = effective(key);
     const selectable = !node || node.selectable !== false;
-    const capped = !own && p.own.size >= MAX_RULES;
+    const capped = !own && p.own.size >= folderLimit;
     // The computer cannot open this folder yet: only Skip can be saved for it.
     const unreadable = node && node.access && node.access.state === 'needs_helper' ? String(node.access.message || Q.cannotChoose) : '';
     return segControl(name, 'picker:seg:' + key + ':', {
@@ -1825,7 +1832,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
         if (!selectable) return Q.cannotChoose;
         if (unreadable && state !== 'exclude') return unreadable;
         if (!allowed(key, state)) return fill(Q.notPossible, { parent: sourceName(from.from), state: (Q.statesLower as Any)[from.state] });
-        if (capped) return fill(Q.capReached, { max: kit.count(MAX_RULES) });
+        if (capped) return fill(Q.capReached, { max: kit.count(folderLimit) });
         return '';
       },
       note: (state) => {
@@ -1835,6 +1842,43 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       },
       pick: (state) => choose(key, own === state ? '' : state, 'picker:seg:' + key + ':' + state),
     });
+  }
+
+  function folderIncluded(key: string): boolean {
+    const state = effective(key);
+    return !!state && state !== 'exclude';
+  }
+
+  function canIncludeFolder(node: Any): boolean {
+    const from = inherited(node.key).state;
+    return node.selectable !== false && node.access?.state !== 'needs_helper' && from !== 'exclude'
+      && (!!from || p.own.has(node.key) || p.own.size < folderLimit);
+  }
+
+  function setFolderIncluded(key: string, included: boolean): void {
+    // With an inherited read choice, restore it or opt out explicitly.
+    const from = inherited(key).state;
+    if (included && !from) p.own.set(key, 'ingest');
+    else if (!included && from) p.own.set(key, 'exclude');
+    else p.own.delete(key);
+  }
+
+  function folderCheckbox(node: Any): HTMLElement {
+    const key = 'picker:scope:check:' + node.key;
+    const box = el('input') as HTMLInputElement;
+    box.type = 'checkbox';
+    box.setAttribute('data-key', key);
+    box.setAttribute('aria-label', fill(Q.folderInclude, { name: node.name }));
+    box.checked = node.selectable !== false && folderIncluded(node.key);
+    box.disabled = !!(p.loading || p.saving) || node.selectable === false || (box.checked
+      ? !!inherited(node.key).state && !p.own.has(node.key) && p.own.size >= folderLimit
+      : !canIncludeFolder(node));
+    box.addEventListener('change', () => {
+      setFolderIncluded(node.key, box.checked);
+      p.edited = true;
+      folderChoicesChanged(key);
+    });
+    return add(el('label', 'scope-check'), box);
   }
 
   /** The whole account is on or off in the contract: Full is the only choice it can carry. */
@@ -1885,9 +1929,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
    * name truncating first), then the muted size and file count, each shown
    * only when it fits whole on the line.
    */
-  function nameParts(target: HTMLElement, name: string, key: string, node: Any): void {
+  function nameParts(target: HTMLElement, name: string, differs: string, node: Any): void {
     const main = add(el('span', 'fname-main'), el('span', 'fname-text', name));
-    const differs = key ? mixed(key) : '';
     if (differs) {
       const tag = el('span', 'ftag', Q.mixed);
       tag.title = fill(Q.mixedSome, { state: (Q.statesLower as Any)[differs] });
@@ -1915,7 +1958,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
    * name and its sizes, one tap target), then the choice control flush at the
    * row's right edge. A leaf has the same narrow empty column, so names align.
    */
-  function folderRow(node: Any): HTMLElement {
+  function folderRow(node: Any, differs: string): HTMLElement {
     const key = node.key;
     const li = el('li', 'frow seg-row');
     const busy = p.loading || p.saving;
@@ -1938,8 +1981,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       add(label, spacer);
     }
     label.title = node.name;
-    nameParts(label, node.name, key, node);
-    add(li, label, folderControl(key, node.name, node));
+    nameParts(label, node.name, differs, node);
+    add(li, folderCheckbox(node), label, folderControl(key, node.name, node));
     // Why Full and Names only are off, on the row itself rather than only on hover.
     if (node.access && node.access.state === 'needs_helper' && node.access.message) {
       li.className += ' has-note';
@@ -1956,13 +1999,39 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   }
 
   function levelList(parentKey: string, nodes: Any[], hasMore: boolean): HTMLElement {
+    const filter = p.folderFilters.get(parentKey) || '';
+    const query = plain(filter).trim();
+    const shown = query ? nodes.filter((node) => plain(node.name).includes(query)) : nodes;
+    const mixed = mixedFolders();
     const listNode = el('ul', 'flist');
-    for (const node of nodes) add(listNode, folderRow(node));
+    for (const node of shown) add(listNode, folderRow(node, mixed.get(node.key) || ''));
     if (!nodes.length) add(listNode, el('li', 'muted fempty', Q.noFolders));
+    else if (!shown.length) add(listNode, el('li', 'muted fempty', Q.folderNoMatch));
     if (hasMore) add(listNode, add(el('li', 'fmore'), loadMore(parentKey)));
     // Some folders here were never listed: say so rather than imply this is all of them.
     if (p.truncated.has(parentKey)) add(listNode, el('li', 'muted fmore', Q.truncated));
-    return listNode;
+    if (!nodes.length && !p.whole && !p.own.size) return listNode;
+    const filterKey = 'picker:scope:filter';
+    const busy = p.loading || p.saving;
+    const available = shown.filter((node) => !folderIncluded(node.key) && canIncludeFolder(node));
+    const all = kit.button(Q.folderSelectAll, 'picker:scope:all', busy || !available.length ? null : () => {
+      for (const node of available) {
+        if (canIncludeFolder(node)) setFolderIncluded(node.key, true);
+      }
+      p.edited = true;
+      folderChoicesChanged(filterKey);
+    }, 'plain');
+    const none = kit.button(Q.folderSelectNone, 'picker:scope:none', busy || (!p.whole && !p.own.size) ? null : () => {
+      p.own.clear();
+      p.whole = false;
+      p.wholeConfirmed = false;
+      p.edited = true;
+      folderChoicesChanged(nodes.length ? filterKey : 'picker:save');
+    }, 'plain');
+    return add(el('div'), filterField(Q.folderFilter, Q.folderFilterPlaceholder, filterKey, filter, (value) => {
+      p.folderFilters.set(parentKey, value);
+      kit.render(filterKey);
+    }), add(el('div', 'checklist-bar'), add(el('div', 'actions'), all, none)), listNode);
   }
 
   function loadingLine(): HTMLElement | null {
@@ -2020,12 +2089,12 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     if (p.whole && !p.wholeConfirmed) add(body, wholeConfirm());
     // Searching the whole computer needs a switch only the person can turn on.
     if (p.whole && p.access.get('') && p.access.get('').state !== 'denied') add(body, accessNote(p.access.get(''), null));
-    const rules = exceptions();
-    if (rules.length) add(body, exceptionList(rules));
     const folders = add(el('section', 'fsection'), el('h2', '', Q.foldersHeading));
     add(folders, loadingLine());
     add(folders, levelList('', p.roots, !!p.rootCursor));
     add(body, folders);
+    const rules = exceptions();
+    if (rules.length) add(body, exceptionList(rules));
   }
 
   function pathLine(): HTMLElement {
@@ -2074,7 +2143,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const summary = el('div', 'summary');
     summary.setAttribute('aria-live', 'polite');
     for (const line of folderSummary()) add(summary, el('p', '', line));
-    if (p.own.size >= MAX_RULES) add(summary, el('p', 'reason strong', fill(Q.capReached, { max: kit.count(MAX_RULES) })));
+    if (p.own.size >= folderLimit) add(summary, el('p', 'reason strong', fill(Q.capReached, { max: kit.count(folderLimit) })));
     add(footer, summary);
     add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders,
       p.whole && !p.wholeConfirmed ? wholeWord('needConfirm') : !anyChosen() && !p.edited ? Q.needChoice : ''));

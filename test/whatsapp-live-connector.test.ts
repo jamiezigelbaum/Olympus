@@ -369,16 +369,16 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     expect(legacy?.metadata['searchText']).toBeUndefined();
   });
 
-  test('falls back to JIDs when display names are empty', async () => {
+  test('keeps an opaque sender id as identity when it has no display label', async () => {
     const dir = makeSpoolDir({
       '2026-06-11.jsonl': spoolLine({ id: 'msg-2', chat_name: '', sender_name: '', from_me: true }),
     });
     const [item] = await drainItems(connectorFor(dir));
     expect(item?.metadata['chat']).toBe('chat-1@s.whatsapp.net');
-    expect(item?.metadata['sender']).toBe('sender-1@s.whatsapp.net');
+    expect(item?.metadata['sender']).toBeUndefined();
     expect(item?.metadata['fromMe']).toBe(true);
     expect(item?.metadata['senderId']).toBe('sender-1@s.whatsapp.net');
-    expect(item?.metadata['senderLabel']).toBe('sender-1@s.whatsapp.net');
+    expect(item?.metadata['senderLabel']).toBeUndefined();
     expect(item?.metadata['senderIsOwner']).toBe(true);
   });
 

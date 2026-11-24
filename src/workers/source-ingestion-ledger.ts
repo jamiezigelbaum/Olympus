@@ -16,7 +16,8 @@ import {
   type SourceExclusionMatcher,
 } from '../core/source-ingestion-exclusions.ts';
 import type { SourceSchedulerStatus } from './source-scheduler.ts';
-import { defaultSourceDashboardHistoryDbPath } from './source-dashboard.ts';
+import { DASHBOARD_SUPPORTED_SOURCES, defaultSourceDashboardHistoryDbPath } from './source-dashboard.ts';
+import type { ConnectedHandleRegistry } from './credential-broker/connected-handles.ts';
 import {
   aggregateAnswerReadyEligibleItems,
   answerReadyEligibleItems,
@@ -314,6 +315,8 @@ export interface SourceIngestionUnreadableContent {
 
 export interface SourceIngestionLedgerBuildOptions {
   schedulerStatus?: SourceSchedulerStatus;
+  connectedHandleRegistry?: ConnectedHandleRegistry;
+  syncFreshnessThresholdHours?: number;
   // Authority on which ledger row owns which corpus. Defaults to the shipped
   // registry so every caller gets the same answer; pass the operator's
   // configured registry when one exists.
@@ -476,6 +479,23 @@ export function buildSourceIngestionLedgerSnapshot(
   }
 
   applyScheduler(rows, unassigned, assign, options.schedulerStatus, now);
+  for (const definition of DASHBOARD_SUPPORTED_SOURCES) {
+    if (definition.connect_kind !== 'oauth') continue;
+    const handles = options.connectedHandleRegistry?.handles.filter((handle) => handle.provider === definition.provider);
+    if (!handles?.length) continue;
+    const sourceId = definition.ingestion_ledger_source_id;
+    const row = rows.get(sourceId) ?? emptyRow(sourceId);
+    row.configured = true;
+    rows.set(sourceId, row);
+    if (handles.some((handle) => handle.backendState?.status === 'reauth_required')) {
+      row.stuck.broken = Math.max(row.stuck.broken, 1);
+      row.attention.push('needs reconnect');
+    } else if (options.syncFreshnessThresholdHours !== undefined && row.freshness_hours !== undefined
+      && row.freshness_hours > options.syncFreshnessThresholdHours
+      && !options.schedulerStatus?.sources.some((source) => source.source_id === definition.source_id)) {
+      row.attention.push(`stale sync: ${Math.round(row.freshness_hours)}h since last refresh`);
+    }
+  }
   applyDropboxBreakdown(rows, options.dropboxFailureBreakdown, now);
 
   const ordered = Object.keys(SOURCE_DEFINITIONS).map((sourceId) =>

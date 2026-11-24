@@ -66,6 +66,34 @@ describe('versioned Olympus worker lifecycle', () => {
     }, 30_000);
   }
 
+  for (const exitCode of [0, 1]) {
+    test(`worker upgrade waits for the staged model preparation before activation (exit ${exitCode})`, () => {
+      const home = mkdtempSync(join(tmpdir(), 'olympus-upgrade-prefetch-'));
+      const platform = 'linux' as const;
+      const manager = linuxManager('active');
+      const options = { platform, homeDir: home, bunBin: process.execPath, exec: manager.exec,
+        activationSettleMs: 0, readinessProbe: () => true, copyStores: false };
+      try {
+        const unitPath = workerServicePaths(platform, home).unitPath;
+        installManagedWorkerFiles({ ...options, workingDirectory: process.cwd(), activate: false });
+        const marker = join(home, 'prefetch-unit');
+        const artifact = createUpgradeArtifact(home, '0.4.9', `
+          import { copyFileSync } from 'node:fs';
+          if (process.argv[2] === '__prefetch-private-model') {
+            copyFileSync(${JSON.stringify(unitPath)}, ${JSON.stringify(marker)});
+            process.exit(${exitCode});
+          }
+          console.log('olympus 0.4.9');
+        `);
+        const oldUnit = readFileSync(unitPath, 'utf8');
+        const result = runWorkerLifecycle('upgrade', { ...options, artifactPath: artifact.path });
+        expect(result.ok).toBe(true);
+        expect(readFileSync(marker, 'utf8')).toBe(oldUnit);
+        expect(readFileSync(unitPath, 'utf8')).toContain(artifact.managedRoot);
+      } finally { makeTreeWritable(home); rmSync(home, { recursive: true, force: true }); }
+    }, 15_000);
+  }
+
   test('rollback preserves a launcher the owner replaced during an upgrade', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-cli-takeover-'));
     const manager = linuxManager('active');
@@ -1919,7 +1947,7 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function createUpgradeArtifact(home: string, version: string): {
+function createUpgradeArtifact(home: string, version: string, cli = `console.log('olympus ${version}');\n`): {
   path: string;
   sha256: string;
   managedRoot: string;
@@ -1931,7 +1959,7 @@ function createUpgradeArtifact(home: string, version: string): {
     mkdirSync(join(packageRoot, 'dist'), { recursive: true });
     writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'olympus', version, type: 'module' })}\n`);
     writeFileSync(join(packageRoot, 'openclaw.plugin.json'), `${JSON.stringify({ id: 'olympus', version })}\n`);
-    writeFileSync(join(packageRoot, 'dist', 'cli.js'), `console.log('olympus ${version}');\n`);
+    writeFileSync(join(packageRoot, 'dist', 'cli.js'), cli);
     const packed = Bun.spawnSync(['tar', '-czf', artifactPath, '-C', fixture, 'package']);
     if (packed.exitCode !== 0) throw new Error(packed.stderr.toString());
     const digest = createHash('sha256').update(readFileSync(artifactPath)).digest('hex');

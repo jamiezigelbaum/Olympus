@@ -1,6 +1,7 @@
 import { commitEngineStores, copyEngineStores, restoreEngineStores } from './engine-store-copies.ts';
 import { FileLeaseBusyError, isFileLeaseSidecarName, parseProcessInstanceIdentity, recordedProcessOwnerIsAlive, withFileLeaseSync } from './file-lease.ts';
 import { environmentWithWorkerSetupEnv } from './worker-auth.ts';
+import { prefetchPrivateModelFromPackage } from './lifecycle-artifact.ts';
 import { linuxDesktopEntryPaths, assertLinuxDesktopEntryOwnership, preflightLinuxDesktopEntry, writeLinuxDesktopEntry, removeLinuxDesktopEntry, refreshLinuxDesktopCaches, LINUX_APP_ICON } from './linux-desktop-entry.ts';
 /** systemd user-manager mechanics. Shared config and health stay in engine-service. */
 import { spawnSync } from 'node:child_process';
@@ -897,7 +898,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
   preflightLinuxDesktopEntry(l);
   for (const path of unitLinkCandidates(l)) assertLinuxManagedPath(dirname(path),process.getuid!(),'directory');
   assertNoInterruptedInstall(l);
-  assertLegacySettingDestinations(l);
+  const legacyFiles = assertLegacySettingDestinations(l);
   assertLegacySettingOverrides(l,options.env??process.env);
   const before=inspectSystemdEngine(l,exec); assertKnown(before);
   const privacyState = resolveInstallationPrivacyState({ homeDir: l.home, paths, env: options.env ?? process.env });
@@ -929,6 +930,16 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
   lifecycleCheckpoint(options,'journal_published');
   try {
    const program=durableProgram(l,source,transaction,options);
+   const replacing=currentProgram(l);
+   if ((replacing || before.state !== 'not_loaded') && replacing?.build !== program.build) {
+    const env: NodeJS.ProcessEnv = { ...engineDataEnv(l), PATH: '/usr/bin:/bin' };
+    // A policy the transaction will move is still at its old path while the
+    // old service is running.
+    if (legacyFiles.includes('sovereignty.json')) env.OLYMPUS_SOVEREIGNTY_CONFIG = join(l.home, '.olympus', 'sovereignty.json');
+    prefetchPrivateModelFromPackage({
+     bunBin: program.runtimePath, cliPath: program.entryPath, workerEnvPath: l.workerEnvPath, env,
+    });
+   }
    writeLinuxLauncher(l,program);
    writeTransactionDesktop(l,program,transaction,exec);
    lifecycleCheckpoint(options,'launcher_published');
@@ -942,7 +953,6 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    removeReleasedWorkerSocket(l,before,inspectSystemdEngine(l,exec),options);
    // Replacing a running version: its stores are copied while it is stopped,
    // and put back if the new one does not prove healthy (#1639).
-   const replacing=currentProgram(l);
    if(before.state!=='not_loaded' && replacing && replacing.build!==program.build) copyEngineStores(engineDataEnv(l),{log:line=>process.stderr.write(`${line}\n`)});
    transaction.phase='activating'; writeInstallTransaction(l,transaction);
    lifecycleCheckpoint(options,'activating_published');

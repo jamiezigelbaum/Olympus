@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { FOLDER_SCOPE_SELECTION_LIMIT } from '../../control-ui-contract.ts';
 import { SNIFFER_NAMES_MAX_CHARS } from '../classification/tier-classifier.ts';
 import { connectorLabelCapability, legacyCappedTagProviders, listedLabelObservation, storedLabelProviders } from '../../core/source-connector-labels.ts';
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
@@ -6356,7 +6357,7 @@ export class LocalConnectorStore {
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
   ): { title?: string; sender?: string; authoredAt?: string } | undefined {
     const row = this.db.query(`
-      SELECT title, sender_label, sender_id, authored_at FROM items
+      SELECT title, sender_label, sender_id, sender_is_owner, authored_at FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
         AND tombstoned = 0
     `).get(
@@ -6364,9 +6365,15 @@ export class LocalConnectorStore {
       identity.accountScope,
       normalizeConversationId(identity.providerConversationId),
       identity.providerItemId,
-    ) as { title: string | null; sender_label: string | null; sender_id: string | null; authored_at: string | null } | null;
+    ) as { title: string | null; sender_label: string | null; sender_id: string | null; sender_is_owner: number | null; authored_at: string | null } | null;
     if (!row) return undefined;
-    const sender = row.sender_label?.trim() || row.sender_id?.trim();
+    const senderRow = {
+      sourceItem: identity,
+      senderId: row.sender_id?.trim() || undefined,
+      authorLabel: row.sender_label?.trim() || undefined,
+      senderIsOwner: row.sender_is_owner === 1,
+    };
+    const sender = citationAuthorLabel(senderRow, this.personCitationName(senderRow));
     return {
       ...(row.title?.trim() ? { title: row.title.trim() } : {}),
       ...(sender ? { sender } : {}),
@@ -8831,7 +8838,12 @@ export class LocalConnectorStore {
   }
 
   /** The person's display name for a non-owner sender linked to one, when it may be shown. */
-  personCitationName(row: Pick<ConnectorStoreSearchRow, 'sourceItem' | 'senderId' | 'authorLabel' | 'senderIsOwner'>): string | undefined {
+  personCitationName(row: {
+    sourceItem: Pick<SourceItemIdentity, 'provider'>;
+    senderId?: string | undefined;
+    authorLabel?: string | undefined;
+    senderIsOwner?: boolean;
+  }): string | undefined {
     if (!this.peopleNames || row.senderIsOwner === true) return undefined;
     if (!row.senderId && !row.authorLabel) return undefined;
     try {
@@ -20244,7 +20256,7 @@ function assertConnectorStoreCorpusRequest(store: LocalConnectorStore, request: 
 function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow, personName?: string): SourceIndexProvenance {
   // The owner reads as "You" (#1073); anyone else as their one linked name
   // across sources when there is one (#1076), else the item's own label.
-  const authorLabel = row.senderIsOwner === true ? citationAuthorLabel(row) : (personName ?? row.authorLabel);
+  const authorLabel = citationAuthorLabel(row, personName);
   return {
     sourceItem: row.sourceItem,
     // The frozen provenance shape has carried an optional `chunk` since the
@@ -20294,9 +20306,9 @@ function provenanceFromSearchRow(corpusId: string, row: ConnectorStoreSearchRow,
  */
 export const OWNER_AUTHOR_LABEL = 'You';
 
-function citationAuthorLabel(row: ConnectorStoreSearchRow): string | undefined {
+function citationAuthorLabel(row: { senderIsOwner?: boolean; authorLabel?: string | undefined }, personName?: string): string | undefined {
   if (row.senderIsOwner === true) return OWNER_AUTHOR_LABEL;
-  return row.authorLabel;
+  return personName ?? row.authorLabel;
 }
 
 function connectorStoreKeywordLaneAudit(
@@ -22331,8 +22343,8 @@ function connectorStoreFtsScopeSql(
 
 function normalizeScopePaths(values: readonly string[] | undefined): string[] {
   if (values === undefined) return [];
-  if (!Array.isArray(values) || values.length > 100) {
-    throw new Error('Connector store locator path scopes must be an array of at most 100 strings.');
+  if (!Array.isArray(values) || values.length > FOLDER_SCOPE_SELECTION_LIMIT) {
+    throw new Error(`Connector store locator path scopes must be an array of at most ${FOLDER_SCOPE_SELECTION_LIMIT} strings.`);
   }
   return [...new Set(values.map((value) => normalizeConnectorStoreLocatorPathScope(value)!))];
 }
@@ -22371,8 +22383,8 @@ function normalizeSourceScopeObservation(value: ReturnType<NonNullable<Connector
 
 function normalizeScopeFolderKeys(values: readonly string[] | undefined): string[] {
   if (values === undefined) return [];
-  if (!Array.isArray(values) || values.length > 100) {
-    throw new Error('Connector store source scope folder keys must be an array of at most 100 strings.');
+  if (!Array.isArray(values) || values.length > FOLDER_SCOPE_SELECTION_LIMIT) {
+    throw new Error(`Connector store source scope folder keys must be an array of at most ${FOLDER_SCOPE_SELECTION_LIMIT} strings.`);
   }
   return [...new Set(values.map((value) => normalizeBoundedFilterString(value, 'source scope folder key')!))];
 }

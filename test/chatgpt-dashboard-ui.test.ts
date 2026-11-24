@@ -750,6 +750,18 @@ describe('ready page', () => {
       expectNoJargon(host);
     });
 
+    test('a private download retry keeps its saved byte count visible', () => {
+      const host = mount();
+      host.push({ structuredContent: copyDashboardViewModel(withModels({
+        embedding: { kind: 'built_in', state: 'ready' },
+        answers: {
+          kind: 'built_in', label: 'Built-in', ready: false,
+          install: { state: 'retrying', percent: 30, bytesDone: 900_000_000, bytesTotal: 3_000_000_000 },
+        },
+      })) });
+      expect(lines(host)).toEqual(['The download of the private model was interrupted. Retrying automatically… · 30% · 0.9 of 3.0 GB']);
+    });
+
     test('speech progress stays visible through download, verification and first start', () => {
       const host = mount();
       const progress = { percent: 37, bytesDone: 370_000_000, bytesTotal: 1_000_000_000 };

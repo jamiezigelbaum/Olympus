@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
   assertManagedPathParentsSync,
   ensurePrivateDirectoryTreeSync,
@@ -33,6 +33,21 @@ export interface PreparedWorkerUpgradeArtifact {
   artifactSha256: string;
   packageVersion: string;
   workingDirectory: string;
+}
+
+/** Use the staged CLI even when the upgrade was started by an older package. */
+export function prefetchPrivateModelFromPackage(input: {
+  bunBin: string;
+  cliPath: string;
+  workerEnvPath: string;
+  env: NodeJS.ProcessEnv;
+}): void {
+  const result = spawnSync(input.bunBin, ['--no-env-file', input.cliPath, '__prefetch-private-model', input.workerEnvPath], {
+    cwd: dirname(dirname(input.cliPath)), env: input.env, stdio: ['ignore', process.stderr.fd, 'inherit'],
+  });
+  if (result.status !== 0) {
+    console.error('Private model preparation did not finish. Olympus will continue the update and download the model if needed after restart.');
+  }
 }
 
 export function prepareWorkerUpgradeArtifact(options: {

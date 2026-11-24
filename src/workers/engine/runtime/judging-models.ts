@@ -4,6 +4,7 @@ import { JUDGE_PROMPT_CACHE_KEY, JUDGE_SAMPLING, JudgeRateLimitPacer } from '../
 import { createDecisionSnifferModel } from '../../classification/sniffer-decision.ts';
 import {
   builtInAnalystEnabled,
+  BUILT_IN_ANALYST_MODEL_ENV,
   createBuiltInAnalystModel,
   resolveBuiltInReasoningModel,
   type BuiltInAnalystModel,
@@ -13,6 +14,7 @@ import {
   createVeniceAnalystModel,
 } from '../../../core/analyst-venice.ts';
 import { loadConfig } from '../../../core/config.ts';
+import { builtInModelEnvValue, readModelChoices } from '../../../core/model-choices.ts';
 import { DelphiClient } from '../../../core/delphi.ts';
 import {
   type SovereigntyModelProfile,
@@ -91,6 +93,16 @@ export function builtInModelWanted(
     if (error instanceof SnifferLaneRefusedError) return error.reason === 'no_private_lane';
     return true;
   }
+}
+
+/** Apply the saved Privacy rules choice beneath the operator's environment pin. */
+export function applyBuiltInModelChoice(
+  policy: Pick<SovereigntyEngine, 'source' | 'path'>,
+  env: Record<string, string | undefined>,
+): void {
+  if (policy.source !== 'file' || !policy.path) return;
+  const choice = builtInModelEnvValue(env, readModelChoices(policy.path));
+  if (choice) env[BUILT_IN_ANALYST_MODEL_ENV] = choice;
 }
 
 export function createWorkerSharedBuiltInModel(

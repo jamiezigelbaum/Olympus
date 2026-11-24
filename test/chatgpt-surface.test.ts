@@ -559,6 +559,14 @@ describe('dashboard view-model producer', () => {
       'Couldn\'t download the search model.',
       'Couldn\'t download the private model.',
     ]);
+    const stalled = copyDashboardViewModel(buildChatGptDashboardViewModel(view([]), {
+      now: NOW, privateModel: { state: 'failed', failedReason: 'stalled' },
+    }));
+    expect(stalled.models.answers?.install).toEqual({ state: 'failed', failedReason: 'stalled' });
+    expect(stalled.needsYou.find((item) => item.id === 'model:answers')).toMatchObject({
+      sentence: "Couldn't download the private model: the download stopped receiving data after several attempts.",
+      fix: { label: 'Try again', tool: 'olympus_model_retry', args: { model: 'answers' } },
+    });
     // A custom model that stopped is not an install: it keeps the generic sentence.
     const custom = buildChatGptDashboardViewModel(view([card('gmail.email')]), { now: NOW, embedding: { kind: 'custom', state: 'failed' } });
     expect(custom.needsYou.find((item) => item.id === 'model:embedding')!.sentence).toBe('Search has stopped working on your computer.');

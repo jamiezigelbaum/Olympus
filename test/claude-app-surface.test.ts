@@ -7,6 +7,8 @@ import mainDashboard from '../connect-relay/server/generated/chatgpt-dashboard.j
 import mainAnswer from '../connect-relay/server/generated/chatgpt-private-answer.json';
 import mainQuestion from '../connect-relay/server/generated/chatgpt-private-question.json';
 import { claudeAppDomain } from '../connect-relay/shared/mcp-app-client.ts';
+import { relayMcpResponse } from '../connect-relay/server/relay-mcp.ts';
+import toolApprovals from './fixtures/mcp-tool-approvals.json';
 import { claudeAppEnabled, configFromPluginConfig, defaultConfig, loadConfig, NATIVE_REMOTE_CONFIG_ENV, parseRemoteConfig } from '../src/core/config.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { parseRemotePublicBaseUrl, remoteMcpResource, type RemotePublicUrls } from '../src/core/remote-public-url.ts';
@@ -31,6 +33,7 @@ let enabled: boolean;
 let relayed: boolean;
 let handler: (request: Request) => Promise<Response>;
 let privacy: PrivacySettings;
+let config: ReturnType<typeof defaultConfig>;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'olympus-claude-app-'));
@@ -46,11 +49,13 @@ beforeEach(() => {
     secretLocations: () => NO_SECRET_LOCATIONS,
     savePrivacy: (update: { description?: string }) => (privacy = { ...privacy, ...update }),
   } as ChatGptSetupBackend;
-  const config = defaultConfig();
+  config = defaultConfig();
   config.sourceIndex.enabled = true;
   handler = createRemoteMcpHandler({
     connections: () => store, publicUrls: urls,
     isRelayed: () => relayed,
+    anonymousAnswersEnabled: () => true,
+    search: { evidenceSearch: async () => ({ evidence: [] }) },
     makeOperationContext: (caller, signal) => createInProcessOperationContext({
       config, caller, signal, sourceIndexReadEnabled: true,
       workerFetch: async () => new Response('{}'),
@@ -95,6 +100,14 @@ async function listing(token: string): Promise<{ tools: any[]; resources?: any[]
   const tools = (await request(token, 'tools/list')).body;
   const resources = (await request(token, 'resources/list')).body;
   return { tools: tools.result.tools, ...(resources.error ? { resourceError: resources.error } : { resources: resources.result.resources }) };
+}
+
+function approvalFields({ name, description, inputSchema }: {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}) {
+  return { name, description, inputSchema };
 }
 
 describe('Claude MCP App opt-in', () => {
@@ -169,6 +182,69 @@ describe('Claude MCP App opt-in', () => {
     expect(question._meta[PRIVATE_QUESTION_META_KEY].jobId).toMatch(/^oly2p\./);
     expect(JSON.stringify([question.content, question.structuredContent])).not.toContain(question._meta[PRIVATE_QUESTION_META_KEY].jobId);
     expect((await request(token, 'tools/list')).response.headers.get('x-olympus-surface')).toBe('claude-app');
+  });
+
+  test('served v1.4.4 tool definitions preserve approvals online and offline; a deliberate change must update this test', async () => {
+    const claude = grant(CLAUDE_CLIENT_ID);
+    const remote = grant(GROK_CLIENT_ID);
+    const remoteAnswer = toolApprovals.v144Remote.find(tool => tool.name === 'source_answer')!;
+    const expectedRemoteAnswer = {
+      ...remoteAnswer,
+      inputSchema: {
+        ...remoteAnswer.inputSchema,
+        properties: {
+          ...remoteAnswer.inputSchema.properties,
+          narrow: {
+            type: 'string',
+            description: "Optional follow_up option from a prior answer: when a result carries follow_up {question, options}, ask the user that question, then call again with the same question and the chosen option's narrow, unchanged, to search only there. It sets the scope, so pass no other scope filter with it.",
+          },
+          analyst_provider: {
+            ...remoteAnswer.inputSchema.properties.analyst_provider!,
+            enum: ['default', 'local', 'venice', 'tinfoil', 'cloud'],
+          },
+        },
+      },
+    };
+    const offline = async (credentialSurface: 'remote' | 'claude-app') => {
+      const response = relayMcpResponse({
+        method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }), now: 0,
+        state: 'mac_offline', lastSeenAt: undefined, credentialSurface, connectorUrl: CONNECTOR,
+      });
+      return (await response.json()).result.tools;
+    };
+    function check(tools: ReturnType<typeof approvalFields>[], expectedAnswer: ReturnType<typeof approvalFields>) {
+      for (const baseline of toolApprovals.v144Remote) {
+        const served = tools.find(tool => tool.name === baseline.name);
+        expect(served, baseline.name).toBeDefined();
+        expect(approvalFields(served!), baseline.name).toEqual(baseline.name === 'source_answer' ? expectedAnswer : baseline);
+      }
+    }
+    check((await listing(claude)).tools, expectedRemoteAnswer);
+    check((await listing(remote)).tools, expectedRemoteAnswer);
+    check(await offline('remote'), expectedRemoteAnswer);
+    enabled = true;
+    check((await listing(claude)).tools, toolApprovals.claudeSourceAnswer);
+    check(await offline('claude-app'), toolApprovals.claudeSourceAnswer);
+  });
+
+  test('Claude status still refuses legacy filters that could return item metadata', async () => {
+    enabled = true;
+    const token = grant(CLAUDE_CLIENT_ID);
+    const { body } = await request(token, 'tools/call', { name: 'source_index_status', arguments: { include_items: true } });
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content[0].text).toContain('include_items');
+  });
+
+  test('Claude status keeps the install-specific corpus enum', async () => {
+    const toolName = 'source_index_status';
+    const token = grant(CLAUDE_CLIENT_ID);
+    const corpus = config.sourceIndex.corpusRegistry.corpora.find(entry => entry.corpusId === 'internal.email')!;
+    corpus.enabled = false;
+    const remoteTool = (await listing(token)).tools.find(tool => tool.name === toolName);
+    expect(remoteTool.inputSchema.properties.corpus_id.enum).not.toContain(corpus.corpusId);
+    enabled = true;
+    const claudeTool = (await listing(token)).tools.find(tool => tool.name === toolName);
+    expect(approvalFields(claudeTool)).toEqual(approvalFields(remoteTool));
   });
 
   test('privacy confirmation stays widget-only, retains owner data verbatim and still authorizes a save', async () => {

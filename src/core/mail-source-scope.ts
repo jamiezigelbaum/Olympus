@@ -20,7 +20,9 @@ import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
 import { OperationError, SourceScopeApprovalRequiredError } from './operation-error.ts';
 import {
+  carrySourceScopeApproval,
   connectedSourceScopeAccountGeneration,
+  type SourceScopeConnectedHandle,
   type SourceScopeConnectedHandleRegistry,
 } from './source-scope-approval.ts';
 import type { OlympusMailScopeDraft } from '../control-ui-contract.ts';
@@ -138,6 +140,7 @@ export interface MailSourceScopeApprovalSnapshot {
   sourceId: MailSourceScopeId;
   status: 'scope_pending' | 'approved';
   accountGeneration?: string;
+  approvalGeneration?: string;
   revision: string;
   mailScope?: MailScopeSelection;
   ownerTierRules?: MailScopeOwnerTierRule[];
@@ -155,6 +158,7 @@ export interface MailSourceScopeApprovalSnapshot {
 interface PersistedMailSourceScopeApproval {
   source_id: MailSourceScopeId;
   account_generation: string;
+  grant_generation?: string;
   revision: string;
   status: 'approved';
   mail_scope: {
@@ -239,6 +243,26 @@ export function connectedMailSourceAccountGeneration(
   return connectedSourceScopeAccountGeneration(MAIL_SOURCE_SCOPE_ID, MAIL_SOURCE_SCOPE_CAPABILITY, registry, pinnedHandle);
 }
 
+export function carryMailSourceScopeApproval(
+  registryPath: string,
+  previous: SourceScopeConnectedHandle,
+  current: SourceScopeConnectedHandle,
+  verifiedPreviousAccountId?: string,
+): void {
+  const { provider, credentialCapability } = MAIL_SOURCE_SCOPE_CAPABILITY;
+  if (current.provider !== provider
+    || !previous.allowedCapabilities.includes(credentialCapability)
+    || !current.allowedCapabilities.includes(credentialCapability)) return;
+  carrySourceScopeApproval({
+    sourceId: MAIL_SOURCE_SCOPE_ID,
+    previous,
+    current,
+    verifiedPreviousAccountId,
+    statePath: defaultMailSourceScopeStatePath(registryPath),
+    read: readState,
+  });
+}
+
 export function readMailSourceScopeApproval(input: {
   registry: SourceScopeConnectedHandleRegistry;
   statePath: string;
@@ -260,13 +284,14 @@ export function readMailSourceScopeApproval(input: {
   if (read.kind === 'malformed') return pending(`malformed:${read.digest}`, 'malformed');
   const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);
   if (!approval) return pending(`missing:${account.generation}`, 'missing');
-  if (approval.account_generation !== account.generation) {
+  if ((approval.grant_generation ?? approval.account_generation) !== account.generation) {
     return pending(`stale:${approval.revision}:${account.generation}`, 'account_changed');
   }
   return {
     sourceId: MAIL_SOURCE_SCOPE_ID,
     status: 'approved',
     accountGeneration: account.generation,
+    ...(approval.grant_generation ? { approvalGeneration: approval.account_generation } : {}),
     revision: approval.revision,
     mailScope: fromPersistedScope(approval.mail_scope),
     ownerTierRules: approval.owner_tier_rules,
@@ -829,6 +854,8 @@ function parseApproval(value: unknown): PersistedMailSourceScopeApproval {
   if (
     record.source_id !== MAIL_SOURCE_SCOPE_ID
     || typeof record.account_generation !== 'string' || !/^[a-f0-9]{64}$/.test(record.account_generation)
+    || (record.grant_generation !== undefined
+      && (typeof record.grant_generation !== 'string' || !/^[a-f0-9]{64}$/.test(record.grant_generation)))
     || typeof record.revision !== 'string'
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(record.revision)
     || record.status !== 'approved'
@@ -847,6 +874,7 @@ function parseApproval(value: unknown): PersistedMailSourceScopeApproval {
   return {
     source_id: MAIL_SOURCE_SCOPE_ID,
     account_generation: record.account_generation,
+    ...(typeof record.grant_generation === 'string' ? { grant_generation: record.grant_generation } : {}),
     revision: record.revision,
     status: 'approved',
     mail_scope: toPersistedScope(normalized),

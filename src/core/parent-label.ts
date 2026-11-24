@@ -194,6 +194,21 @@ export function citationTitleWithParent(title: string | undefined, parentLabel: 
   return own ? `${own}, in ${label}` : `In ${label}`;
 }
 
+// A conversation citation in a surface that displays only a title.
+export function conversationCitationTitle(
+  title: string | undefined,
+  conversationLabel: string | undefined,
+  authorLabel: string | undefined,
+): string | undefined {
+  if (!conversationLabel) return title;
+  const conversation = `Conversation: ${conversationLabel}`;
+  return [
+    authorLabel ? `From ${authorLabel}` : undefined,
+    title === conversationLabel ? undefined : title,
+    conversation,
+  ].filter(Boolean).join(' · ');
+}
+
 export interface ParentLabelOutcome {
   /**
    * The candidates, those with an authorized label carrying it. Same order, same length.

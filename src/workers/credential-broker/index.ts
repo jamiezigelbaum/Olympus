@@ -262,6 +262,15 @@ export interface CredentialBroker {
   currentBearerTokenFingerprint?(handle: string, capability: string): string | undefined;
 }
 
+/** Recovery bound to the exact grant selected by a source's live lane. */
+export interface SourceOAuthRecovery {
+  generation: string;
+  connectedAt: string;
+  /** False when the source reads with an overriding direct bearer. */
+  refresh(): Promise<boolean>;
+  requireReconnect(): Promise<void>;
+}
+
 export interface CredentialOAuth2HandleState {
   refreshToken?: string;
   providerAccountId?: string;
@@ -1218,6 +1227,31 @@ export class EnvCredentialBroker implements CredentialBroker {
     return this.findHandle(handle)?.grantGeneration;
   }
 
+  sourceOAuthRecovery(request: CredentialSessionRequest, connectedAt: string, generation: string): SourceOAuthRecovery | undefined {
+    const definition = this.findHandle(request.handle);
+    if (!definition?.oauth2Refresh || definition.grantGeneration !== generation) return undefined;
+    assertHandleRequestAllowed(definition, request);
+    const { handle, capability } = request;
+    return {
+      generation,
+      connectedAt,
+      refresh: async () => {
+        if (await this.resolveFirstSecret(definition.tokenEnvNames, definition.tokenSecretRefs ?? [])) return false;
+        await this.assertGrantNotSuperseded(definition, capability, undefined);
+        const key = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability, this.env);
+        PROCESS_MINTED_SESSION_CACHE.delete(key);
+        await this.issueOAuth2RefreshSession(definition, capability);
+        return true;
+      },
+      requireReconnect: () => this.withCurrentGrant(definition, capability, undefined, async () => {
+        const current = this.findHandle(handle);
+        if (!current || await this.resolveFirstSecret(current.tokenEnvNames, current.tokenSecretRefs ?? [])) return;
+        if (!registryMarksReauthRequired(current)) this.markRegistryHandleReauthRequired(handle, this.now());
+        invalidateMintedCredentialSessions(handle);
+      }),
+    };
+  }
+
   currentBearerTokenFingerprint(handle: string, capability: string): string | undefined {
     const definition = this.findHandle(handle);
     if (!definition?.grantGeneration || !definition.allowedCapabilities.includes(capability)
@@ -1270,8 +1304,20 @@ export class EnvCredentialBroker implements CredentialBroker {
     definition: EnvCredentialHandleDefinition,
     capability: string,
   ): Promise<CredentialSession> {
+    this.assertOAuthGrantUsable(definition, capability);
     return this.mintCachedBearerSession(definition, capability, (cacheKey) =>
       this.issueFreshOAuth2RefreshSession(definition, capability, cacheKey));
+  }
+
+  private assertOAuthGrantUsable(definition: EnvCredentialHandleDefinition, capability: string): void {
+    const current = this.findHandle(definition.handle);
+    if (current?.grantGeneration === definition.grantGeneration && current && registryMarksReauthRequired(current)) {
+      throw new CredentialBrokerError(
+        'credential_reauth_required',
+        `Credential handle ${definition.handle} requires OAuth reauthorization.`,
+        { handle: definition.handle, capability },
+      );
+    }
   }
 
   // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
@@ -1305,12 +1351,20 @@ export class EnvCredentialBroker implements CredentialBroker {
       // a cached token is never handed out after its grant is known replaced
       // (PR review). A token already handed out stays the consumer's to
       // fence; the account-bound file sources re-check per item.
-      if (definition.grantGeneration !== undefined
-        && this.findHandle(definition.handle)?.grantGeneration !== definition.grantGeneration) {
+      const current = definition.grantGeneration !== undefined ? this.findHandle(definition.handle) : definition;
+      if (current?.grantGeneration !== definition.grantGeneration) {
         PROCESS_MINTED_SESSION_CACHE.delete(cacheKey);
         throw new CredentialBrokerError(
           'credential_refresh_busy',
           `Credential handle ${definition.handle} was reconnected; retry to use the new grant.`,
+          { handle: definition.handle, capability },
+        );
+      }
+      if (definition.oauth2Refresh && current && registryMarksReauthRequired(current)) {
+        PROCESS_MINTED_SESSION_CACHE.delete(cacheKey);
+        throw new CredentialBrokerError(
+          'credential_reauth_required',
+          `Credential handle ${definition.handle} requires OAuth reauthorization.`,
           { handle: definition.handle, capability },
         );
       }
@@ -1458,10 +1512,10 @@ export class EnvCredentialBroker implements CredentialBroker {
     // the new grant's refresh token under the old generation, and the
     // superseded outcome would then be discarded with the rotation in it (PR
     // review on this change).
-    await this.withCurrentGrant(definition, capability, refreshToken, () => commitFileLease(
-      lease,
-      () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now),
-    ));
+    await this.withCurrentGrant(definition, capability, refreshToken, () => {
+      this.assertOAuthGrantUsable(definition, capability);
+      return commitFileLease(lease, () => this.markOAuth2RefreshPending(definition, capability, cacheKey, storedState, now));
+    });
 
     const exchangeVia = this.resolveExchangeVia(definition, oauth2, clientId);
 
@@ -1552,6 +1606,7 @@ export class EnvCredentialBroker implements CredentialBroker {
         now,
         lease,
       });
+      this.assertOAuthGrantUsable(definition, capability);
       const session = bearerSessionFromMintedToken({
         definition,
         capability,
@@ -1920,7 +1975,7 @@ export class EnvCredentialBroker implements CredentialBroker {
     if (!isGooglePublisherWebClientId(clientId, this.env)) return undefined;
     if (this.connectedHandleRegistryPath) {
       try {
-        markConnectedHandleExchangeVia(definition.handle, 'publisher_endpoint', this.connectedHandleRegistryPath);
+        markConnectedHandleExchangeVia(definition.handle, 'publisher_endpoint', this.connectedHandleRegistryPath, definition.grantGeneration);
       } catch {
         // Durability is an optimisation here; the routing below is not.
       }
@@ -1965,6 +2020,7 @@ export class EnvCredentialBroker implements CredentialBroker {
       // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
       return statusFromDefinition(definition, 'missing', now);
     }
+    if (registryMarksReauthRequired(definition)) return statusFromDefinition(definition, 'reauth_required', now);
 
     const clientId = await this.resolveFirstSecret(
       definition.oauth2Refresh.clientIdEnvNames,

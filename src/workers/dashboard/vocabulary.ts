@@ -489,6 +489,9 @@ export function dashboardAttentionParts(
     ...(capture ? { capture } : {}),
     ...(media ? { media } : {}),
   });
+  if (source.connection.state === 'reauth_required' && source.connection.label === DASHBOARD_NEEDS_RECONNECT) {
+    return withCapture(DASHBOARD_NEEDS_RECONNECT);
+  }
   const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
@@ -523,6 +526,9 @@ export function dashboardAttentionParts(
   // What an import source's imports need is one Needs you item each
   // (dashboardImportAttentionSentence); the row keeps its own line.
   if (source.connection.imports_attention?.length) return withCapture(source.connection.label);
+  if (dashboardScopePending(source)) {
+    return withCapture(source.scope_selection?.kind === 'mail' ? 'choose which mail to include' : 'choose which folders to include');
+  }
   if (source.schedule?.degraded_reason === 'scope_root_permission_needed') return withCapture(DASHBOARD_FOLDER_NEEDS_PERMISSION);
   if (source.schedule?.degraded_reason === 'scope_root_helper_needed') return withCapture(DASHBOARD_FOLDER_NEEDS_HELPER);
   if (source.schedule?.degraded_reason === 'scope_root_unreadable') return withCapture(DASHBOARD_FOLDER_UNREADABLE);
@@ -550,6 +556,7 @@ export const DASHBOARD_RETRYING_ON_ITS_OWN = 'a sync is retrying on its own';
 
 /** The row word for a connection the owner has to sign back into. */
 export const DASHBOARD_SIGNED_OUT = 'signed out';
+export const DASHBOARD_NEEDS_RECONNECT = 'needs reconnect';
 /** A source the owner disconnected whose indexed data is still on the computer. */
 export const DASHBOARD_DISCONNECTED_DATA_KEPT = 'Disconnected · indexed data kept';
 
@@ -1836,12 +1843,14 @@ export const DASHBOARD_CHATGPT_VOCABULARY = {
     embedding: {
       disk_full: 'Couldn\'t download the search model: the disk is full.',
       network: 'Couldn\'t download the search model: the network dropped.',
+      stalled: 'Couldn\'t download the search model: the download stopped receiving data.',
       checksum: 'Couldn\'t download the search model: the download was damaged.',
       unknown: 'Couldn\'t download the search model.',
     },
     answers: {
       disk_full: 'Couldn\'t download the private model: the disk is full.',
       network: 'Couldn\'t download the private model: the network dropped.',
+      stalled: 'Couldn\'t download the private model: the download stopped receiving data after several attempts.',
       checksum: 'Couldn\'t download the private model: the download was damaged.',
       unknown: 'Couldn\'t download the private model.',
     },
@@ -2034,6 +2043,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   /** A model whose download failed, on its own line in Models: "Not working: the disk is full". */
   modelNotWorkingBecause: 'Not working: {reason}',
   modelInstallDownloading: 'Downloading {model}',
+  modelInstallRetrying: 'The download of {model} was interrupted. Retrying automatically…',
   modelInstallVerifying: 'Checking {model}…',
   modelInstallLoading: 'Starting {model}…',
   modelInstallFailed: 'Couldn\'t download {model}: {reason}',
@@ -2041,6 +2051,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   modelInstallReasons: {
     disk_full: 'the disk is full',
     network: 'the connection dropped',
+    stalled: 'the download stopped receiving data',
     checksum: 'the download was damaged',
     unknown: 'something went wrong',
   },
@@ -2896,6 +2907,12 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
   accountRow: 'Everything in {source}',
   exceptions: 'Exceptions ({n})',
   foldersHeading: 'Folders',
+  folderFilter: 'Filter folders',
+  folderFilterPlaceholder: 'Type a folder name',
+  folderNoMatch: 'No matching folders.',
+  folderSelectAll: 'Select all',
+  folderSelectNone: 'Select none',
+  folderInclude: 'Include {name}',
   thisFolder: 'This folder',
   unknownFolder: 'A folder not opened yet',
   insideFolder: 'A folder inside {name}',

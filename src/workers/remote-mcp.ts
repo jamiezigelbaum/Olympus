@@ -252,7 +252,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     const server = chatgpt
       ? surface === 'directory'
         ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached)
-        : createChatGptMcpServer(() => ctx, chatgpt, detached)
+        : createChatGptMcpServer(() => ctx, chatgpt, detached, authorized)
       : createOlympusMcpServer('remote', () => ctx, anonymousListing(options.anonymousAnswersEnabled, demoGrantLimit(demo, options.search
         ? remoteSearchExtension(options.search, authorized, {
           ...(ctx.sourceAnswerJobs ? { sourceAnswerJobs: ctx.sourceAnswerJobs } : {}),

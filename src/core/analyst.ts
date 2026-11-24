@@ -120,6 +120,7 @@ const VERSION_INSTRUCTION =
 // back in as a near-duplicate sentence or reported as a gap. Asked for the
 // answer's own sentence, the local model's claim matches.
 const CLAIM_RULE = 'Each citation\'s "claim" is one sentence copied word for word from "answer": the sentence that item supports. One citation per sentence and item.';
+const AUTHOR_RULE = 'Attribute a message to its recorded author. "You" as the author means the person asking. A conversation label identifies where the message appeared. If the evidence gives no author, leave the speaker unspecified.';
 
 const ANALYST_SYSTEM = [
   'You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.',
@@ -519,7 +520,7 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
       const readNotes = async (only?: readonly number[]) => {
         const read = await model.complete({
           ...base,
-          system: ANALYST_NOTES_SYSTEM,
+          system: withAuthorRule(ANALYST_NOTES_SYSTEM, pack),
           prompt: buildCompactAnalystPrompt(pack, [], notesQuestion(pack), only ? { only } : {}),
           maxOutputChars: NOTES_OUTPUT_CHARS,
           ...(bounded ? { responseSchema: { type: 'object', properties: { notes: NOTES_SCHEMA }, required: ['notes'] } } : {}),
@@ -565,7 +566,7 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
         const unseen = amountsMissingFrom(parsed?.answer ?? '', evidencePrompt.replace(`Question: ${pack.question}`, '').replace(restatedQuestion(pack), ''));
         const auditCompletion = await model.complete({
           ...base,
-          system: ANALYST_AUDIT_SYSTEM,
+          system: withAuthorRule(ANALYST_AUDIT_SYSTEM, pack),
           prompt: compact
             ? batched
               ? buildAnalystAuditPrompt(pack, parsed, false, null, unseen, notes)
@@ -657,8 +658,14 @@ export function analystPromptBytes(
 }
 
 function analystSystem(pack: EvidencePack, compact: boolean, notes: AnalystReadingNotes | 'batched' = 'off'): string {
-  const system = compact ? compactSystem(notes) : ANALYST_SYSTEM;
+  const system = withAuthorRule(compact ? compactSystem(notes) : ANALYST_SYSTEM, pack);
   return isReadWidePack(pack) ? `${system}\nState reading coverage from Coverage matches: read N of M matching items, with M minus N left out; a + marks a lower bound. In evidence means supplied passages, not every page of a file.` : system;
+}
+
+function withAuthorRule(system: string, pack: EvidencePack): string {
+  return pack.candidates.some(candidate => candidate.provenance.sourceItem.family === 'chat')
+    ? `${system}\n${AUTHOR_RULE}`
+    : system;
 }
 
 function evidencePackRequiresLocalOnly(pack: EvidencePack): boolean {
@@ -773,6 +780,7 @@ function formatCompactCandidate(
 ): string {
   const citation = candidate.provenance.citation;
   const item = candidate.provenance.sourceItem;
+  const conversation = citation?.conversationLabel?.trim();
   const title = compactSourceText(
     citation?.title?.trim() || citation?.sourceLabel?.trim() || `${item.provider}/${item.family}:${item.providerItemId}`,
   );
@@ -792,11 +800,10 @@ function formatCompactCandidate(
   if (locator && locator !== title) details.push(`at: ${locator}`);
   const author = citation?.authorLabel?.trim();
   if (author) details.push(`from: ${compactSourceText(author)}`);
-  const conversation = citation?.conversationLabel?.trim();
-  if (conversation) details.push(`conversation: ${compactSourceText(conversation)}`);
+  if (conversation && compactSourceText(conversation) !== title) details.push(`conversation: ${compactSourceText(conversation)}`);
   const parent = citation?.parentLabel?.trim();
   if (parent) details.push(`part of: ${compactSourceText(parent)}`);
-  const lines = [`[${number}] ${title}`];
+  const lines = [`[${number}] ${conversation && compactSourceText(conversation) === title ? 'Conversation: ' : ''}${title}`];
   if (details.length > 0) lines.push(details.join(' · '));
   if (versionNote) lines.push(versionNote);
   const sourceInstructionFlags = candidateSourceInstructionFlags(candidate);
@@ -826,7 +833,8 @@ function formatCompactCandidate(
 function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null, maxBytes: number | undefined, unseen: readonly string[] = [], notes: readonly ReadingNote[] = []): string {
   if (maxBytes === undefined) return buildAnalystAuditPrompt(pack, draft, false, AUDIT_CHARS_PER_CANDIDATE, unseen, notes);
   const render = (chars: number) => buildAnalystAuditPrompt(pack, draft, false, chars, unseen, notes);
-  const fits = (prompt: string) => promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}\n\n${prompt}`).length <= maxBytes;
+  const system = withAuthorRule(ANALYST_AUDIT_SYSTEM, pack);
+  const fits = (prompt: string) => promptEncoder.encode(`${system}\n\n${prompt}`).length <= maxBytes;
   // Each candidate's whole sent text, plus room for the separators between chunks.
   const whole = Math.max(0, ...pack.candidates.map((candidate) =>
     candidate.chunks.reduce((total, chunk) => total + chunk.length + 1, 0)));
@@ -1116,7 +1124,8 @@ function candidateLabel(candidate: EvidenceCandidate): string {
     citation?.sourceLabel?.trim() ||
     `${item.provider}/${item.family}:${item.providerItemId}`;
   const uri = citation?.uri?.trim();
-  const base = uri && uri !== title ? `${title} (${uri})` : title;
+  const label = citation?.conversationLabel?.trim() === title ? `Conversation: ${title}` : title;
+  const base = uri && uri !== title ? `${label} (${uri})` : label;
   // Citation time makes temporal questions answerable ("which message is the
   // most recent?") — without it the analyst sees an unordered, undated list
   // (observed live 2026-07-05).

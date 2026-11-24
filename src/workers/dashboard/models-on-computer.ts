@@ -88,6 +88,7 @@ const BUILT_IN_STATES: Readonly<Record<string, string>> = {
   loading: 'downloaded',
   not_started: 'not downloaded',
   downloading: 'downloading',
+  retrying: 'retrying the download',
   verifying: 'checking the download',
   failed: 'download failed',
 };

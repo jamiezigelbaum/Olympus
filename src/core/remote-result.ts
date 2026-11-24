@@ -36,7 +36,7 @@ import { noteReleasedItems, releasedItemFromEvidence, type ReleasedItem } from '
 import { boundedLogErrorMessage, logErrorOrigin } from './log-redaction.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
-import { citationTitleWithParent, PARENT_LABEL_MAX_CHARS } from './parent-label.ts';
+import { citationTitleWithParent, conversationCitationTitle, PARENT_LABEL_MAX_CHARS } from './parent-label.ts';
 import { checkReleaseChunks, passagesWithheldAtReleasableTiers, privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
@@ -613,9 +613,14 @@ function citationOutput(entry: Record<string, unknown>, options: RemoteOutputOpt
   // A child's parent rides in the title text ("lease.pdf, in 'Flat' from Alice"), scanned and capped
   // like the title, so the output schema and the tool lists are unchanged.
   const parent = keptText(entry.parent_label, PARENT_LABEL_MAX_CHARS, 'line');
+  const conversationTitle = entry.family !== 'chat' ? title.text : conversationCitationTitle(
+    title.text,
+    keptText(entry.conversation_label, MAX_TITLE, 'line'),
+    keptText(entry.author_label, MAX_TITLE, 'line'),
+  );
   const composed: { text?: string; secret: boolean } = title.secret
     ? { secret: true }
-    : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, 'line');
+    : scannedText(citationTitleWithParent(conversationTitle, parent), MAX_TITLE, 'line');
   return {
     label: sourceLabel(entry.provider, entry.family),
     ...(readHandle ? { read_handle: readHandle } : {}),

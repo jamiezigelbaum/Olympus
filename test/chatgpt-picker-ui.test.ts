@@ -4,6 +4,7 @@
  * scope-list and scope-set tools over JSON-RPC postMessage.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
+import { FOLDER_SCOPE_SELECTION_LIMIT } from '../src/control-ui-contract.ts';
 import { Window } from 'happy-dom';
 import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { CHATGPT_DASHBOARD_CSS, chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
@@ -422,13 +423,15 @@ describe('folder picker', () => {
     }
     expect(rowOf(host, 'Tax Returns 2024').querySelector('.fname')!.textContent).toBe('›Tax Returns 20242 GB· 1,200 files');
     expect(rowOf(host, 'Medical Records').querySelector('.fname')!.textContent).toBe('Medical Records500 MB· 1 file');
-    // Every row: one drill-in button (› then the name) or a leaf name, then one control.
+    // Every row: a labelled checkbox, the name, then the reading controls.
     for (const row of Array.from(doc(host).querySelectorAll('li.seg-row'))) {
       const opens = !!row.querySelector('.fopen');
       // The control last, flush right.
-      expect(Array.from(row.children).map((child) => child.className)).toEqual([opens ? 'fname' : 'fname leaf', 'seg']);
+      expect(Array.from(row.children).map((child) => child.className)).toEqual(['scope-check', opens ? 'fname' : 'fname leaf', 'seg']);
+      expect(row.querySelector('label input[type="checkbox"]')!.getAttribute('aria-label'))
+        .toBe(`Include ${row.querySelector('.fname-text')!.textContent}`);
       // Inside the name: the narrow › column (or a same-width spacer for a leaf, so names align), then the name.
-      const name = row.firstElementChild!;
+      const name = row.children[1]!;
       expect(name.tagName).toBe(opens ? 'BUTTON' : 'P');
       expect(Array.from(name.children).slice(0, 2).map((child) => child.className)).toEqual([opens ? 'fopen' : 'fopen-gap', 'fname-main']);
       expect(name.firstElementChild!.getAttribute('aria-hidden')).toBe('true');
@@ -790,17 +793,60 @@ describe('folder picker', () => {
     }]);
   });
 
-  test('explicit rules stop at 100, the most a save can carry, with an inline message', async () => {
-    const selections = Array.from({ length: 100 }, (_, i) => ({ key: `k-x${i}`, state: 'metadata_only', ancestor_keys: ['k-z'] }));
+  test('explicit rules stop at the most a save can carry, with an inline message', async () => {
+    const selections = Array.from({ length: FOLDER_SCOPE_SELECTION_LIMIT }, (_, i) => ({ key: `k-x${i}`, state: 'metadata_only', ancestor_keys: ['k-z'] }));
     const host = await openFolders({ selections });
-    expect(footer(host)).toContain(Q.capReached.replace('{max}', '100'));
+    const capMessage = Q.capReached.replace('{max}', String(FOLDER_SCOPE_SELECTION_LIMIT));
+    expect(footer(host)).toContain(capMessage);
     expect(seg(host, 'Medical Records', 'ingest').disabled).toBe(true);
-    expect(seg(host, 'Medical Records', 'exclude').getAttribute('aria-description')).toBe(Q.capReached.replace('{max}', '100'));
+    expect(seg(host, 'Medical Records', 'exclude').getAttribute('aria-description')).toBe(capMessage);
     tap(host, 'Medical Records', 'exclude');
     expect(rowShows(host, 'Medical Records')).toEqual({ pressed: '', inherited: '' });
     host.serve[T.scopeSet] = () => SAVED;
     host.button(Q.saveFolders).click();
-    expect(host.toolCalls(T.scopeSet).at(-1).selections.length).toBe(100);
+    expect(host.toolCalls(T.scopeSet).at(-1).selections.length).toBe(FOLDER_SCOPE_SELECTION_LIMIT);
+  });
+
+  test('filters 300 rows, selects only the visible eligible folders, and saves the draft once', async () => {
+    const folders = Array.from({ length: 300 }, (_, i) => node(`box-${i}`, i < 260 ? `Work ${i}` : `Home ${i}`,
+      i === 0 ? { selectable: false } : {}));
+    const host = mount({ serve: {
+      [T.scopeList]: () => browse(folders, { selections: [{ key: 'box-299', state: 'metadata_only' }] }),
+      [T.scopeSet]: () => SAVED,
+    } });
+    host.push({ structuredContent: pendingDropbox });
+    host.button('Choose folders').click();
+    await host.settle();
+
+    const boxes = () => Array.from(doc(host).querySelectorAll('.scope-check input')) as unknown as HTMLInputElement[];
+    const setFilter = (value: string) => {
+      const field = doc(host).querySelector('label input[type="search"]') as unknown as HTMLInputElement;
+      field.value = value;
+      field.dispatchEvent(ev(host, 'input'));
+    };
+    expect(boxes()).toHaveLength(300);
+    setFilter('wOrK');
+    expect(boxes()).toHaveLength(260);
+    const shared = boxes().find((box) => box.getAttribute('aria-label') === 'Include Work 0');
+    expect(shared?.disabled).toBe(true);
+    host.button(Q.folderSelectAll).click();
+    expect(boxes().filter((box) => box.checked)).toHaveLength(259);
+
+    host.button(Q.folderSelectNone).click();
+    setFilter('');
+    expect(boxes().some((box) => box.checked)).toBe(false);
+    boxes().find((box) => box.getAttribute('aria-label') === 'Include Home 299')!.click();
+    setFilter('work');
+    host.button(Q.folderSelectAll).click();
+    setFilter('');
+    expect(boxes().filter((box) => box.checked)).toHaveLength(260);
+    expect(host.toolCalls(T.scopeList)).toEqual([{ source_id: 'dropbox.files' }]);
+    expect(host.toolCalls(T.scopeSet)).toEqual([]);
+    host.button(Q.saveFolders).click();
+    expect(host.toolCalls(T.scopeSet)).toEqual([{
+      source_id: 'dropbox.files', account_generation: 'g1', scope_revision: 'r1', whole_account_selected: false,
+      selections: [folders[299]!, ...folders.slice(1, 260)].map(({ key }) => ({ key, state: 'ingest', ancestor_keys: [] })),
+    }]);
   });
 
   test('a conflict re-lists and says the view was refreshed', async () => {

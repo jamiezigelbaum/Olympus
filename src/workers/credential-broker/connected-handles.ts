@@ -342,13 +342,15 @@ export function markConnectedHandleReauthRequired(
   handleId: string,
   path: string = defaultHandleRegistryPath(),
   now: Date = new Date(),
+  expectedGeneration?: string,
 ): boolean {
   if (!existsSync(path)) return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
     let changed = false;
     const handles = registry.handles.map((handle) => {
-      if (handle.handle !== handleId) return handle;
+      if (handle.handle !== handleId || (expectedGeneration !== undefined
+        && expectedGeneration !== connectedGrantGeneration(handle.connectedAt, handle.providerAccountId))) return handle;
       changed = true;
       return {
         ...handle,
@@ -427,13 +429,15 @@ export function markConnectedHandleExchangeVia(
   handleId: string,
   exchangeVia: NonNullable<NonNullable<ConnectedCredentialHandle['oauth2Refresh']>['exchangeVia']>,
   path: string = defaultHandleRegistryPath(),
+  expectedGeneration?: string,
 ): boolean {
   if (!existsSync(path)) return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
     let changed = false;
     const handles = registry.handles.map((handle) => {
-      if (handle.handle !== handleId || !handle.oauth2Refresh) return handle;
+      if (handle.handle !== handleId || !handle.oauth2Refresh || (expectedGeneration !== undefined
+        && expectedGeneration !== connectedGrantGeneration(handle.connectedAt, handle.providerAccountId))) return handle;
       if (handle.oauth2Refresh.exchangeVia === exchangeVia) return handle;
       changed = true;
       return { ...handle, oauth2Refresh: { ...handle.oauth2Refresh, exchangeVia } };

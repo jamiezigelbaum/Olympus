@@ -36,12 +36,13 @@ import {
   type PinnedRuntimeArchive,
 } from './manifest.ts';
 
-export type BuiltInReasoningState = 'not_started' | 'downloading' | 'verifying' | 'loading' | 'ready' | 'failed';
+export type BuiltInReasoningState = 'not_started' | 'downloading' | 'retrying' | 'verifying' | 'loading' | 'ready' | 'failed';
 
 export type BuiltInReasoningFailureReason =
   | 'unsupported_platform'
   | 'insufficient_memory'
   | 'download_failed'
+  | 'download_stalled'
   | 'checksum_mismatch'
   | 'disk_write_failed'
   | 'insufficient_space'
@@ -119,6 +120,8 @@ export interface PinnedInstallTuning {
 
 export interface BuiltInReasoningInstallerOptions extends PinnedInstallTuning {
   model: BuiltInReasoningModelSpec;
+  /** Keep update progress separate from the running engine's status. */
+  prefetch?: boolean;
 }
 
 /**
@@ -165,8 +168,8 @@ export const BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
 const RUNTIME_UNPACK_FACTOR = 4;
 const SPACE_BACKOFF_MS = 15 * 60_000;
 const PROGRESS_WRITE_INTERVAL_MS = 500;
-/** No byte for this long and a download is abandoned; the partial file is kept and resumes on retry. */
-const DOWNLOAD_STALL_MS = 2 * 60_000;
+/** Restart a silent request from the saved offset. The retry budget fits inside the release check's five-minute no-progress window. */
+const DOWNLOAD_STALL_MS = 60_000;
 /**
  * A checksum pass or an unpack stops only when it reads nothing for this
  * long: a slow disk that keeps going is never cut.
@@ -240,7 +243,15 @@ export function readBuiltInReasoningStatus(
   model: Pick<BuiltInReasoningModelSpec, 'modelId'>,
   env: Record<string, string | undefined> = process.env,
 ): BuiltInReasoningStatus {
-  return readPinnedModelStatus(builtInReasoningPaths(model, env).statusPath, model.modelId, REASONING_NOUN);
+  const paths = builtInReasoningPaths(model, env);
+  const status = readPinnedModelStatus(paths.statusPath, model.modelId, REASONING_NOUN);
+  if (status.state !== 'not_started') return status;
+  const prefetched = readPinnedModelStatus(prefetchStatusPath(paths), model.modelId, REASONING_NOUN);
+  return prefetched.state === 'ready' ? prefetched : status;
+}
+
+function prefetchStatusPath(paths: BuiltInReasoningPaths): string {
+  return join(paths.modelDir, 'prefetch-status.json');
 }
 
 /** The last status written to `statusPath` for `modelId`, or `not_started`. Never throws. */
@@ -270,13 +281,14 @@ export function readPinnedModelStatus(statusPath: string, modelId: string, noun:
 export async function installBuiltInReasoning(
   options: BuiltInReasoningInstallerOptions,
 ): Promise<InstalledBuiltInReasoning> {
-  const { model, ...tuning } = options;
+  const { model, prefetch, ...tuning } = options;
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform = options.platform ?? currentPlatform();
+  const paths = builtInReasoningPaths(model, options.env, runtime, platform);
   const installed = await installPinnedModel({
     ...tuning,
     bundle: { modelId: model.modelId, displayName: model.displayName, files: [model.file] },
-    layout: { ...builtInReasoningPaths(model, options.env, runtime, platform), noun: REASONING_NOUN },
+    layout: { ...paths, statusPath: prefetch ? prefetchStatusPath(paths) : paths.statusPath, noun: REASONING_NOUN },
   });
   return { modelPath: installed.filePaths[0]!, serverPath: installed.serverPath, gpu: installed.gpu };
 }
@@ -716,8 +728,10 @@ async function downloadVerified(
       ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname(target)) ?? 0, 'the disk filled up during the download')
       : new BuiltInReasoningInstallError('disk_write_failed', `Could not write the download: ${String(error)}`),
     write: space.write,
-    onStart: () => reporter.set('downloading', label),
+    onStart: () => reporter.startDownload(label),
+    onCheckPartial: () => reporter.set('verifying', `Checking saved data for the ${space.noun}`),
     onProgress: (bytes) => reporter.advance(bytes, label),
+    onRetry: (reason, message) => reporter.retry(reason, message),
   });
 }
 
@@ -914,13 +928,35 @@ class ProgressReporter {
     this.set('downloading', `Downloading the ${this.noun}`, 0);
   }
 
+  startDownload(label: string): void {
+    // Keep the retry visible until the new connection delivers bytes.
+    if (this.status.state !== 'retrying') this.set('downloading', label);
+  }
+
+  retry(reason: BuiltInReasoningFailureReason, message: string): void {
+    this.status = {
+      ...this.status,
+      state: 'retrying',
+      label: reason === 'download_stalled'
+        ? `The ${this.noun} download stopped receiving data. Retrying…`
+        : `The ${this.noun} download was interrupted. Retrying…`,
+      failure: { reason, message },
+    };
+    this.emit(true);
+  }
+
   advance(bytes: number, label: string): void {
     const bytesDone = Math.max(0, this.status.bytesDone + bytes);
     const percent = this.status.bytesTotal > 0
       ? Math.min(99, Math.floor((bytesDone / this.status.bytesTotal) * 100))
       : 0;
-    this.status = { ...this.status, bytesDone, percent, label, state: 'downloading' };
-    this.emit(false);
+    this.status = { ...this.status, bytesDone, percent };
+    if (this.status.state === 'retrying' && bytes < 0) this.emit(true);
+    else if (this.status.state !== 'downloading') this.set('downloading', label);
+    else {
+      this.status = { ...this.status, label, state: 'downloading' };
+      this.emit(false);
+    }
   }
 
   /** The checksum pass: real bytes read over the file's size. */

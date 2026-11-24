@@ -11,6 +11,7 @@ import {
   GOOGLE_DRIVE_DOCS_CORPUS_ID,
 } from '../../google-connectors/corpora.ts';
 import type { OlympusFolderScopeSourceId, OlympusSourceScopeSelection } from '../../../control-ui-contract.ts';
+import { FOLDER_SCOPE_SELECTION_LIMIT } from '../../../control-ui-contract.ts';
 import {
   type DashboardSyncSource,
   DASHBOARD_SUPPORTED_SOURCES,
@@ -123,8 +124,8 @@ export function parseFolderScopeSourceId(value: unknown): OlympusFolderScopeSour
 }
 
 export function parseSourceScopeSelections(value: unknown): OlympusSourceScopeSelection[] {
-  if (!Array.isArray(value) || value.length > 100) {
-    throw new EmailSourceWorkerError(400, 'invalid_request', 'selections must be an array of at most 100 folders.');
+  if (!Array.isArray(value) || value.length > FOLDER_SCOPE_SELECTION_LIMIT) {
+    throw new EmailSourceWorkerError(400, 'invalid_request', `selections must be an array of at most ${FOLDER_SCOPE_SELECTION_LIMIT} folders.`);
   }
   return value.map((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {

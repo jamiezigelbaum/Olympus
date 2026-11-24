@@ -27,9 +27,8 @@
 //   whose offsets on the sample's days differ, keeping the one under which
 //   most keys match. With no overlap or no match, this computer's zone, said
 //   as assumed.
-// - The owner: the export shows the owner by name. The name under which the
-//   sample's messages match live capture's own messages most is taken as the
-//   owner's; no match leaves every sender as written.
+// - The owner: the export shows the owner by name. An unambiguous overlap
+//   with live capture can identify that name; otherwise keep authors as written.
 // - Chats: an export's chat joins the live chat of the same name when exactly
 //   one has it (the status updates chat joins the status posts). Otherwise it
 //   is a conversation of its own in the WhatsApp source. A decision, once
@@ -392,19 +391,23 @@ function decide(sample: readonly ExportMessage[], matching: Matching, zones?: re
     return matches;
   }, zones);
   state.z = chosen.zone;
-  // The owner: the export name whose messages match live capture's own most, in joined chats.
-  const votes = new Map<string, number>();
+  // The same short reply can occur in both directions within one minute.
+  // Learn the owner only from keys that single out a sender on both inputs.
+  const senderless = new Map<string, { precision: TimePrecision; sender: string } | undefined>();
   for (const { message, caption } of keyed) {
     const ms = wallTimeToUtcMs(message.wall, state.z);
-    if (ms === undefined || !index) continue;
+    if (ms === undefined || !index || !caption) continue;
     const chat = chatOf(state, matching, message.chat);
-    if (index.ownerSentUnsent(message.precision, unsentKey(chat, ms, message.precision, caption))) {
-      const name = hash(nameKey(message.sender));
-      votes.set(name, (votes.get(name) ?? 0) + 1);
-    }
+    const key = unsentKey(chat, ms, message.precision, caption);
+    const sender = nameKey(message.sender);
+    if (!senderless.has(key)) senderless.set(key, { precision: message.precision, sender });
+    else if (senderless.get(key)?.sender !== sender) senderless.set(key, undefined);
   }
-  const ranked = [...votes].sort((a, b) => b[1] - a[1]);
-  if (ranked[0] && (ranked[1] === undefined || ranked[0][1] > ranked[1][1])) state.m = ranked[0][0];
+  const ownerNames = new Set<string>();
+  for (const [key, candidate] of senderless) {
+    if (candidate && index?.uniqueOwnerSentUnsent(candidate.precision, key)) ownerNames.add(candidate.sender);
+  }
+  if (ownerNames.size === 1) state.m = hash([...ownerNames][0]!);
   return { ...state, assumed: chosen.assumed };
 }
 
@@ -557,6 +560,7 @@ function recordOf(
   // A picture or file with no words is never matched: the key says nothing of which picture it is.
   const wordless = textKey(caption) === '' && (files.length > 0 || omitted);
   const matched = wordless || !certain ? undefined : matching.index?.uniqueLiveWithKey(message.precision, key);
+  const fromMe = matched?.fromMe ?? (state.m !== undefined ? owner : undefined);
   // Its own id from what it is: the exact text (the file names in it included, nothing folded: the export reader
   // numbers identical messages by the same exact text) and its number among identical ones.
   const id = matched ? matched.id : exportMessageId(chatJid, ms, message.precision, owner ? OWNER_SENDER : nameKey(message.sender), message.text, message.occurrence);
@@ -585,9 +589,8 @@ function recordOf(
     chatJid: matched?.chatJid ?? chatJid,
     chatName: message.chat,
     senderJid: '',
-    senderName: owner ? '' : message.sender,
-    ...(owner ? {} : { senderContactName: message.sender }),
-    fromMe: matched?.fromMe ?? owner,
+    senderName: message.sender,
+    ...(fromMe !== undefined ? { fromMe } : {}),
     timestamp: matched?.timestamp ?? new Date(ms).toISOString(),
     text: caption,
     ...(mediaType !== undefined ? { mediaType } : {}),

@@ -36,6 +36,7 @@ import {
   DISCONNECT_SOURCE_TOOL_NAME,
 } from '../../chatgpt/dashboard-contract.ts';
 import { chatgptDashboardClient, type ChatGptDashboardClientConfig } from './client.ts';
+import { FOLDER_SCOPE_SELECTION_LIMIT } from '../../../control-ui-contract.ts';
 import { DASHBOARD_ALL_SOURCES_ID, DASHBOARD_PRIVACY_LANDING_ID } from '../../../core/open-targets.ts';
 import { privacyLogic } from '../shared-privacy-logic.ts';
 import {
@@ -301,6 +302,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .this-row .btn{min-height:2.75rem}
 .fnote{margin:0 0 0.75rem}
 .frow.seg-row{flex-direction:row;align-items:center;gap:0.25rem;min-height:3rem}
+.scope-check{display:inline-flex;flex:none;align-items:center;justify-content:center;min-width:1.75rem;min-height:2.75rem;cursor:pointer}
+.scope-check input{width:1.125rem;height:1.125rem;margin:0;accent-color:var(--accent)}
 .seg-row>.fname{flex:1 1 auto;flex-wrap:wrap;align-items:center;align-content:flex-start;gap:0 0.5rem;width:auto;min-width:0;height:2.75rem;min-height:0;padding:0;overflow:hidden;white-space:nowrap}
 .seg-row>.fname>*{line-height:2.75rem}
 .fname-main{display:flex;align-items:center;gap:0.5rem;flex:0 1 auto;min-width:0;max-width:100%}
@@ -429,6 +432,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
       tools: CHATGPT_PICKER_TOOLS,
       mailArgs: CHATGPT_PICKER_MAIL_ARGS,
       scopeMetaKey: CHATGPT_SCOPE_META_KEY,
+      folderSelectionLimit: FOLDER_SCOPE_SELECTION_LIMIT,
       copy: DASHBOARD_CHATGPT_PICKER_COPY,
       connectHost: CHATGPT_CONNECT_HOST,
       mailSourceId: CHATGPT_MAIL_SOURCE_ID,

@@ -307,7 +307,14 @@ export function mcpAuthorizedFetch(tokens: McpTokenSource, serverUrl: string, ba
     let response = await send(await tokens.accessToken());
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
-      response = await send(await tokens.refresh());
+      let renewed: string;
+      try {
+        renewed = await tokens.refresh();
+      } catch (error) {
+        if (error instanceof McpSourceError && (error.dashboardState === 'reconnect_required' || error.kind === 'cancelled')) throw error;
+        throw new McpSourceError('auth_revoked', { cause: error });
+      }
+      response = await send(renewed);
       if (response.status === 401) {
         await response.body?.cancel().catch(() => undefined);
         throw new McpSourceError('auth_revoked');

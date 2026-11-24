@@ -290,7 +290,7 @@ function sourceDomId(sourceId: string): string {
 }
 
 function sourceFacts(source: DashboardSourceCard): string {
-  if (source.connection.state === 'reauth_required') return 'needs sign-in';
+  if (source.connection.state === 'reauth_required') return 'needs reconnect';
   const facts: string[] = [];
   const items = source.coverage?.indexed_items ?? 0;
   if (items > 0) facts.push(`${items.toLocaleString('en-US')} ${MESSAGING_SOURCES.has(source.source_id) ? 'messages' : 'items'}`);

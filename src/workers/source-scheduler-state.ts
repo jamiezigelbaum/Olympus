@@ -52,10 +52,14 @@ export interface PersistedSourceSchedulerTaskState extends SourceSchedulerTaskSt
 
 export interface RecordSourceSchedulerAttemptInput extends SourceSchedulerTaskStateKey {
   attemptedAt: string;
+  /** A replacement grant must start with its own failure and retry state. */
+  resetRetry?: true;
 }
 
 export interface RecordSourceSchedulerSuccessInput extends SourceSchedulerTaskStateKey {
   completedAt: string;
+  /** A deferred sync finished its attempt without checking the source. */
+  preserveLastSuccess?: boolean;
   resultStatus: 'progress' | 'idle';
   counts?: Record<string, number>;
   warnings?: string[];
@@ -588,6 +592,21 @@ export class LocalSourceSchedulerStateStore {
     const attemptedAt = requireTimestamp(input.attemptedAt, 'attemptedAt');
     return this.writeCurrentVersion(key, () => {
       this.recordAttemptStatement(key, attemptedAt);
+      if (input.resetRetry) {
+        this.db.query(`
+          UPDATE source_scheduler_task_state SET
+            consecutive_failures = 0,
+            last_error_kind = NULL,
+            last_error_hash = NULL,
+            last_counts_json = CASE WHEN last_result_status = 'failed' THEN NULL ELSE last_counts_json END,
+            last_warnings_json = CASE WHEN last_result_status = 'failed' THEN NULL ELSE last_warnings_json END,
+            last_result_status = CASE WHEN last_result_status = 'failed' THEN NULL ELSE last_result_status END,
+            not_before_at = NULL,
+            effective_interval_ms = NULL,
+            degraded_reason = NULL
+          WHERE source_id = ? AND corpus_id = ? AND task_id = ?
+        `).run(key.sourceId, key.corpusId, key.taskId);
+      }
     });
   }
 
@@ -622,7 +641,7 @@ export class LocalSourceSchedulerStateStore {
         ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
           checkpoint = CASE WHEN ? = 1 THEN excluded.checkpoint ELSE source_scheduler_task_state.checkpoint END,
           last_completed_at = excluded.last_completed_at,
-          last_success_at = excluded.last_success_at,
+          last_success_at = COALESCE(excluded.last_success_at, source_scheduler_task_state.last_success_at),
           not_before_at = excluded.not_before_at,
           attempt_in_progress = 0,
           consecutive_failures = 0,
@@ -641,7 +660,7 @@ export class LocalSourceSchedulerStateStore {
         SOURCE_SCHEDULER_TASK_STATE_VERSION,
         checkpoint,
         completedAt,
-        completedAt,
+        input.preserveLastSuccess ? null : completedAt,
         notBeforeAt,
         input.resultStatus,
         countsJson,

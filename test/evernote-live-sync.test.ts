@@ -361,7 +361,7 @@ describe('the scheduler source', () => {
   test('after a reconnect, attachments are read under the new approval, not refused by the replaced one', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     const book = fake.addNotebook('Field work');
-    const { runtime, handle } = await connected(fake);
+    const { runtime, handle, registryPath, secretStore } = await connected(fake);
     const config = { worker: { scheduler: { syncIntervalSeconds: 3600, freshnessThresholdHours: 26 } } } as never;
     const scope = { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000000' };
     let replaced = false;
@@ -376,11 +376,18 @@ describe('the scheduler source', () => {
 
     // Connected again: a new sign-in and a new approval; the old one no longer holds.
     replaced = true;
+    const reconnect = await startEvernoteSignIn({
+      serverUrl: fake.url, authorizationHosts: ['127.0.0.1'],
+      redirectUri: 'http://127.0.0.1:9/oauth/callback/evernote', state: 'state-2',
+      registryPath, secretStore,
+    });
+    const replacement = await reconnect.complete('good-code');
+    expect(replacement.tokenSecretRefs).not.toEqual(handle.tokenSecretRefs);
     const bytes = new TextEncoder().encode('fixturequayword: the quay closes at nine.');
     const note = fake.addNote({ title: 'Quay', created: day(2024, 2), notebookId: book.id, body: '<en-note>Quay</en-note>', resources: [{ bytes, mime: 'text/plain', name: 'quay.txt' }] });
     const after = runtime.schedulerSource({
-      config, scope,
-      handle: { ...handle, connectedAt: '2099-01-01T00:00:00.000Z' },
+      config, scope: { ...scope, accountGeneration: 'b'.repeat(64) },
+      handle: replacement,
       notebookGate: () => () => 'ingest',
       assertNotebookChoiceCurrent: () => undefined,
     });

@@ -1,4 +1,5 @@
 import { limitStopReference, registeredLimits } from '../../core/limit-stops.ts';
+import { FOLDER_SCOPE_SELECTION_LIMIT } from '../../control-ui-contract.ts';
 import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 import { sourceSupportDetails } from '../dashboard/source-failure.ts';
 import { totalmem } from 'node:os';
@@ -38,7 +39,7 @@ import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { privacyBacklogCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import { startupProgress, startupWaitingLine } from '../../core/startup-progress.ts';
 import { STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
-import { citationTitleWithParent } from '../../core/parent-label.ts';
+import { citationTitleWithParent, conversationCitationTitle } from '../../core/parent-label.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import { archiveFormatForProvider } from '../../core/archive-formats.ts';
 import type {
@@ -176,8 +177,8 @@ const CONNECTION_ACTIONS = new Set(['connect', 'install', 'open_olympus', 'wake_
 const STATUSES = new Set(['Fresh', 'Working', 'Waiting', 'Needs you', 'Failing', 'Off']);
 const UNITS = new Set(['files', 'messages', 'items']);
 const EMBEDDING_STATES = new Set(['downloading', 'verifying', 'ready', 'failed']);
-const INSTALL_STATES = new Set(['downloading', 'verifying', 'ready', 'failed']);
-const FAILED_REASONS = new Set<ModelInstallFailedReason>(['disk_full', 'network', 'checksum', 'unknown']);
+const INSTALL_STATES = new Set(['downloading', 'retrying', 'verifying', 'ready', 'failed']);
+const FAILED_REASONS = new Set<ModelInstallFailedReason>(['disk_full', 'network', 'stalled', 'checksum', 'unknown']);
 const ANSWER_KINDS = new Set(['built_in', 'venice', 'local']);
 /** Trust domains whose item metadata may be cited. Private (secure_local) and Secret never. */
 const CITABLE_TRUST_DOMAINS = new Set(['public_safe', 'internal']);
@@ -981,7 +982,8 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions & {
     const source = sourceLabel(item.provider, item.family);
     if (!source || evidence.length >= MAX_SEARCH_ITEMS) continue;
     const entry: SearchEvidence = { id: `E${evidence.length + 1}`, source };
-    if (typeof item.title === 'string' && item.title.trim()) entry.title = text(item.title);
+    const title = releasedCitationTitle(item);
+    if (title) entry.title = title;
     const url = httpsUrl(item.uri);
     if (url) entry.url = url;
     const date = dateOnly(item.authored_at) ?? dateOnly(item.updated_at);
@@ -1122,13 +1124,22 @@ function citationFrom(evidence: Record<string, unknown>): ChatGptCitation | unde
   // A child's parent rides in the title text ("lease.pdf, in 'Flat' from Alice"): the citation
   // shape, the tool lists and the listed output schemas are unchanged.
   const parent = typeof evidence.parent_label === 'string' ? text(evidence.parent_label) : '';
-  const composed = citationTitleWithParent(typeof evidence.title === 'string' ? text(evidence.title) : undefined, parent);
+  const composed = citationTitleWithParent(releasedCitationTitle(evidence), parent);
   if (composed) citation.title = text(composed);
   const url = httpsUrl(evidence.uri);
   if (url) citation.url = url;
   const date = dateOnly(evidence.authored_at) ?? dateOnly(evidence.updated_at);
   if (date) citation.date = date;
   return citation;
+}
+
+function releasedCitationTitle(evidence: Record<string, unknown>): string | undefined {
+  const label = (value: unknown) => typeof value === 'string' && value.trim() ? text(value) : undefined;
+  const title = label(evidence.title);
+  if (evidence.family !== 'chat') return title;
+  const safeLabel = (value: unknown) => typeof value === 'string' && secretLabelsInText(value).length === 0 ? label(value) : undefined;
+  const composed = conversationCitationTitle(title, safeLabel(evidence.conversation_label), safeLabel(evidence.author_label));
+  return composed ? text(composed) : undefined;
 }
 
 function citationLine(citation: ChatGptCitation): string {
@@ -1437,7 +1448,7 @@ function copyScopeList(list: ScopeList): ScopeList {
       ...(list.next_cursor && finite(list.remaining) ? { remaining: whole(list.remaining) } : {}),
       ...(list.truncated === true ? { truncated: true as const } : {}),
       ...(copyWholeWords(list.whole_words) ? { whole_words: copyWholeWords(list.whole_words)! } : {}),
-      selections: (list.selections ?? []).slice(0, MAX_SCOPE_NODES).map(copySelection),
+      selections: (list.selections ?? []).slice(0, FOLDER_SCOPE_SELECTION_LIMIT).map(copySelection),
       whole_account_selected: list.whole_account_selected === true,
     };
     return out;
@@ -1751,7 +1762,7 @@ function identifier(value: unknown): string {
 function copyInstall(install: Partial<ModelInstall | DashboardViewModelV1['models']['embedding']> | undefined, fallback: ModelInstall['state']): ModelInstall {
   const state = install?.state !== undefined && install.state !== 'loading' && INSTALL_STATES.has(install.state) ? install.state : fallback;
   const out: ModelInstall = { state };
-  if ((state === 'downloading' || state === 'verifying') && install) {
+  if ((state === 'downloading' || state === 'retrying' || state === 'verifying') && install) {
     if (finite(install.percent)) out.percent = percent(install.percent);
     if (finite(install.bytesTotal) && install.bytesTotal > 0 && finite(install.bytesDone)) {
       out.bytesTotal = whole(install.bytesTotal);

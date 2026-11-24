@@ -1,4 +1,5 @@
 import type { PRIVATE_ANSWER_OPTIONS, PrivateAnswerOption } from '../../core/privacy-language.ts';
+import type { ModelInstallFailedReason } from '../../core/model-install-failure.ts';
 /**
  * The ChatGPT dashboard view-model, version 1: `structuredContent` of the
  * `olympus_dashboard` tool, rendered by `ui://olympus/dashboard`. The engine
@@ -435,9 +436,9 @@ export interface TranscriptionModelView {
 export type ModelLoadFailedReason = 'not_installed' | 'stopped_while_starting' | 'too_slow' | 'port_taken' | 'unknown';
 
 /** A built-in model's install (contract v1 addition, 2026-10-01). */
-export type ModelInstallState = 'downloading' | 'verifying' | 'ready' | 'failed';
+export type ModelInstallState = 'downloading' | 'retrying' | 'verifying' | 'ready' | 'failed';
 /** Fixed codes only, never the installer's message. */
-export type ModelInstallFailedReason = 'disk_full' | 'network' | 'checksum' | 'unknown';
+export type { ModelInstallFailedReason };
 export interface ModelInstall {
   state: ModelInstallState;
   /** 0-100. */

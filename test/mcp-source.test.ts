@@ -251,6 +251,29 @@ describe('MCP sign-in and tokens', () => {
     expect(fake.tokenIssues).toBe(before + 1);
   });
 
+  test('a refresh failure after 401 needs reconnect', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const store = secretStoreMcpCredentials(memorySecretStore(), 'mcp.test.1');
+    await store.write(await (await signIn(fake)).complete('good-code'));
+    fake.expireAccessToken();
+    let refreshes = 0;
+    const tokens = new McpTokenSource({
+      store,
+      serverUrl: fake.url,
+      fetch: async () => {
+        refreshes += 1;
+        return Response.json({ error: 'temporarily_unavailable' }, { status: 503 });
+      },
+    });
+    const rejected = session(fake, { fetch: mcpAuthorizedFetch(tokens, fake.url) });
+    try {
+      await expect(rejected.open()).rejects.toMatchObject({ kind: 'auth_revoked', dashboardState: 'reconnect_required' });
+      expect(refreshes).toBe(1);
+    } finally {
+      await rejected.close();
+    }
+  });
+
   test('no stored sign-in, or a 403, has its own state', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     const store = secretStoreMcpCredentials(memorySecretStore(), 'mcp.test.1');

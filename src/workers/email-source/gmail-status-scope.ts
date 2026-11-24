@@ -65,7 +65,10 @@ function gmailEmbeddingPopulation(input: {
   }
   if (!ref) return { accountScope, filters: GMAIL_IMPORTED_FILTERS };
   if (!input.privateStore) return { accountScope };
-  const ids = gmailCursorConnectorIds(accountScope, { generation: ref.accountGeneration, revision: ref.revision });
+  const ids = gmailCursorConnectorIds(accountScope, {
+    generation: ref.approvalGeneration ?? ref.accountGeneration,
+    revision: ref.revision,
+  });
   return { accountScope, filters: {
     provider: 'gmail',
     observedConnectorId: ids.connectorId,
