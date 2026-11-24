@@ -13125,6 +13125,7 @@ var init_commands = __esm(() => {
   init_operation_error();
   init_http();
   init_answer_activity();
+  init_model_stream();
   init_click_trace();
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
   ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;

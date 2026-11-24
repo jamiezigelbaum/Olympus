@@ -21,7 +21,8 @@ import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
 import { clickTraces, PRIVACY_ITEM_SET_PATH, type ClickTrace } from './click-trace.ts';
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
-import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineCommandReceipt, type EngineForwardedKind, type EngineForwardedRequest, type EngineForwardedResponse } from './commands.ts';
+import { noteModelProgress } from '../../core/model-stream.ts';
+import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, ENGINE_MODEL_STREAM_CONTENT_TYPE, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineCommandReceipt, type EngineForwardedKind, type EngineForwardedRequest, type EngineForwardedResponse } from './commands.ts';
 import { engineStatusAge, readEngineStatusSnapshotAsync, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
 import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
 import type { PendingItemProtection } from '../connector-store/tier-visibility.ts';
@@ -667,7 +668,9 @@ export async function completeModelInBackground(
     if (signal?.aborted) throw error;
     throw new OperationError('argus_unreachable', 'The built-in private model is not answering: the background engine is not reachable.', 'Try again in a moment.');
   }
-  const payload = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+  const payload = response.ok && response.headers.get('content-type')?.startsWith(ENGINE_MODEL_STREAM_CONTENT_TYPE)
+    ? await readModelStream(response).catch((error: unknown) => { if (signal?.aborted) throw error; return undefined; })
+    : await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
   if (response.ok && payload && typeof payload.text === 'string' && typeof payload.modelId === 'string') {
     const { built_in_serving_pid: pid, ...completion } = payload;
     if (typeof pid === 'number') onServingPid?.(pid);
@@ -678,4 +681,36 @@ export async function completeModelInBackground(
     throw new OperationError(typed.error as OperationErrorCode, typed.message, typeof typed.suggestion === 'string' ? typed.suggestion : undefined);
   }
   throw new OperationError('argus_unreachable', `The built-in private model did not answer (HTTP ${response.status}).`, 'Try again in a moment.');
+}
+
+/**
+ * Reads the background's streamed completion: each progress line tells this
+ * process's idle clocks the model is still producing output; the last line is
+ * the completion or the model's refusal, returned in the one-process shape.
+ */
+async function readModelStream(response: Response): Promise<Record<string, unknown> | undefined> {
+  if (!response.body) return undefined;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result: Record<string, unknown> | undefined;
+  const line = (text: string): void => {
+    if (!text.trim()) return;
+    const value = JSON.parse(text) as Record<string, unknown> | undefined;
+    if (typeof value?.progress === 'string') noteModelProgress(value.progress);
+    else if (value && typeof value.completion === 'object' && value.completion !== null) result = value.completion as Record<string, unknown>;
+    else if (value && ('operation_error' in value || 'error' in value)) result = value;
+  };
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) break;
+    buffer += decoder.decode(next.value, { stream: true });
+    let end: number;
+    while ((end = buffer.indexOf('\n')) >= 0) {
+      line(buffer.slice(0, end));
+      buffer = buffer.slice(end + 1);
+    }
+  }
+  line(buffer + decoder.decode());
+  return result;
 }

@@ -12,6 +12,11 @@ export function withModelProgress<T>(listener: (model: string) => void, work: ()
   return progress.run(model => { parent?.(model); listener(model); }, work);
 }
 
+/** Tell the current clocks that the model made progress somewhere they cannot see (another process). */
+export function noteModelProgress(model: string): void {
+  progress.getStore()?.(model);
+}
+
 export class ModelStreamError extends Error {
   constructor(readonly model: string) {
     super(`Model ${model} stream failed before completion.`);

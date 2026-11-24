@@ -751,6 +751,262 @@ function errorFirstFrame(error) {
   return line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+(?::\d+)?)/g, "$1").slice(0, 160);
 }
 
+// src/core/memory-counters.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "async_hooks";
+var payloadScope = new AsyncLocalStorage3;
+
+// src/core/model-stream.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "async_hooks";
+
+// src/core/zkapi-consult-settings.ts
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787;
+var ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
+var ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050;
+var DEFAULTS = {
+  tor: "per_consult",
+  torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
+  timeoutMs: 6 * 60 * 1000,
+  torBootstrapTimeoutMs: 210 * 1000,
+  daemonReadyTimeoutMs: 120 * 1000,
+  policyWarmTimeoutMs: 180 * 1000,
+  settleTimeoutMs: 300 * 1000,
+  maxResponseBytes: 256 * 1024
+};
+var INTEGER_BOUNDS = {
+  torSocksPort: [1024, 65535],
+  dailyRequestCap: [1, 1e6],
+  timeoutMs: [30000, 30 * 60000],
+  torBootstrapTimeoutMs: [1e4, 10 * 60000],
+  daemonReadyTimeoutMs: [5000, 10 * 60000],
+  policyWarmTimeoutMs: [5000, 10 * 60000],
+  settleTimeoutMs: [5000, 30 * 60000],
+  maxResponseBytes: [1024, 4 * 1024 * 1024]
+};
+var SETTINGS_KEYS = new Set([
+  ...Object.keys(INTEGER_BOUNDS),
+  "tor",
+  "fundingDate",
+  "depositUsd",
+  "acknowledgements",
+  "dailySpendCapUsd",
+  "daemonExecutable",
+  "torExecutable"
+]);
+var zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
+
+// src/core/source-answer-jobs.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "async_hooks";
+
+// src/core/secret-patterns.ts
+var PROSE_WORDS = new Set([
+  "above",
+  "again",
+  "below",
+  "cannot",
+  "change",
+  "changed",
+  "characters",
+  "choose",
+  "click",
+  "contact",
+  "enter",
+  "expired",
+  "expires",
+  "forgot",
+  "forgotten",
+  "guideline",
+  "guidelines",
+  "hidden",
+  "incorrect",
+  "information",
+  "instruction",
+  "instructions",
+  "invalid",
+  "least",
+  "letters",
+  "link",
+  "manager",
+  "maximum",
+  "min",
+  "minimum",
+  "must",
+  "need",
+  "needed",
+  "needs",
+  "number",
+  "numbers",
+  "optional",
+  "please",
+  "policies",
+  "policy",
+  "protected",
+  "provide",
+  "provided",
+  "required",
+  "requirements",
+  "reset",
+  "retry",
+  "see",
+  "send",
+  "sent",
+  "setting",
+  "settings",
+  "shared",
+  "should",
+  "shown",
+  "sign",
+  "strength",
+  "symbols",
+  "unchanged",
+  "use",
+  "used",
+  "using",
+  "via"
+]);
+var CREDENTIAL_KEYS = [
+  { pattern: String.raw`api[_ -]?key`, legacy: true },
+  { pattern: String.raw`access[_ -]?token`, legacy: true },
+  { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+  { pattern: String.raw`client[_ -]?secret`, legacy: true },
+  { pattern: "password", legacy: true },
+  { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+  { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+  { pattern: String.raw`private[_ -]?key` },
+  { pattern: "secret" },
+  { pattern: String.raw`token(?!s)` },
+  { pattern: "sig", urlOnly: true }
+];
+var CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+var LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+var CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
+var PLACEHOLDER_WORDS = new RegExp([
+  String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+  String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+  String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+  "placeholder",
+  "redacted",
+  "changeme",
+  "change[_-]me",
+  "replace[_-]?me",
+  "insert[_-]?(?:your|here|key|token)",
+  "[_-]here$",
+  "^n/a$",
+  "not[_ -]?set",
+  "^unset$"
+].join("|"), "i");
+var BARE_LITERALS = new Set([
+  "password",
+  "passwd",
+  "passphrase",
+  "secret",
+  "token",
+  "apikey",
+  "api_key",
+  "api-key",
+  "string",
+  "null",
+  "none",
+  "nil",
+  "undefined",
+  "true",
+  "false",
+  "empty",
+  "hidden",
+  "masked",
+  "required",
+  "optional",
+  "changeme",
+  "enabled",
+  "disabled",
+  "encrypted",
+  "hashed",
+  "unknown",
+  "tbd",
+  "pending",
+  "missing"
+]);
+var COMMON_OBJECTS = new Set([
+  "user",
+  "users",
+  "body",
+  "data",
+  "form",
+  "state",
+  "props",
+  "creds",
+  "credentials",
+  "account",
+  "profile",
+  "session",
+  "auth",
+  "db",
+  "app",
+  "json",
+  "response",
+  "res",
+  "row",
+  "record",
+  "item",
+  "model"
+]);
+var STRONG_QUALIFIERS = new Set([
+  "client",
+  "app",
+  "api",
+  "access",
+  "refresh",
+  "auth",
+  "bearer",
+  "id",
+  "session",
+  "bot",
+  "oauth",
+  "webhook",
+  "signing",
+  "jwt",
+  "service",
+  "personal",
+  "consumer",
+  "shared",
+  "encryption",
+  "master",
+  "admin",
+  "root",
+  "user",
+  "db",
+  "database",
+  "wifi",
+  "email",
+  "login"
+]);
+var ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
+var ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+var KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
+var SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+var VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+var CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+var ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+var BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+var LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*\u2022-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+var RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
+var LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
+
+// src/core/source-answer-jobs.ts
+var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
+var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+var progressSink = new AsyncLocalStorage4;
+
+// src/core/model-stream.ts
+var progress = new AsyncLocalStorage5;
+function withModelProgress(listener, work) {
+  const parent = progress.getStore();
+  return progress.run((model) => {
+    parent?.(model);
+    listener(model);
+  }, work);
+}
+
 // src/workers/engine-split/commands.ts
 var ENGINE_RELOAD_KINDS = ["sources", "scope", "exclusions", "embedding", "models", "archive", "extraction", "pacing"];
 var ENGINE_JUDGE_BOOST_MAX_IDS = 20;
@@ -1068,15 +1324,47 @@ function createEngineCommandHandler(options) {
       if (!parsed || !priority)
         return Response.json({ error: "invalid_model_request" }, { status: 400 });
       const modelComplete = options.modelComplete;
-      try {
-        const completion = await runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }));
-        return Response.json(completion);
-      } catch (error) {
-        if (error instanceof OperationError)
-          return Response.json({ operation_error: error.toJSON() }, { status: 503 });
-        console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
-        return Response.json({ error: "model_failed", message: error instanceof Error ? error.message : "unknown error" }, { status: 500 });
-      }
+      const encoder = new TextEncoder;
+      let closed = false;
+      let lastProgressMs = -Infinity;
+      const stream = new ReadableStream({
+        start(controller) {
+          const send = (value) => {
+            if (closed)
+              return;
+            try {
+              controller.enqueue(encoder.encode(`${JSON.stringify(value)}
+`));
+            } catch {
+              closed = true;
+            }
+          };
+          const progress = (model) => {
+            const now = Date.now();
+            if (now - lastProgressMs < MODEL_PROGRESS_LINE_MS)
+              return;
+            lastProgressMs = now;
+            send({ progress: model });
+          };
+          withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }))).then((completion) => send({ completion }), (error) => {
+            if (error instanceof OperationError)
+              return send({ operation_error: error.toJSON() });
+            console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
+            send({ error: "model_failed", message: error instanceof Error ? error.message : "unknown error" });
+          }).finally(() => {
+            if (closed)
+              return;
+            closed = true;
+            try {
+              controller.close();
+            } catch {}
+          });
+        },
+        cancel() {
+          closed = true;
+        }
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": ENGINE_MODEL_STREAM_CONTENT_TYPE } });
     }
     if (url.pathname.startsWith(`${ENGINE_COMMANDS_PATH}/`) && request.method === "GET") {
       const id = decodeURIComponent(url.pathname.slice(ENGINE_COMMANDS_PATH.length + 1));
@@ -1099,6 +1387,8 @@ function createEngineCommandHandler(options) {
     return Response.json({ error: "not_found" }, { status: 404 });
   };
 }
+var ENGINE_MODEL_STREAM_CONTENT_TYPE = "application/x-ndjson";
+var MODEL_PROGRESS_LINE_MS = 1000;
 var MODEL_PRIORITIES = ["owner", "background", "maintenance"];
 function parseModelPriority(value) {
   if (value === undefined)

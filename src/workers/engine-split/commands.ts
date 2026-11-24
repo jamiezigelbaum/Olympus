@@ -26,6 +26,7 @@ import { OperationError } from '../../core/operation-error.ts';
 import { hasValidWorkerBearerToken } from '../http.ts';
 import { boundedLogErrorMessage, logErrorOrigin } from '../../core/log-redaction.ts';
 import { runAtLocalInferencePriority, type LocalInferencePriority } from '../answer-activity.ts';
+import { withModelProgress } from '../../core/model-stream.ts';
 import { CLICK_ID_HEADER, logClickTrace, PRIVACY_ITEM_SET_PATH, readClickId } from './click-trace.ts';
 
 /** Config files the front writes and the background re-reads (design, "Writes the front still needs", B). */
@@ -668,9 +669,15 @@ export interface EngineCommandServerOptions {
  *   the settled record for an id already applied.
  * - `GET /engine/commands/<id>?wait=<ms>`: the record, waiting up to `wait`
  *   for it to settle; 404 for an id this process does not hold.
- * - `POST /engine/model/complete`: one built-in model completion, answered
- *   when it ends. It is not a command: nothing is recorded, and the front
- *   does not retry it. Closing the request aborts the model call.
+ * - `POST /engine/model/complete`: one built-in model completion. The body is
+ *   newline-delimited JSON: `{"progress":model}` while the model produces
+ *   output, then one `{"completion":...}`, `{"operation_error":...}` or
+ *   `{"error":...}` line. The progress lines keep the front's idle clocks
+ *   honest: without them a model working in this process looked silent to
+ *   the front, and private answers were stopped at their idle deadline while
+ *   still writing (1.5 test-mac canary, 24 Nov 2026). It is not a command:
+ *   nothing is recorded, and the front does not retry it. Closing the request
+ *   aborts the model call.
  * Every route needs the worker bearer token.
  */
 export function createEngineCommandHandler(options: EngineCommandServerOptions): (request: Request) => Promise<Response> {
@@ -717,18 +724,40 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
       const priority = parseModelPriority(asRecord(body)?.priority);
       if (!parsed || !priority) return Response.json({ error: 'invalid_model_request' }, { status: 400 });
       const modelComplete = options.modelComplete;
-      try {
-        // The front's call keeps its priority here: a background answer stays
-        // background, so the judge still gets its fair turn behind it.
-        const completion = await runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }));
-        return Response.json(completion);
-      } catch (error) {
-        // The model's own answer, typed as it would be in one process: a
-        // download still running or a server that failed to start.
-        if (error instanceof OperationError) return Response.json({ operation_error: error.toJSON() }, { status: 503 });
-        console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
-        return Response.json({ error: 'model_failed', message: error instanceof Error ? error.message : 'unknown error' }, { status: 500 });
-      }
+      const encoder = new TextEncoder();
+      let closed = false;
+      let lastProgressMs = -Infinity;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const send = (value: unknown): void => {
+            if (closed) return;
+            try { controller.enqueue(encoder.encode(`${JSON.stringify(value)}\n`)); } catch { closed = true; }
+          };
+          const progress = (model: string): void => {
+            const now = Date.now();
+            if (now - lastProgressMs < MODEL_PROGRESS_LINE_MS) return;
+            lastProgressMs = now;
+            send({ progress: model });
+          };
+          // The front's call keeps its priority here: a background answer stays
+          // background, so the judge still gets its fair turn behind it.
+          void withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal })))
+            .then((completion) => send({ completion }), (error: unknown) => {
+              // The model's own answer, typed as it would be in one process: a
+              // download still running or a server that failed to start.
+              if (error instanceof OperationError) return send({ operation_error: error.toJSON() });
+              console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
+              send({ error: 'model_failed', message: error instanceof Error ? error.message : 'unknown error' });
+            })
+            .finally(() => {
+              if (closed) return;
+              closed = true;
+              try { controller.close(); } catch { /* the front already went away */ }
+            });
+        },
+        cancel() { closed = true; },
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': ENGINE_MODEL_STREAM_CONTENT_TYPE } });
     }
     if (url.pathname.startsWith(`${ENGINE_COMMANDS_PATH}/`) && request.method === 'GET') {
       const id = decodeURIComponent(url.pathname.slice(ENGINE_COMMANDS_PATH.length + 1));
@@ -747,6 +776,10 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
     return Response.json({ error: 'not_found' }, { status: 404 });
   };
 }
+
+/** The model completion's streamed body type, and how often it says the model is still producing output. */
+export const ENGINE_MODEL_STREAM_CONTENT_TYPE = 'application/x-ndjson';
+const MODEL_PROGRESS_LINE_MS = 1_000;
 
 /** A completion request from the wire: the fields AnalystModelRequest carries, nothing coerced. */
 const MODEL_PRIORITIES: readonly LocalInferencePriority[] = ['owner', 'background', 'maintenance'];
