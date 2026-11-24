@@ -6,6 +6,7 @@ import { AsyncResource } from 'node:async_hooks';
 import { expect, test } from 'bun:test';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { OperationError } from '../src/core/operation-error.ts';
+import { noteModelProgress, withModelProgress } from '../src/core/model-stream.ts';
 import { createEngineCommandHandler, EngineCommandLedger, parseEngineCommandEnvelope } from '../src/workers/engine-split/commands.ts';
 import { completeModelInBackground, createEngineFront } from '../src/workers/engine-split/runtime.ts';
 import { currentLocalInferencePriority, runBackgroundInference, runClassificationInference } from '../src/workers/answer-activity.ts';
@@ -100,4 +101,66 @@ test('a front call keeps its priority in the background: background answers stay
   });
   expect(unknown.status).toBe(400);
   expect(seen).toHaveLength(3);
+});
+
+// 1.5 test-mac canary, 24 Nov 2026: over the split, the background's model
+// bytes never reached the front, so a private answer still being written was
+// stopped at its idle deadline. The front's clocks now see the background's
+// progress while the completion runs.
+test('model progress in the background reaches the front while the completion runs', async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const fetchBackground = background(async () => {
+    noteModelProgress('qwen');
+    await gate;
+    return { text: 'done', modelId: 'qwen' };
+  });
+  const seen: string[] = [];
+  const completion = withModelProgress((model) => {
+    seen.push(model);
+    release();
+  }, () => completeModelInBackground(fetchBackground, TOKEN, { system: 's', prompt: 'p', localOnly: true }));
+  expect(await completion).toEqual({ text: 'done', modelId: 'qwen' });
+  expect(seen).toEqual(['qwen']);
+});
+
+// The production background serves the command socket from its control
+// thread, and the model runs on the loop: progress crosses that thread
+// boundary by message (PR #1672 review).
+test('model progress crosses the control thread to the front', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { startEngineControlPlane } = await import('../src/workers/engine-split/control-plane.ts');
+  const { createUnixSocketFetch } = await import('../src/core/worker-transport.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-split-progress-'));
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const plane = startEngineControlPlane({
+    socketPath: join(dir, 'engine.sock'),
+    authToken: TOKEN,
+    instanceId: 'background-progress',
+    ledger: new EngineCommandLedger({ instanceId: 'background-progress', handlers: {} }),
+    modelComplete: async () => {
+      noteModelProgress('qwen');
+      await gate;
+      return { text: 'done', modelId: 'qwen' };
+    },
+    onLost: () => {},
+    log: () => {},
+  });
+  expect(plane).toBeDefined();
+  try {
+    plane!.setReady(true);
+    const seen: string[] = [];
+    const completion = await withModelProgress((model) => {
+      seen.push(model);
+      release();
+    }, () => completeModelInBackground(createUnixSocketFetch(join(dir, 'engine.sock')), TOKEN, { system: 's', prompt: 'p', localOnly: true }));
+    expect(completion).toEqual({ text: 'done', modelId: 'qwen' });
+    expect(seen).toEqual(['qwen']);
+  } finally {
+    plane!.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -25432,6 +25432,9 @@ function withModelProgress(listener, work) {
     listener(model);
   }, work);
 }
+function noteModelProgress(model) {
+  progress.getStore()?.(model);
+}
 async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_IDLE_TIMEOUT_MS) {
   const controller = new AbortController;
   let timer;
@@ -67596,15 +67599,47 @@ function createEngineCommandHandler(options) {
       if (!parsed || !priority)
         return Response.json({ error: "invalid_model_request" }, { status: 400 });
       const modelComplete = options.modelComplete;
-      try {
-        const completion = await runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }));
-        return Response.json(completion);
-      } catch (error) {
-        if (error instanceof OperationError)
-          return Response.json({ operation_error: error.toJSON() }, { status: 503 });
-        console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
-        return Response.json({ error: "model_failed", message: error instanceof Error ? error.message : "unknown error" }, { status: 500 });
-      }
+      const encoder = new TextEncoder;
+      let closed = false;
+      let lastProgressMs = -Infinity;
+      const stream = new ReadableStream({
+        start(controller) {
+          const send = (value) => {
+            if (closed)
+              return;
+            try {
+              controller.enqueue(encoder.encode(`${JSON.stringify(value)}
+`));
+            } catch {
+              closed = true;
+            }
+          };
+          const progress = (model) => {
+            const now = Date.now();
+            if (now - lastProgressMs < MODEL_PROGRESS_LINE_MS)
+              return;
+            lastProgressMs = now;
+            send({ progress: model });
+          };
+          withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }))).then((completion) => send({ completion }), (error) => {
+            if (error instanceof OperationError)
+              return send({ operation_error: error.toJSON() });
+            console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
+            send({ error: "model_failed", message: error instanceof Error ? error.message : "unknown error" });
+          }).finally(() => {
+            if (closed)
+              return;
+            closed = true;
+            try {
+              controller.close();
+            } catch {}
+          });
+        },
+        cancel() {
+          closed = true;
+        }
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": ENGINE_MODEL_STREAM_CONTENT_TYPE } });
     }
     if (url.pathname.startsWith(`${ENGINE_COMMANDS_PATH}/`) && request.method === "GET") {
       const id = decodeURIComponent(url.pathname.slice(ENGINE_COMMANDS_PATH.length + 1));
@@ -67651,13 +67686,14 @@ function parseModelRequest(value) {
     ...responseSchema !== undefined ? { responseSchema } : {}
   };
 }
-var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_JUDGE_NOW_MAX_BUDGET_MS, ENGINE_FORWARDED_ROUTES, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID2, SOURCE, RESOURCE, forwardedRecordIds, HOP_HEADERS, MODEL_PRIORITIES;
+var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_JUDGE_NOW_MAX_BUDGET_MS, ENGINE_FORWARDED_ROUTES, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID2, SOURCE, RESOURCE, forwardedRecordIds, HOP_HEADERS, ENGINE_MODEL_STREAM_CONTENT_TYPE = "application/x-ndjson", MODEL_PROGRESS_LINE_MS = 1000, MODEL_PRIORITIES;
 var init_commands = __esm(() => {
   init_release_manifest();
   init_engine_split();
   init_operation_error();
   init_http();
   init_answer_activity();
+  init_model_stream();
   init_click_trace();
   ENGINE_RELOAD_KINDS = ["sources", "scope", "exclusions", "embedding", "models", "archive", "extraction", "pacing"];
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
@@ -254714,7 +254750,15 @@ function startEngineControlPlane(input) {
     }
     const controller = new AbortController;
     modelCalls.set(id, controller);
-    runAtLocalInferencePriority(priority, () => modelComplete({ ...request, signal: controller.signal })).then((completion) => {
+    let lastProgressMs = -Infinity;
+    const progress = (model) => {
+      const now = Date.now();
+      if (now - lastProgressMs < 1000)
+        return;
+      lastProgressMs = now;
+      send({ type: "model_progress", id, model });
+    };
+    withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...request, signal: controller.signal }))).then((completion) => {
       send({ type: "model_result", id, completion });
     }, (error) => {
       if (error instanceof OperationError)
@@ -254800,6 +254844,7 @@ var CONTROL_INTS = 4, CONTROL_TICK = 0, CONTROL_BIND = 1, CONTROL_STOPPED = 2, C
 var init_control_plane = __esm(() => {
   init_operation_error();
   init_answer_activity();
+  init_model_stream();
   init_snapshot();
   NEVER2 = new Promise(() => {});
 });
@@ -255273,7 +255318,11 @@ async function completeModelInBackground(fetchBackground, authToken, request, on
       throw error;
     throw new OperationError("argus_unreachable", "The built-in private model is not answering: the background engine is not reachable.", "Try again in a moment.");
   }
-  const payload = await response.json().catch(() => {
+  const payload = response.ok && response.headers.get("content-type")?.startsWith(ENGINE_MODEL_STREAM_CONTENT_TYPE) ? await readModelStream(response).catch((error) => {
+    if (signal?.aborted)
+      throw error;
+    return;
+  }) : await response.json().catch(() => {
     return;
   });
   if (response.ok && payload && typeof payload.text === "string" && typeof payload.modelId === "string") {
@@ -255287,6 +255336,39 @@ async function completeModelInBackground(fetchBackground, authToken, request, on
     throw new OperationError(typed.error, typed.message, typeof typed.suggestion === "string" ? typed.suggestion : undefined);
   }
   throw new OperationError("argus_unreachable", `The built-in private model did not answer (HTTP ${response.status}).`, "Try again in a moment.");
+}
+async function readModelStream(response) {
+  if (!response.body)
+    return;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder;
+  let buffer = "";
+  let result;
+  const line = (text) => {
+    if (!text.trim())
+      return;
+    const value = JSON.parse(text);
+    if (typeof value?.progress === "string")
+      noteModelProgress(value.progress);
+    else if (value && typeof value.completion === "object" && value.completion !== null)
+      result = value.completion;
+    else if (value && (("operation_error" in value) || ("error" in value)))
+      result = value;
+  };
+  for (;; ) {
+    const next = await reader.read();
+    if (next.done)
+      break;
+    buffer += decoder.decode(next.value, { stream: true });
+    let end;
+    while ((end = buffer.indexOf(`
+`)) >= 0) {
+      line(buffer.slice(0, end));
+      buffer = buffer.slice(end + 1);
+    }
+  }
+  line(buffer + decoder.decode());
+  return result;
 }
 var controlPlanes, SOURCE_SYNC_WAIT_MS, DATA_EXPORT_WAIT_MS, OWNER_ACTION_WAIT_MS;
 var init_runtime4 = __esm(() => {
@@ -255302,6 +255384,7 @@ var init_runtime4 = __esm(() => {
   init_click_trace();
   init_control_plane();
   init_answer_activity();
+  init_model_stream();
   init_commands();
   init_snapshot();
   init_tier_owner_items();

@@ -17,6 +17,7 @@ import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/ana
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { workerSocketServe } from '../../core/worker-transport.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
+import { currentModelProgress } from '../../core/model-stream.ts';
 import { createEngineCommandHandler } from './commands.ts';
 import { EngineCommandMirror } from './control-mirror.ts';
 import {
@@ -60,7 +61,7 @@ function start(init: ControlInit): void {
   // A model completion runs on the loop, which holds the model: asked for by
   // message, answered by message, and stopped when the request closes.
   let nextModelId = 1;
-  const models = new Map<number, { resolve: (completion: AnalystModelCompletion) => void; reject: (error: Error) => void }>();
+  const models = new Map<number, { resolve: (completion: AnalystModelCompletion) => void; reject: (error: Error) => void; progress?: (model: string) => void }>();
   const modelComplete = (request: AnalystModelRequest): Promise<AnalystModelCompletion> => {
     const { signal, ...body } = request;
     const id = nextModelId++;
@@ -72,7 +73,11 @@ function start(init: ControlInit): void {
       };
       if (signal?.aborted) { reject(new DOMException('The model request was closed.', 'AbortError')); return; }
       signal?.addEventListener('abort', stop, { once: true });
+      // The loop's progress arrives by message, outside this call's async
+      // context: keep the call's own clocks to tell.
+      const progress = currentModelProgress();
       models.set(id, {
+        ...(progress ? { progress } : {}),
         resolve: (completion) => { signal?.removeEventListener('abort', stop); resolve(completion); },
         reject: (error) => { signal?.removeEventListener('abort', stop); reject(error); },
       });
@@ -188,6 +193,9 @@ function start(init: ControlInit): void {
         stateError = { attempts: data.attempts, error: data.error, at: data.at };
         statusPath = data.path;
         void publish();
+        return;
+      case 'model_progress':
+        models.get(data.id)?.progress?.(data.model);
         return;
       case 'model_result': {
         const waiting = models.get(data.id);

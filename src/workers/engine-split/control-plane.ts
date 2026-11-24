@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { runAtLocalInferencePriority, type LocalInferencePriority } from '../answer-activity.ts';
+import { withModelProgress } from '../../core/model-stream.ts';
 import { type EngineCommandEnvelope, type EngineCommandLedger, type EngineCommandReceipt } from './commands.ts';
 import { ENGINE_STATUS_PUBLISH_INTERVAL_MS } from './snapshot.ts';
 
@@ -64,6 +65,8 @@ export type ControlToThread =
   | { type: 'state'; at: number; state: Record<string, unknown>; path: string }
   /** The loop's collect threw: the thread keeps publishing the last state and says so in it. */
   | { type: 'state_failed'; at: number; attempts: number; error: string; path: string }
+  /** The model is still producing output for call `id` (at most once a second). */
+  | { type: 'model_progress'; id: number; model: string }
   | { type: 'model_result'; id: number; completion?: AnalystModelCompletion; operationError?: { error: string; message: string; suggestion?: string }; message?: string }
   | { type: 'stop' };
 
@@ -191,7 +194,14 @@ export function startEngineControlPlane(input: EngineControlPlaneInput): EngineC
     if (!modelComplete) { send({ type: 'model_result', id, message: 'This background serves no model.' }); return; }
     const controller = new AbortController();
     modelCalls.set(id, controller);
-    void runAtLocalInferencePriority(priority, () => modelComplete({ ...request, signal: controller.signal })).then(
+    let lastProgressMs = -Infinity;
+    const progress = (model: string): void => {
+      const now = Date.now();
+      if (now - lastProgressMs < 1_000) return;
+      lastProgressMs = now;
+      send({ type: 'model_progress', id, model });
+    };
+    void withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...request, signal: controller.signal }))).then(
       (completion) => { send({ type: 'model_result', id, completion }); },
       (error: unknown) => {
         if (error instanceof OperationError) send({ type: 'model_result', id, operationError: error.toJSON() as { error: string; message: string; suggestion?: string } });
