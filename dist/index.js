@@ -19928,6 +19928,15 @@ var init_source_failure = __esm(() => {
   ]);
 });
 
+// src/core/source-scope-copy.ts
+var SOURCE_SCOPE_CHOICE_COPY;
+var init_source_scope_copy = __esm(() => {
+  SOURCE_SCOPE_CHOICE_COPY = {
+    mail: { reason: "choose which mail to include", label: "Choose mail" },
+    folders: { reason: "choose which folders to include", label: "Choose folders" }
+  };
+});
+
 // src/workers/dashboard/display-text.ts
 var init_display_text = () => {};
 
@@ -19945,6 +19954,7 @@ var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
+  init_source_scope_copy();
   init_answer_ready_coverage();
   init_display_text();
   init_scheduler_markers();
@@ -20562,8 +20572,8 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
     syncNow: "Sync now",
-    chooseFolders: "Choose folders",
-    chooseMail: "Choose mail",
+    chooseFolders: SOURCE_SCOPE_CHOICE_COPY.folders.label,
+    chooseMail: SOURCE_SCOPE_CHOICE_COPY.mail.label,
     disconnect: "Disconnect",
     deleteData: "Delete indexed data",
     changeModels: "Change",
@@ -28695,6 +28705,7 @@ init_source_registry();
 // src/core/connect.ts
 init_source_scope_approval();
 init_mail_source_scope();
+init_file_scope_sources();
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
 var OAUTH_STATUS_HANDLES = {

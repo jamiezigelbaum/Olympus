@@ -3047,7 +3047,7 @@ function sourceCardFromDefinition(
     : connection.state === 'reauth_required'
       ? { state: 'needs_attention' as const, label: 'Reauthenticate this source' }
       : connectedFolderSource && fileSourceScopeStatus === 'scope_pending'
-        ? { state: 'empty' as const, label: `Choose ${scopeKind} to start` }
+        ? { state: 'needs_attention' as const, label: `Choose ${scopeKind} to start` }
       : connectedFolderSource && fileSourceScopeStatus === 'approved' && !fileSourceScopeIngestionEnabled
         ? { state: 'empty' as const, label: 'Ingestion is off for this source' }
       : embeddingLaneDisabled
@@ -3438,7 +3438,8 @@ function scheduleFromSchedulers(
   const lastErrorKind = failing.find((task) => task.last_error_kind)?.last_error_kind;
   const lastErrorHash = failing.find((task) => task.last_error_hash)?.last_error_hash;
   const degradedReason = tasks.find((task) => task.degraded_reason)?.degraded_reason;
-  const lastSuccessAt = latestIsoTimestamp(tasks.map((task) => task.last_success_at));
+  // Finishing work on retained items does not check the source for new data.
+  const lastSuccessAt = latestIsoTimestamp(tasks.filter((task) => task.kind === 'sync').map((task) => task.last_success_at));
   const lastAttemptAt = latestIsoTimestamp(tasks.map((task) => task.last_attempt_at));
   const nextRunAt = earliestIsoTimestamp(tasks.map((task) => task.next_run_at));
   return {

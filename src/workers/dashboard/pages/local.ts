@@ -1,4 +1,5 @@
 import type { TinfoilStatus } from '../../../core/analyst-tinfoil.ts';
+import { SOURCE_SCOPE_CHOICE_COPY } from '../../../core/source-scope-copy.ts';
 import { judgeMoney, judgeCount, judgeDuration, judgeHours } from '../judge-format.ts';
 export { judgeMoney, judgeCount, judgeDuration } from '../judge-format.ts';
 import { dashboardPeopleRow } from './people.ts';
@@ -38,7 +39,7 @@ import type {
 } from '../../source-dashboard.ts';
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
 import { renderMessagingCard } from '../messaging.ts';
-import { DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_PRIVACY_LANDING, DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken, dashboardSourceLandingToken } from '../../../core/open-targets.ts';
+import { DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_PRIVACY_LANDING, DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken, dashboardScopeLandingToken, dashboardSourceLandingToken } from '../../../core/open-targets.ts';
 import { renderDashboardAgentsSection, type AgentConnectHost } from '../agents.ts';
 import {
   connectorSheet,
@@ -61,7 +62,7 @@ import { DASHBOARD_SETTINGS_ZKAPI_ID, dashboardPrivacyTabs, PRIVACY_TABS_CSS } f
 import { dashboardLocalPageHref } from '../host-page.ts';
 import { dashboardTopNav, TOP_NAV_CSS, type DashboardTab } from '../top-nav.ts';
 import { sourceLogoTile, SOURCE_LOGO_CSS } from '../source-logos.ts';
-import { dashboardActionLabel, DASHBOARD_DISCONNECTED_DATA_KEPT } from '../vocabulary.ts';
+import { dashboardActionLabel, dashboardAttentionLine, dashboardScopePending, DASHBOARD_DISCONNECTED_DATA_KEPT } from '../vocabulary.ts';
 import { renderUpdateNotice, UPDATE_NOTICE_CSS } from '../update-now.ts';
 import type { SelfUpdateStatus } from '../../../core/self-update.ts';
 import { MODEL_PICKER_CSS, renderAnswerModelPickers, renderZkapiModelPicker } from '../model-pickers.ts';
@@ -291,6 +292,7 @@ function sourceDomId(sourceId: string): string {
 
 function sourceFacts(source: DashboardSourceCard): string {
   if (source.connection.state === 'reauth_required') return 'needs reconnect';
+  if (dashboardScopePending(source)) return dashboardAttentionLine(source);
   const facts: string[] = [];
   const items = source.coverage?.indexed_items ?? 0;
   if (items > 0) facts.push(`${items.toLocaleString('en-US')} ${MESSAGING_SOURCES.has(source.source_id) ? 'messages' : 'items'}`);
@@ -299,7 +301,8 @@ function sourceFacts(source: DashboardSourceCard): string {
 }
 
 function sourceStatus(source: DashboardSourceCard): 'ok' | 'attention' {
-  return source.connection.state === 'reauth_required' || source.schedule?.consecutive_failures || source.answer_readiness?.state === 'needs_attention' ? 'attention' : 'ok';
+  return source.connection.state === 'reauth_required' || dashboardScopePending(source) || source.freshness?.stale
+    || source.schedule?.consecutive_failures || source.answer_readiness?.state === 'needs_attention' ? 'attention' : 'ok';
 }
 
 /**
@@ -317,7 +320,8 @@ function connectedSourceRow(source: DashboardSourceCard, messagingLocalSession: 
   const label = escapeHtml(source.label);
   const items: string[] = [];
   const dialogs: string[] = [];
-  const sync = kept ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
+  const choosingScope = dashboardScopePending(source);
+  const sync = kept || choosingScope ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
   // Home lists no sources (#1085): Details opens this source's own row there, with its See why, Unpair,
   // Import an archive and Details for support.
   if (!kept) items.push(`<a class="menuitem" href="${escapeHtml(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardSourceLandingToken(source.source_id)}`)}" data-source-details>Details</a>`);
@@ -348,7 +352,9 @@ function connectedSourceRow(source: DashboardSourceCard, messagingLocalSession: 
   // source that needs input, or whose last attempt the provider refused,
   // opens its setup instead.
   const action = source.connection.action;
-  const needs = !fixLabel ? ''
+  const needs = choosingScope
+    ? `<a class="btn primary" href="${escapeHtml(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardScopeLandingToken(source.source_id)}`)}">${escapeHtml(SOURCE_SCOPE_CHOICE_COPY[source.scope_selection?.kind ?? 'folders'].label)}</a>`
+    : !fixLabel ? ''
     : action.kind === 'oauth' && dashboardOAuthOneClickReconnect(source)
       ? `<form class="rowform" data-connect-kind="oauth" data-one-click-reconnect><input type="hidden" name="source" value="${escapeHtml(action.source)}">`
         + `<button class="btn${kept ? '' : ' primary'}" type="submit"${off}>${escapeHtml(fixLabel)}</button>`

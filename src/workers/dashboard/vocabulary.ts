@@ -18,6 +18,7 @@ import type {
 import type { DashboardLivePassErrorKind, DashboardSyncName } from '../source-dashboard.ts';
 import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, DASHBOARD_UNSETTLED_CUSTODY_LABELS } from '../source-dashboard.ts';
 import { ARCHIVE_FORMATS, archiveExportGuides } from '../../core/archive-formats.ts';
+import { SOURCE_SCOPE_CHOICE_COPY } from '../../core/source-scope-copy.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
 import { displayText } from './display-text.ts';
@@ -263,6 +264,7 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
     }
     return { status: connectionStatus, mappedUnknown: false };
   }
+  if (dashboardScopePending(source)) return { status: 'Needs you', mappedUnknown: false };
   if (readinessStatus === 'Needs you' || queueStatus === 'Needs you') {
     return { status: 'Needs you', mappedUnknown: false };
   }
@@ -272,13 +274,6 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   if (dashboardCaptureProblem(source) !== undefined) return { status: 'Needs you', mappedUnknown: false };
   // The computer's disk is nearly full: new media waits to download until the owner frees space.
   if (source.media_storage) return { status: 'Needs you', mappedUnknown: false };
-  // A folder source that is connected but has no approved scope has read
-  // nothing and will read nothing until the owner chooses folders. Its
-  // connection state is `connected`, which alone reads Fresh — a green dot and
-  // "synced just now" over an empty corpus (first-install test, 2026-09-23).
-  // It is waiting, exactly as a source before its first sync is; the Choose
-  // folders banner carries the ask.
-  if (dashboardScopePending(source)) return { status: 'Waiting', mappedUnknown: false };
   // A pairing that has not captured its first message is waiting, whatever
   // older messages the index still holds from before it.
   if (connectionStatus === 'Fresh' && source.freshness.capture?.state === 'awaiting') {
@@ -288,7 +283,7 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
 }
 
 /**
- * True when a connected source that requires an explicit folder scope has not
+ * True when a connected source that requires an explicit scope has not
  * had one approved yet. Generic over every source that declares
  * `scope_selection`, never a named provider.
  */
@@ -527,7 +522,7 @@ export function dashboardAttentionParts(
   // (dashboardImportAttentionSentence); the row keeps its own line.
   if (source.connection.imports_attention?.length) return withCapture(source.connection.label);
   if (dashboardScopePending(source)) {
-    return withCapture(source.scope_selection?.kind === 'mail' ? 'choose which mail to include' : 'choose which folders to include');
+    return withCapture(SOURCE_SCOPE_CHOICE_COPY[source.scope_selection?.kind ?? 'folders'].reason);
   }
   if (source.schedule?.degraded_reason === 'scope_root_permission_needed') return withCapture(DASHBOARD_FOLDER_NEEDS_PERMISSION);
   if (source.schedule?.degraded_reason === 'scope_root_helper_needed') return withCapture(DASHBOARD_FOLDER_NEEDS_HELPER);
@@ -1741,9 +1736,6 @@ function waitingLine(source: DashboardSourceCard): string {
     const clause = dashboardCaptureClause(source);
     return clause ? `${awaiting} · ${clause}` : awaiting;
   }
-  if (dashboardScopePending(source)) {
-    return source.scope_selection?.kind === 'mail' ? 'choose which mail to include' : 'choose which folders to include';
-  }
   if (source.connection.state === 'waiting_for_first_sync') return 'waiting for the first sync';
   const queued = source.queue_health.waiting + source.queue_health.active;
   if (queued > 0) return `${dashboardCount(queued)} in queue`;
@@ -2857,8 +2849,8 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
 export const DASHBOARD_CHATGPT_SETUP_LABELS = {
   connect: 'Connect',
   syncNow: 'Sync now',
-  chooseFolders: 'Choose folders',
-  chooseMail: 'Choose mail',
+  chooseFolders: SOURCE_SCOPE_CHOICE_COPY.folders.label,
+  chooseMail: SOURCE_SCOPE_CHOICE_COPY.mail.label,
   disconnect: 'Disconnect',
   deleteData: 'Delete indexed data',
   changeModels: 'Change',

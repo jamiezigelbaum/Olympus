@@ -38,10 +38,10 @@ export interface DashboardHostBridgeConfig {
   /** https://olympusplugin.ai/open/ */
   openBase: string;
   /**
-   * Where an open link asked the panel to land (See why on one source),
+   * Where an open link asked the panel to land,
    * said in the first `ui/initialize` answer only.
    */
-  landing?: { sourceId: string; import?: true };
+  landing?: { sourceId: string; import?: true; scope?: true };
 }
 
 export interface DashboardHostBridgeIo {
@@ -92,7 +92,7 @@ export function dashboardHostBridge(config: DashboardHostBridgeConfig, io: Dashb
     };
     const own: Any = { kind: config.kind, readOnly, links: config.links };
     if (initial && landing) {
-      own.landing = landing.import ? { sourceId: landing.sourceId, import: true } : { sourceId: landing.sourceId };
+      own.landing = landing;
       landing = undefined;
     }
     context[config.contextKey] = own;

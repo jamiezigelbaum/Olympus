@@ -528,9 +528,9 @@ export interface OlympusHostContext {
   /**
    * Computer only, in the first `ui/initialize` answer only: the source an
    * open link asked to land on (core/open-targets.ts `unreadable/<source>`).
-   * The panel expands that source's See why and outlines it briefly.
+   * The panel opens the requested control or expands that source's See why.
    */
-  landing?: { sourceId: string };
+  landing?: { sourceId: string; import?: true; scope?: true };
 }
 
 /**

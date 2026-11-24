@@ -916,6 +916,23 @@ describe('See why on the computer', () => {
     expect(page.win.document.querySelectorAll('.landed').length).toBe(1);
   });
 
+  test('the Sources page scope link opens the same mail picker as Home', async () => {
+    const id = 'gmail.email';
+    const fix = { label: 'Choose mail', tool: 'olympus_scope_list', args: { source_id: id } };
+    const pending = model({
+      sources: [{ id, label: 'Gmail', group: 'cloud', status: 'Needs you', primary: fix }],
+      needsYou: [{ id: `source:${id}`, sentence: 'Gmail — choose which mail to include', fix }],
+    });
+    const pendingLanding = { ...COMPUTER, landing: { sourceId: id, scope: true } };
+    const page = await onHost(pendingLanding, pending);
+    const scopeCall = (panel: Panel) => panel.sent.find((message) => message.method === 'tools/call'
+      && message.params.name === fix.tool);
+    expect(scopeCall(page)?.params.arguments).toMatchObject(fix.args);
+    expect(page.text()).toContain('Choose mail');
+    const locked = await onHost({ ...pendingLanding, readOnly: true }, pending);
+    expect(scopeCall(locked)).toBeUndefined();
+  });
+
   test('What\'s private › Open lands on the privacy settings once privacy is saved, which Home no longer lists (#1223)', async () => {
     const saved = model({ sources: [TELEGRAM], privacy: { configured: true, ruleCount: 1, pendingCount: 0 } } as unknown as Partial<DashboardViewModelV1>);
     const asked = (page: Panel) => page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name);

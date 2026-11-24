@@ -19,20 +19,28 @@ const view = buildDashboardPreviewView('first-install');
 const dropbox = view.sources.find((source) => source.source_id === 'dropbox.files')!;
 const readwise = view.sources.find((source) => source.source_id === 'readwise.library')!;
 
-test('a connected source waiting for its folder scope reads Waiting, never Fresh', () => {
+test('a connected source waiting for its folder scope reads Needs you, never Fresh', () => {
   expect(dropbox.scope_selection).toMatchObject({ status: 'scope_pending', connected: true });
   expect(dropbox.connection.state).toBe('connected');
-  expect(dashboardStatus({ source: dropbox })).toBe('Waiting');
+  // Choosing the folders is the owner's step, so it is Needs you (1.5 test-mac
+  // round, 24 Nov: a scope-pending Gmail read ok on Sources while Home asked).
+  expect(dashboardStatus({ source: dropbox })).toBe('Needs you');
   expect(dashboardSubLine(dropbox)).toBe('choose which folders to include');
-  // The same word Readwise gets before its first sync.
+  // Readwise before its first sync needs nothing from the owner.
   expect(readwise.connection.state).toBe('waiting_for_first_sync');
   expect(dashboardStatus({ source: readwise })).toBe('Waiting');
   // Generic over scope selection, not a Dropbox branch: any card carrying the
   // same declaration reads the same way.
   const drive: DashboardSourceCard = { ...dropbox, source_id: 'google_drive.docs', label: 'Google Drive' };
-  expect(dashboardStatus({ source: drive })).toBe('Waiting');
+  expect(dashboardStatus({ source: drive })).toBe('Needs you');
   // Once scope is approved the connection state speaks again.
-  const approved: DashboardSourceCard = { ...dropbox, scope_selection: { ...dropbox.scope_selection!, status: 'approved' } };
+  // The builder derives readiness from the scope, so an approved card carries
+  // the readiness an approved, not-yet-read source gets.
+  const approved: DashboardSourceCard = {
+    ...dropbox,
+    scope_selection: { ...dropbox.scope_selection!, status: 'approved' },
+    answer_readiness: { state: 'empty', label: 'Nothing indexed yet' },
+  };
   expect(dashboardStatus({ source: approved })).toBe('Fresh');
   // A lapsed credential still outranks the wait.
   const reauth: DashboardSourceCard = { ...dropbox, connection: { ...dropbox.connection, state: 'reauth_required' } };

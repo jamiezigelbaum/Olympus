@@ -6119,7 +6119,10 @@ function dashboardImportLandingToken(sourceId) {
 function dashboardSourceLandingToken(sourceId) {
   return `${DASHBOARD_SOURCE_LANDING_PREFIX}${sourceId}`;
 }
-var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_IMPORT_LANDING_PREFIX = "import.", DASHBOARD_SOURCE_LANDING_PREFIX = "source.", DASHBOARD_ALL_SOURCES_LANDING = "sources", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_PRIVACY_LANDING = "privacy", DASHBOARD_PRIVACY_LANDING_ID = "privacy.settings", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+function dashboardScopeLandingToken(sourceId) {
+  return `${DASHBOARD_SCOPE_LANDING_PREFIX}${sourceId}`;
+}
+var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_IMPORT_LANDING_PREFIX = "import.", DASHBOARD_SOURCE_LANDING_PREFIX = "source.", DASHBOARD_SCOPE_LANDING_PREFIX = "scope.", DASHBOARD_ALL_SOURCES_LANDING = "sources", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_PRIVACY_LANDING = "privacy", DASHBOARD_PRIVACY_LANDING_ID = "privacy.settings", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -35293,13 +35296,30 @@ async function readApiKeyFromStdin(stdin = processStdin) {
 function oauthAuthorizeOrigin(source) {
   return new URL(oauthSourceDefinition(source).authUrl).origin;
 }
-function connectedOAuthStatuses(source, registryPath) {
+function connectedOAuthStatuses(source, registryPath, env = process.env) {
   const definitions = (source ? [source] : OAUTH_STATUS_SOURCES).flatMap((entry) => OAUTH_STATUS_HANDLES[entry]());
-  return readConnectedHandleRegistry(registryPath).handles.filter((handle) => definitions.some((definition) => handle.provider === definition.provider && handle.allowedCapabilities.includes(definition.capability))).map((handle) => ({
-    handle: handle.handle,
-    provider: handle.provider,
-    status: handle.backendState?.status === "reauth_required" ? "needs_reconnect" : "connected"
-  }));
+  const registry = readConnectedHandleRegistry(registryPath);
+  const pinnedHandle = env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE;
+  const mailHandle = connectedMailSourceAccountGeneration(registry, pinnedHandle)?.handle.handle;
+  return registry.handles.filter((handle) => definitions.some((definition) => handle.provider === definition.provider && handle.allowedCapabilities.includes(definition.capability))).map((handle) => {
+    const grant = { handle: handle.handle, provider: handle.provider };
+    if (handle.backendState?.status === "reauth_required")
+      return { ...grant, status: "needs_reconnect" };
+    if (handle.handle === mailHandle) {
+      const mail = readMailSourceScopeApproval({
+        registry,
+        statePath: defaultMailSourceScopeStatePath(registryPath),
+        ...pinnedHandle ? { pinnedHandle } : {}
+      });
+      if (mail.status === "scope_pending")
+        return { ...grant, status: "needs_you", source_id: mail.sourceId, scope_kind: "mail" };
+    }
+    const files = fileScopeSourceForProvider(handle.provider);
+    if (files && connectedFileSourceAccountGeneration(files.sourceId, registry)?.handle.handle === handle.handle && readFileSourceScopeApproval({ sourceId: files.sourceId, registry, statePath: defaultFileSourceScopeStatePath(registryPath) }).status === "scope_pending") {
+      return { ...grant, status: "needs_you", source_id: files.sourceId, scope_kind: "folders" };
+    }
+    return { ...grant, status: "connected" };
+  });
 }
 function oauthSourceDefinition(source) {
   if (source === "dropbox") {
@@ -35816,6 +35836,7 @@ var init_connect = __esm(() => {
   init_provider_account_history();
   init_source_scope_approval();
   init_mail_source_scope();
+  init_file_scope_sources();
   DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
   DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
   OAUTH_STATUS_HANDLES = {
@@ -87818,6 +87839,15 @@ var init_dashboard_opening = __esm(() => {
   init_operation_error();
 });
 
+// src/core/source-scope-copy.ts
+var SOURCE_SCOPE_CHOICE_COPY;
+var init_source_scope_copy = __esm(() => {
+  SOURCE_SCOPE_CHOICE_COPY = {
+    mail: { reason: "choose which mail to include", label: "Choose mail" },
+    folders: { reason: "choose which folders to include", label: "Choose folders" }
+  };
+});
+
 // src/core/people-read-worker.ts
 class PeopleReadWorker {
   dbPath;
@@ -99471,6 +99501,8 @@ function dashboardStatusResolution(input) {
     }
     return { status: connectionStatus, mappedUnknown: false };
   }
+  if (dashboardScopePending(source))
+    return { status: "Needs you", mappedUnknown: false };
   if (readinessStatus === "Needs you" || queueStatus === "Needs you") {
     return { status: "Needs you", mappedUnknown: false };
   }
@@ -99478,8 +99510,6 @@ function dashboardStatusResolution(input) {
     return { status: "Needs you", mappedUnknown: false };
   if (source.media_storage)
     return { status: "Needs you", mappedUnknown: false };
-  if (dashboardScopePending(source))
-    return { status: "Waiting", mappedUnknown: false };
   if (connectionStatus === "Fresh" && source.freshness.capture?.state === "awaiting") {
     return { status: "Waiting", mappedUnknown: false };
   }
@@ -99570,7 +99600,7 @@ function dashboardAttentionParts(source, options) {
   if (source.connection.imports_attention?.length)
     return withCapture(source.connection.label);
   if (dashboardScopePending(source)) {
-    return withCapture(source.scope_selection?.kind === "mail" ? "choose which mail to include" : "choose which folders to include");
+    return withCapture(SOURCE_SCOPE_CHOICE_COPY[source.scope_selection?.kind ?? "folders"].reason);
   }
   if (source.schedule?.degraded_reason === "scope_root_permission_needed")
     return withCapture(DASHBOARD_FOLDER_NEEDS_PERMISSION);
@@ -99989,9 +100019,6 @@ function waitingLine(source) {
     const clause = dashboardCaptureClause(source);
     return clause ? `${awaiting} · ${clause}` : awaiting;
   }
-  if (dashboardScopePending(source)) {
-    return source.scope_selection?.kind === "mail" ? "choose which mail to include" : "choose which folders to include";
-  }
   if (source.connection.state === "waiting_for_first_sync")
     return "waiting for the first sync";
   const queued = source.queue_health.waiting + source.queue_health.active;
@@ -100078,6 +100105,7 @@ var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is mis
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
+  init_source_scope_copy();
   init_answer_ready_coverage();
   init_display_text();
   init_scheduler_markers();
@@ -100964,8 +100992,8 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
     syncNow: "Sync now",
-    chooseFolders: "Choose folders",
-    chooseMail: "Choose mail",
+    chooseFolders: SOURCE_SCOPE_CHOICE_COPY.folders.label,
+    chooseMail: SOURCE_SCOPE_CHOICE_COPY.mail.label,
     disconnect: "Disconnect",
     deleteData: "Delete indexed data",
     changeModels: "Change",
@@ -145209,7 +145237,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
   const trustDomain = cardTrustDomain(definition, corpora);
   const configured = connection.state === "connected" || connection.state === "waiting_for_first_sync" || connection.state === "syncing" || connection.state === "synced";
   const notConnected = !configured && connection.state !== "reauth_required";
-  const answerReadiness = notConnected ? { state: "disconnected", label: "Connect this source" } : connection.state === "reauth_required" ? { state: "needs_attention", label: "Reauthenticate this source" } : connectedFolderSource && fileSourceScopeStatus === "scope_pending" ? { state: "empty", label: `Choose ${scopeKind} to start` } : connectedFolderSource && fileSourceScopeStatus === "approved" && !fileSourceScopeIngestionEnabled ? { state: "empty", label: "Ingestion is off for this source" } : embeddingLaneDisabled ? { state: "needs_attention", label: "Embedding lane needs attention" } : throughput?.state === "stalled" ? { state: "needs_attention", label: "Content extraction is stalled" } : definition.answer_capable_without_sync && configured ? { state: "ready", label: "Ready for questions" } : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
+  const answerReadiness = notConnected ? { state: "disconnected", label: "Connect this source" } : connection.state === "reauth_required" ? { state: "needs_attention", label: "Reauthenticate this source" } : connectedFolderSource && fileSourceScopeStatus === "scope_pending" ? { state: "needs_attention", label: `Choose ${scopeKind} to start` } : connectedFolderSource && fileSourceScopeStatus === "approved" && !fileSourceScopeIngestionEnabled ? { state: "empty", label: "Ingestion is off for this source" } : embeddingLaneDisabled ? { state: "needs_attention", label: "Embedding lane needs attention" } : throughput?.state === "stalled" ? { state: "needs_attention", label: "Content extraction is stalled" } : definition.answer_capable_without_sync && configured ? { state: "ready", label: "Ready for questions" } : answerReadinessFrom(configured, coverage, queue, freshness, operatorPaused);
   const ingestionHealth = dashboardIngestionHealth(ingestionLedgerRow, coverage, queue, definition.family, throughput);
   const lastRunBase = lastRunFromCorpora(corpora);
   const traversalComplete = metadataTraversalCompleteFromSchedulers(schedulers);
@@ -145461,7 +145489,7 @@ function scheduleFromSchedulers(schedulers, connectedAt) {
   const lastErrorKind = failing.find((task) => task.last_error_kind)?.last_error_kind;
   const lastErrorHash = failing.find((task) => task.last_error_hash)?.last_error_hash;
   const degradedReason = tasks.find((task) => task.degraded_reason)?.degraded_reason;
-  const lastSuccessAt = latestIsoTimestamp(tasks.map((task) => task.last_success_at));
+  const lastSuccessAt = latestIsoTimestamp(tasks.filter((task) => task.kind === "sync").map((task) => task.last_success_at));
   const lastAttemptAt = latestIsoTimestamp(tasks.map((task) => task.last_attempt_at));
   const nextRunAt = earliestIsoTimestamp(tasks.map((task) => task.next_run_at));
   return {
@@ -205183,6 +205211,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     unreadablePages: {},
     landing: "",
     landingImport: false,
+    landingScope: false,
     landingPrivacy: false,
     landed: null,
     lastFailure: null
@@ -205297,6 +205326,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       else {
         state.landing = landing.sourceId;
         state.landingImport = landing.import === true;
+        state.landingScope = landing.scope === true;
       }
     }
   }
@@ -206909,8 +206939,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return;
     }
     const sources = Array.isArray(state.data.sources) ? state.data.sources : [];
-    if (!sources.some((source) => source && source.id === id))
+    const source = sources.find((entry) => entry?.id === id);
+    const openScope = state.landingScope;
+    state.landingScope = false;
+    if (!source)
       return;
+    const fix = source.primary;
+    if (openScope && onComputer() && !state.hostReadOnly && picker && fix?.tool === config.picker.tools.scopeList && picker.handles(fix)) {
+      picker.start(fix, id, source.label, "");
+      return;
+    }
     state.open["why:" + id] = true;
     state.landed = { id, until: Date.now() + H.landedMs };
     render("summary:why:" + id);
@@ -213666,7 +213704,7 @@ function dashboardHostBridge(config, io) {
     };
     const own = { kind: config.kind, readOnly, links: config.links };
     if (initial && landing) {
-      own.landing = landing.import ? { sourceId: landing.sourceId, import: true } : { sourceId: landing.sourceId };
+      own.landing = landing;
       landing = undefined;
     }
     context[config.contextKey] = own;
@@ -214622,6 +214660,9 @@ function hostProgram(input, bridge, mount) {
     const row = wanted.indexOf(input.sourceLanding) === 0 ? wanted.slice(input.sourceLanding.length) : "";
     if (/^[a-z0-9_.]{1,64}$/.test(row))
       landing = { sourceId: row };
+    const scope = wanted.indexOf(input.scopeLanding) === 0 ? wanted.slice(input.scopeLanding.length) : "";
+    if (/^[a-z0-9_.]{1,64}$/.test(scope))
+      landing = { sourceId: scope, scope: true };
     if (wanted === input.allSourcesLanding.token)
       landing = { sourceId: input.allSourcesLanding.id };
     if (wanted === input.privacyLanding.token)
@@ -214921,6 +214962,7 @@ function renderComputerHostPage(input) {
     landings: panelOpenTargetSources(),
     importLanding: DASHBOARD_IMPORT_LANDING_PREFIX,
     sourceLanding: DASHBOARD_SOURCE_LANDING_PREFIX,
+    scopeLanding: DASHBOARD_SCOPE_LANDING_PREFIX,
     allSourcesLanding: { token: DASHBOARD_ALL_SOURCES_LANDING, id: DASHBOARD_ALL_SOURCES_ID },
     privacyLanding: { token: DASHBOARD_PRIVACY_LANDING, id: DASHBOARD_PRIVACY_LANDING_ID },
     hasReadToken: token !== undefined,
@@ -218492,6 +218534,8 @@ function sourceDomId(sourceId) {
 function sourceFacts(source) {
   if (source.connection.state === "reauth_required")
     return "needs reconnect";
+  if (dashboardScopePending(source))
+    return dashboardAttentionLine(source);
   const facts = [];
   const items = source.coverage?.indexed_items ?? 0;
   if (items > 0)
@@ -218501,7 +218545,7 @@ function sourceFacts(source) {
   return facts.join(" · ");
 }
 function sourceStatus(source) {
-  return source.connection.state === "reauth_required" || source.schedule?.consecutive_failures || source.answer_readiness?.state === "needs_attention" ? "attention" : "ok";
+  return source.connection.state === "reauth_required" || dashboardScopePending(source) || source.freshness?.stale || source.schedule?.consecutive_failures || source.answer_readiness?.state === "needs_attention" ? "attention" : "ok";
 }
 function needsSetupAgain(source) {
   return CONNECTED_STATES.has(source.connection.state) && source.connection.action.kind !== "none" && source.connection.action.kind !== "archive_import" && !MESSAGING_SOURCES.has(source.source_id);
@@ -218511,7 +218555,8 @@ function connectedSourceRow(source, messagingLocalSession, off, kept = false, ba
   const label = escapeHtml2(source.label);
   const items = [];
   const dialogs = [];
-  const sync = kept ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
+  const choosingScope = dashboardScopePending(source);
+  const sync = kept || choosingScope ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
   if (!kept)
     items.push(`<a class="menuitem" href="${escapeHtml2(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardSourceLandingToken(source.source_id)}`)}" data-source-details>Details</a>`);
   if (sync)
@@ -218532,7 +218577,7 @@ function connectedSourceRow(source, messagingLocalSession, off, kept = false, ba
     items.push(confirm("delete_source_data", `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, "Delete indexed data", true, "Delete indexed data"));
   const fixLabel = kept ? "Reconnect" : source.connection.state === "reauth_required" ? "Sign in" : needsSetupAgain(source) && ("label" in source.connection.action) ? dashboardActionLabel(source.connection.action.label) : "";
   const action = source.connection.action;
-  const needs = !fixLabel ? "" : action.kind === "oauth" && dashboardOAuthOneClickReconnect(source) ? `<form class="rowform" data-connect-kind="oauth" data-one-click-reconnect><input type="hidden" name="source" value="${escapeHtml2(action.source)}">` + `<button class="btn${kept ? "" : " primary"}" type="submit"${off}>${escapeHtml2(fixLabel)}</button>` + '<span class="actmsg" data-action-message role="status"></span><span class="authfallback" data-authorization-fallback></span></form>' : `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${escapeHtml2(fixLabel)}</button>`;
+  const needs = choosingScope ? `<a class="btn primary" href="${escapeHtml2(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardScopeLandingToken(source.source_id)}`)}">${escapeHtml2(SOURCE_SCOPE_CHOICE_COPY[source.scope_selection?.kind ?? "folders"].label)}</a>` : !fixLabel ? "" : action.kind === "oauth" && dashboardOAuthOneClickReconnect(source) ? `<form class="rowform" data-connect-kind="oauth" data-one-click-reconnect><input type="hidden" name="source" value="${escapeHtml2(action.source)}">` + `<button class="btn${kept ? "" : " primary"}" type="submit"${off}>${escapeHtml2(fixLabel)}</button>` + '<span class="actmsg" data-action-message role="status"></span><span class="authfallback" data-authorization-fallback></span></form>' : `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${escapeHtml2(fixLabel)}</button>`;
   const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString("en-US")} items` : sourceFacts(source);
   const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml2(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml2(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
   return { row, dialogs: dialogs.join("") };
@@ -218910,6 +218955,7 @@ var CONNECTOR_DIALOG_ID = "build-connector", CONNECTOR_DIALOG_HEADING = "Build a
 @media (max-width: 640px) { .srctiles { grid-template-columns: 1fr; } .srcrow { flex-wrap: wrap; } }
 `, CONNECTOR_OPENER, SETTINGS_SECTIONS, SETTINGS_CSS;
 var init_local = __esm(() => {
+  init_source_scope_copy();
   init_people();
   init_judge_spending();
   init_backup_section();
@@ -234716,8 +234762,8 @@ class SourceScheduler {
       const zeroChangeRuns = nextZeroChangeRuns(state.lastResult?.counts, result.counts);
       const normalizedResult = normalizeTaskResult(zeroChangeRuns === undefined ? result : { ...result, counts: { ...result.counts, zero_change_runs: zeroChangeRuns } });
       const retryAt = normalizeRetryAt(result.retryAt, completedAt);
-      const preserveLastSuccess = runningTask.kind === "sync" && result.deferred === true;
-      const degradedReason = retryAt?.degradedReason ?? (zeroChangeRuns !== undefined && zeroChangeRuns >= this.zeroChangeDegradeRuns ? LANE_NOT_ADVANCING_DEGRADED_REASON : undefined) ?? (runningTask.kind === "sync" ? state.source.embeddingDeferredReason?.() : undefined);
+      const preserveLastSuccess = runningTask.kind === "sync" && (result.deferred === true || result.status === "idle" && retryAt?.degradedReason === SOURCE_SCOPE_APPROVAL_REQUIRED);
+      const degradedReason = retryAt?.degradedReason ?? result.degradedReason ?? (zeroChangeRuns !== undefined && zeroChangeRuns >= this.zeroChangeDegradeRuns ? LANE_NOT_ADVANCING_DEGRADED_REASON : undefined) ?? (runningTask.kind === "sync" ? state.source.embeddingDeferredReason?.() : undefined);
       const configuredIntervalMs = taskIntervalMs(state.source, state.task);
       const effectiveIntervalMs = retryAt?.effectiveIntervalMs ?? configuredIntervalMs;
       const continueAt = Date.parse(completedAt) + this.continueAfterMs;
@@ -234888,6 +234934,9 @@ ${request.taskId}`);
       try {
         return await run();
       } catch (error) {
+        if (task.kind === "sync" && error instanceof SourceScopeApprovalRequiredError) {
+          return { status: "idle", deferred: true, degradedReason: SOURCE_SCOPE_APPROVAL_REQUIRED };
+        }
         if (error instanceof SourceSchedulerTaskDeferral) {
           return {
             status: "idle",
@@ -259662,11 +259711,11 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     const connecting = connectingFor(definition, card, now);
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...degraded ? { degradedCredentials: degraded } : {} });
     const credentials = dashboardCredentialProblem(scrubbed, degraded);
-    const choosingScope = scopePending(scrubbed);
+    const choosingScope = dashboardScopePending(scrubbed);
     const imports = scrubbed.connection.imports_attention ?? [];
     const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) || imports.length > 0 || definition.public_source_id !== undefined ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
     const progress = measured?.progress;
-    let status = connecting || credentials || choosingScope || missingScope(scrubbed) ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress);
+    let status = connecting || credentials || missingScope(scrubbed) ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress);
     if (imports.length > 0)
       status = "Needs you";
     else if (!connecting && !credentials && !choosingScope && (status === "Needs you" || status === "Failing") && progress && progress.stage !== "done" && !progress.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress).fix)) {
@@ -259830,7 +259879,7 @@ function withProviderRejection(card) {
     return card;
   if (schedule.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason))
     return card;
-  if (!CONNECTED_STATES2.has(card.connection.state) || scopePending(card))
+  if (!CONNECTED_STATES2.has(card.connection.state) || dashboardScopePending(card))
     return card;
   if (Date.parse(card.connection.connected_at ?? "") > Date.parse(schedule.last_attempt_at ?? ""))
     return card;
@@ -259858,7 +259907,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   const inFlight = progress && progress.stage !== "done" && status !== "Needs you" && status !== "Failing";
   const googleSource = definition.provider === "gmail" || definition.provider === "google_drive";
   const ownDetail = connecting ? onServer && googleSource ? DASHBOARD_CHATGPT_VOCABULARY.googleConnectingOnServer : CONNECTING_DETAIL : inFlight ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, { surface: "chatgpt", now, ...degraded ? { degradedCredentials: degraded } : {} });
-  const manualLine = connecting ? undefined : dashboardManualSyncLine(card, now);
+  const manualLine = connecting || dashboardScopePending(card) ? undefined : dashboardManualSyncLine(card, now);
   const signinMoved = card.connection.google_signin_moved === true && status === "Fresh" && !connecting && !inFlight;
   const detail = manualLine && !(ownDetail ?? "").startsWith(manualLine) ? manualLine : signinMoved ? DASHBOARD_CHATGPT_VOCABULARY.googleSigninMoved : ownDetail;
   const unreadable = card.coverage.unreadable_items ?? 0;
@@ -259871,7 +259920,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     surface: "chatgpt",
     ...degraded ? { degradedCredentials: degraded } : {}
   }).reason === "";
-  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) || missingScope(card) ? scopeFix(definition, card) : reconnect ?? (late && captureOnly ? captureFix(definition, card) : late && mediaStorageOnly(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} }) ? checkAgainFix() : late ? sync ?? (capture ? captureFix(definition, card) : undefined) : signinMoved ? googleSigninMovedFix(definition) : undefined);
+  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : dashboardScopePending(card) || missingScope(card) ? scopeFix(definition, card) : reconnect ?? (late && captureOnly ? captureFix(definition, card) : late && mediaStorageOnly(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} }) ? checkAgainFix() : late ? sync ?? (capture ? captureFix(definition, card) : undefined) : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu = [];
   if (sync)
     menu.push(sync);
@@ -259879,7 +259928,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     menu.push(captureFix(definition, card));
   if (status !== "Off" && definition.connect_action.kind === "archive_import" && !card.connection.imports_attention?.some((entry) => entry.kind === "unreadable"))
     menu.push(connectFix(definition));
-  if (status !== "Off" && card.scope_selection && !scopePending(card) && !missingScope(card)) {
+  if (status !== "Off" && card.scope_selection && !dashboardScopePending(card) && !missingScope(card)) {
     const fix = scopeFix(definition, card);
     if (fix)
       menu.push(fix);
@@ -259959,7 +260008,7 @@ function attentionItem(definition, card, actionKind, degraded, connecting, progr
   const captureOnly = captureProblem(card) && dashboardAttentionParts(card, attentionOptions).reason === "";
   const mediaOnly = mediaStorageOnly(card, attentionOptions);
   const onComputer = checkAgainFix(openOnComputer(definition, "reconnect"));
-  const fix = scopePending(card) || missingScope(card) ? scopeFix(definition, card) ?? onComputer : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : captureOnly ? captureFix(definition, card) : mediaOnly ? onComputer : sync ?? (captureProblem(card) ? captureFix(definition, card) : onComputer);
+  const fix = dashboardScopePending(card) || missingScope(card) ? scopeFix(definition, card) ?? onComputer : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : captureOnly ? captureFix(definition, card) : mediaOnly ? onComputer : sync ?? (captureProblem(card) ? captureFix(definition, card) : onComputer);
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 function importAttentionItem(entry) {
@@ -260004,7 +260053,7 @@ function captureFix(definition, card) {
 function syncFix(definition, card, status, actionKind, degraded, progress) {
   if (!SYNC_SOURCE_IDS.has(definition.source_id) || !dashboardIsConnectedSource(card))
     return;
-  if (scopePending(card) || wantsReconnect(card, status, actionKind, degraded, progress))
+  if (dashboardScopePending(card) || wantsReconnect(card, status, actionKind, degraded, progress))
     return;
   return { label: DASHBOARD_CHATGPT_SETUP_LABELS.syncNow, tool: SYNC_SOURCE_TOOL_NAME, args: { source_id: definition.source_id } };
 }
@@ -260048,7 +260097,7 @@ function measuredSourceProgress(card, scrubbed, embedding, signIn, now) {
   if (missingScope(scrubbed)) {
     return { progress: { stage: "listing", unit, done: found, total: 0, percent: 0, stalled: true, stalledReason: "scope_root_missing" }, counts: { found } };
   }
-  if (scopePending(scrubbed)) {
+  if (dashboardScopePending(scrubbed)) {
     return {
       progress: { stage: "listing", unit, done: 0, total: 0, percent: 0, stalled: true, stalledReason: "scope_pending" },
       counts: { found: 0 }
@@ -260261,9 +260310,6 @@ function sourceNeed(card, status, degraded, connecting, progress) {
 }
 function missingScope(card) {
   return card.schedule?.degraded_reason === "scope_root_missing" || (card.schedule?.missing_folders?.length ?? 0) > 0;
-}
-function scopePending(card) {
-  return card.scope_selection?.connected === true && card.scope_selection.status === "scope_pending";
 }
 function scopeFix(definition, card) {
   if (!card.scope_selection?.connected || !SCOPE_SOURCE_IDS.has(definition.source_id))
@@ -287488,6 +287534,7 @@ async function superviseWorkerServiceSplit(input) {
 // src/cli.ts
 init_dashboard_opening();
 init_open_targets();
+init_source_scope_copy();
 
 // src/core/open-handler.ts
 init_open_targets();
@@ -291752,6 +291799,7 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
     const connection = asRecord23(source.connection);
     const connectionState = typeof connection?.state === "string" ? connection.state : "";
     const answerReadiness = asRecord23(source.answer_readiness);
+    const scope = asRecord23(source.scope_selection);
     const queue = asRecord23(source.queue_health);
     const needsAttention = typeof queue?.needs_attention === "number" && queue.needs_attention > 0;
     const inFlight = connectionState === "awaiting_consent" || connectionState === "reauth_required";
@@ -291768,7 +291816,7 @@ function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
         add({ kind: "missing_dependency", source_id: sourceId, dependency_id: capability.dependencies[0].id });
       }
     }
-    if (answerReadiness?.state === "needs_attention" || needsAttention) {
+    if (!(scope?.connected === true && scope.status === "scope_pending") && (answerReadiness?.state === "needs_attention" || needsAttention)) {
       add({
         kind: capability.authentication.type === "paired_session" ? "capture_interrupted" : "partial_sync",
         source_id: sourceId
@@ -292063,9 +292111,18 @@ async function runConnect(args) {
     }
     const statusSource = rawStatusSource;
     const statusOptions = parseConnectOptions(rawStatusSource ? args.slice(2) : args.slice(1));
+    const env = environmentWithWorkerSetupEnv({ env: process.env });
+    const connections = connectedOAuthStatuses(statusSource, statusOptions.registryPath ?? handleRegistryPathFromEnv(env, true), env);
     return {
       ok: true,
-      connections: connectedOAuthStatuses(statusSource, statusOptions.registryPath ?? handleRegistryPathFromEnv(process.env, true)),
+      connections: connections.map((connection) => connection.status === "needs_you" ? {
+        ...connection,
+        reason: SOURCE_SCOPE_CHOICE_COPY[connection.scope_kind].reason,
+        action: {
+          label: SOURCE_SCOPE_CHOICE_COPY[connection.scope_kind].label,
+          href: new URL(`/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardScopeLandingToken(connection.source_id)}`, remoteAccessUrlsForCli(process.env).local_url).href
+        }
+      } : connection),
       states: listDetachedOAuthStates({
         ...statusSource ? { source: statusSource } : {},
         ...statusOptions.oauthStateDir ? { stateDir: statusOptions.oauthStateDir } : {}

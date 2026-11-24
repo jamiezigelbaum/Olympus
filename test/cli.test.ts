@@ -188,6 +188,14 @@ describe('CLI tool surface', () => {
             queue_health: { needs_attention: 0 },
           },
           {
+            source_id: 'dropbox.files',
+            configured: true,
+            connection: { state: 'connected' },
+            scope_selection: { connected: true, status: 'scope_pending' },
+            answer_readiness: { state: 'needs_attention' },
+            queue_health: { needs_attention: 0 },
+          },
+          {
             source_id: 'telegram.messages',
             configured: false,
             connection: { state: 'reauth_required' },

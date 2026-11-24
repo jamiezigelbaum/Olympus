@@ -9,6 +9,7 @@ import { sourceAccountBindingsPath, updateSourceAccountBinding } from '../src/co
 import { EncryptedFileSecretStore } from '../src/core/secret-store.ts';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { renderDashboardConnectPage } from '../src/workers/dashboard/pages/local.ts';
 import { EnvCredentialBroker } from '../src/workers/credential-broker/index.ts';
 import {
   connectedGrantGeneration,
@@ -20,7 +21,7 @@ import { GMAIL_CONNECTOR_CORPUS_ID, GoogleGmailSourceConnector } from '../src/wo
 import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { buildSourceIngestionLedgerSnapshot } from '../src/workers/source-ingestion-ledger.ts';
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
-import { SourceScheduler, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { SourceScheduler, type SourceSchedulerSource, type SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
 import { FileSourceScopeAuthority, scopeBoundSchedulerSource } from '../src/workers/source-scope-runtime.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -72,7 +73,7 @@ function fixture() {
     });
     return pending.completeCallback({ code: 'fixture-code', state: pending.state });
   };
-  const dashboard = (status = indexStatus(clock.date())) => {
+  const dashboard = (status = indexStatus(clock.date()), sourceSchedulerStatus?: SourceSchedulerStatus) => {
     const scope = authority.mailSnapshot();
     const ledger = buildSourceIngestionLedgerSnapshot(status, {
       connectedHandleRegistry: registry(), syncFreshnessThresholdHours: 26,
@@ -85,6 +86,7 @@ function fixture() {
       fileSourceScopeStatus: { [sourceId]: scope.status },
       fileSourceScopeConnected: { [sourceId]: scope.accountGeneration !== undefined },
       fileSourceScopeIngestionEnabled: { [sourceId]: scope.status === 'approved' },
+      ...(sourceSchedulerStatus ? { schedulerStatus: sourceSchedulerStatus } : {}),
     });
     return { raw, ledger, model: buildChatGptDashboardViewModel(raw, { now: clock.date() }) };
   };
@@ -115,7 +117,7 @@ test('refresh recovery leaves an unrelated OAuth grant alone when a direct beare
     const oauth = broker.sourceOAuthRecovery(request, connectedAt, connectedGrantGeneration(connectedAt, undefined))!;
     expect(await oauth.refresh()).toBe(false);
     await oauth.requireReconnect();
-    expect(connectedOAuthStatuses('dropbox', f.registryPath)[0]?.status).toBe('connected');
+    expect(connectedOAuthStatuses('dropbox', f.registryPath)[0]?.status).toBe('needs_you');
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
   }
@@ -171,6 +173,10 @@ for (const outcome of ['recovered', 'refresh-failed', 'still-rejected'] as const
     const f = fixture();
     try {
       await f.connect('first');
+      const pending = f.authority.mailSnapshot();
+      f.authority.approveMail({
+        accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision, scope: defaultMailScopeSelection(),
+      });
       let mints = 0;
       let requests = 0;
       const fetchFixture = async (url: URL | RequestInfo, init?: RequestInit) => {
@@ -345,6 +351,68 @@ test('a completed sync becomes stale when its cadence stops advancing', async ()
   const source = runner.status().sources[0]!;
   expect(source).toMatchObject({ stale_sync_anomaly: true, freshness_hours: 48 });
   expect(source.tasks[0]).toMatchObject({ last_result: { status: 'progress' }, consecutive_failures: 0 });
+});
+
+test('Gmail waiting for scope approval leaves sync freshness unchanged and needs the owner on every surface', async () => {
+  const f = fixture();
+  const state = new LocalSourceSchedulerStateStore(':memory:');
+  try {
+    await f.connect('first');
+    const initial = f.authority.mailSnapshot();
+    f.authority.approveMail({
+      accountGeneration: initial.accountGeneration!, expectedRevision: initial.revision, scope: defaultMailScopeSelection(),
+    });
+    const ref = f.authority.mailPolicyRef()!;
+    const bound = scopeBoundSchedulerSource({
+      authority: f.authority, ref, source: lane(async () => { throw new Error('Sync must not reach Gmail'); }),
+    });
+    const sync = bound.tasks[0]!;
+    const firstRun = {
+      ...sync, id: `${sync.id}:first`,
+      async run() {
+        return {
+          status: 'idle' as const,
+          retryAt: { at: new Date(f.clock.now() + HOUR_MS).toISOString(), degradedReason: 'source_scope_approval_required' },
+        };
+      },
+    };
+    const source = { ...bound, tasks: [sync, firstRun, {
+      ...sync, id: 'retained-index', kind: 'embed' as const, async run() { return { status: 'idle' as const }; },
+    }] };
+    const key = { sourceId, corpusId, taskId: sync.id };
+    const previous = f.clock.date().toISOString();
+    state.recordSuccess({ ...key, completedAt: previous, resultStatus: 'idle', checkpoint: 'real-sync-cursor' });
+    await f.clock.advance(10 * 24 * HOUR_MS);
+    await f.connect('second');
+    const runner = scheduler(f.clock, [source], state);
+    const status = await runner.runDueTasks();
+    const tasks = status.sources[0]!.tasks;
+    expect(tasks[0]).toMatchObject({ last_success_at: previous, consecutive_failures: 0, degraded_reason: 'source_scope_approval_required' });
+    expect(tasks[1]?.degraded_reason).toBe('source_scope_approval_required');
+    expect(tasks[1]?.last_success_at).toBeUndefined();
+    expect(tasks[2]?.last_success_at).toBe(f.clock.date().toISOString());
+    expect(state.get(key)).toMatchObject({ lastSuccessAt: previous, checkpoint: 'real-sync-cursor' });
+    expect(state.get({ ...key, taskId: firstRun.id })?.lastSuccessAt).toBeUndefined();
+
+    const { raw, model } = f.dashboard(indexStatus(f.clock.date()), status);
+    const card = raw.sources.find((entry) => entry.source_id === sourceId);
+    expect(card?.schedule?.last_success_at).toBe(previous);
+    expect(raw.summary.needs_attention_sources).toBe(1);
+    const fix = { label: 'Choose mail', tool: 'olympus_scope_list', args: { source_id: sourceId } };
+    expect(model.needsYou).toContainEqual({ id: `source:${sourceId}`, sentence: 'Gmail — choose which mail to include', fix });
+    expect(model.sources.find((entry) => entry.id === sourceId)).toMatchObject({ status: 'Needs you', detail: 'choose which mail to include', primary: fix });
+    const html = renderDashboardConnectPage(raw, { controlSessionCsrfToken: 'fixture' });
+    const row = html.match(/data-source-row="gmail\.email"[^]*?(?=<div class="srcbar")/)?.[0];
+    expect(row).toContain('logodot attention');
+    expect(row).not.toContain('logodot ok');
+    expect(row).toContain('choose which mail to include');
+    expect(row).toContain('href="/dashboard#olympus-open=scope.gmail.email">Choose mail</a>');
+    expect(connectedOAuthStatuses('gmail', f.registryPath)[0])
+      .toMatchObject({ status: 'needs_you', source_id: sourceId, scope_kind: 'mail' });
+  } finally {
+    state.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
 });
 
 test('older completed store evidence still shows a late refresh when there is no scheduler snapshot', async () => {
