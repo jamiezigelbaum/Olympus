@@ -74,8 +74,19 @@ import {
 } from './source-account-binding.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { assertTelegramHistoryAccount, followProviderAccountRename } from './provider-account-history.ts';
-import { carryFileSourceScopeApproval } from './source-scope-approval.ts';
-import { carryMailSourceScopeApproval } from './mail-source-scope.ts';
+import {
+  carryFileSourceScopeApproval,
+  connectedFileSourceAccountGeneration,
+  defaultFileSourceScopeStatePath,
+  readFileSourceScopeApproval,
+} from './source-scope-approval.ts';
+import {
+  carryMailSourceScopeApproval,
+  connectedMailSourceAccountGeneration,
+  defaultMailSourceScopeStatePath,
+  readMailSourceScopeApproval,
+} from './mail-source-scope.ts';
+import { fileScopeSourceForProvider } from './file-scope-sources.ts';
 
 const DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
@@ -1957,16 +1968,33 @@ export const OAUTH_STATUS_SOURCES = Object.keys(OAUTH_STATUS_HANDLES) as OAuthSt
 export function connectedOAuthStatuses(
   source: OAuthStatusSource | undefined,
   registryPath: string,
-): Array<{ handle: string; provider: string; status: 'connected' | 'needs_reconnect' }> {
+  env: Record<string, string | undefined> = process.env,
+): Array<{ handle: string; provider: string } & (
+  | { status: 'connected' | 'needs_reconnect' }
+  | { status: 'needs_you'; source_id: string; scope_kind: 'mail' | 'folders' }
+)> {
   const definitions = (source ? [source] : OAUTH_STATUS_SOURCES).flatMap((entry) => OAUTH_STATUS_HANDLES[entry]());
-  return readConnectedHandleRegistry(registryPath).handles
+  const registry = readConnectedHandleRegistry(registryPath);
+  const pinnedHandle = env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE;
+  const mailHandle = connectedMailSourceAccountGeneration(registry, pinnedHandle)?.handle.handle;
+  return registry.handles
     .filter((handle) => definitions.some((definition) => handle.provider === definition.provider
       && handle.allowedCapabilities.includes(definition.capability)))
-    .map((handle) => ({
-      handle: handle.handle,
-      provider: handle.provider,
-      status: handle.backendState?.status === 'reauth_required' ? 'needs_reconnect' : 'connected',
-    }));
+    .map((handle) => {
+      const grant = { handle: handle.handle, provider: handle.provider };
+      if (handle.backendState?.status === 'reauth_required') return { ...grant, status: 'needs_reconnect' };
+      if (handle.handle === mailHandle) {
+        const mail = readMailSourceScopeApproval({ registry, statePath: defaultMailSourceScopeStatePath(registryPath),
+          ...(pinnedHandle ? { pinnedHandle } : {}) });
+        if (mail.status === 'scope_pending') return { ...grant, status: 'needs_you', source_id: mail.sourceId, scope_kind: 'mail' };
+      }
+      const files = fileScopeSourceForProvider(handle.provider);
+      if (files && connectedFileSourceAccountGeneration(files.sourceId, registry)?.handle.handle === handle.handle
+        && readFileSourceScopeApproval({ sourceId: files.sourceId, registry, statePath: defaultFileSourceScopeStatePath(registryPath) }).status === 'scope_pending') {
+        return { ...grant, status: 'needs_you', source_id: files.sourceId, scope_kind: 'folders' };
+      }
+      return { ...grant, status: 'connected' };
+    });
 }
 
 const DROPBOX_OAUTH_SCOPES = ['files.metadata.read', 'files.content.read', 'sharing.read', 'account_info.read'];

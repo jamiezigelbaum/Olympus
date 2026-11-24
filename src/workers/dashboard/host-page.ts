@@ -50,6 +50,7 @@ import {
 import {
   DASHBOARD_IMPORT_LANDING_PREFIX, DASHBOARD_SOURCE_LANDING_PREFIX, DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_ALL_SOURCES_ID, DASHBOARD_PRIVACY_LANDING, DASHBOARD_PRIVACY_LANDING_ID,
   DASHBOARD_OPEN_FRAGMENT_KEY,
+  DASHBOARD_SCOPE_LANDING_PREFIX,
   OPEN_PAGE_BASE_URL,
   allOpenTargets,
   isConnectOpenTarget,
@@ -255,6 +256,7 @@ function hostProgram(input: {
   importLanding: string;
   /** `source.`: the Sources tab's Details on one row; the panel shows that source's row on Home. */
   sourceLanding: string;
+  scopeLanding: string;
   /** `sources`: the Sources tab's Archives and details; the panel shows every source's row. */
   allSourcesLanding: { token: string; id: string };
   /** Privacy rules › What's private › Open: the privacy settings (#1223). */
@@ -481,7 +483,7 @@ function hostProgram(input: {
   }
   // An open link's place in the panel (See why on one source): read against
   // the closed list, then cleared, so a reload does not land again.
-  let landing: { sourceId: string; import?: true } | undefined;
+  let landing: DashboardHostBridgeConfig['landing'];
   if (window.location.hash.indexOf(input.openFragment) === 0) {
     const wanted = window.location.hash.slice(input.openFragment.length);
     try {
@@ -494,6 +496,8 @@ function hostProgram(input: {
     if (/^[a-z0-9_.]{1,64}$/.test(card)) landing = { sourceId: card, import: true };
     const row = wanted.indexOf(input.sourceLanding) === 0 ? wanted.slice(input.sourceLanding.length) : '';
     if (/^[a-z0-9_.]{1,64}$/.test(row)) landing = { sourceId: row };
+    const scope = wanted.indexOf(input.scopeLanding) === 0 ? wanted.slice(input.scopeLanding.length) : '';
+    if (/^[a-z0-9_.]{1,64}$/.test(scope)) landing = { sourceId: scope, scope: true };
     if (wanted === input.allSourcesLanding.token) landing = { sourceId: input.allSourcesLanding.id };
     if (wanted === input.privacyLanding.token) landing = { sourceId: input.privacyLanding.id };
   }
@@ -796,6 +800,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     landings: panelOpenTargetSources(),
     importLanding: DASHBOARD_IMPORT_LANDING_PREFIX,
     sourceLanding: DASHBOARD_SOURCE_LANDING_PREFIX,
+    scopeLanding: DASHBOARD_SCOPE_LANDING_PREFIX,
     allSourcesLanding: { token: DASHBOARD_ALL_SOURCES_LANDING, id: DASHBOARD_ALL_SOURCES_ID },
     privacyLanding: { token: DASHBOARD_PRIVACY_LANDING, id: DASHBOARD_PRIVACY_LANDING_ID },
     hasReadToken: token !== undefined,

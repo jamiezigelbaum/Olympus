@@ -4,7 +4,7 @@
 
 Olympus 1.5 is the last feature release of Olympus. After it, Olympus gets security fixes only.
 
-- **A source never stops quietly.** When Gmail, Google Drive, Dropbox or another connected source stops accepting Olympus's sign-in, Olympus refreshes it once, then shows Needs reconnect on the source, on Home and to your agents, with one Reconnect button. Reconnecting the same account picks up where it left off, with the same choices. A source that has gone quiet for too long is flagged, and retries wait at most an hour.
+- **A source never stops quietly.** When Gmail, Google Drive, Dropbox or another connected source stops accepting Olympus's sign-in, Olympus refreshes it once, then shows Needs reconnect on the source, on Home and to your agents, with one Reconnect button. Reconnecting the same account picks up where it left off, with the same choices. A source that has gone quiet for too long is flagged, and retries wait at most an hour. A source waiting for you to choose which mail or folders to include says so on Home, on Sources and to your agents, with its Choose button.
 - **WhatsApp tells you apart from the other person.** Your own messages show as You, and the sender is kept apart from the chat's name in answers, the dashboard and for your agents. Messages imported before 1.5 keep their old labels.
 - **Pick several notebooks or folders at once.** The Evernote notebook picker and the folder pickers have checkboxes, a filter, Select all, Select none and one Save.
 - **Model downloads don't hang.** A download that stops sending data is retried and resumes where it stopped, the file is checked when it finishes, and a failed download has Try again on the dashboard. When you update, the new private model is downloaded before Olympus switches to the new version.
@@ -16,6 +16,8 @@ Known issues in 1.5:
 
 - Privacy judging can fall behind while you ask many questions in a row; it catches up when you stop.
 - After you unpair WhatsApp or Telegram, Olympus restarts its background service once.
+- A WhatsApp contact you renamed may still show its older name in answers.
+- The Evernote picker still says "folders" where it means notebooks.
 
 - **After updating from 1.4.x, run `olympus dashboard` once to unlock the dashboard.** A browser that last opened 1.4.x shows "Dashboard controls are locked" until then: the dashboard now also needs a per-browser unlock key, so a server on another port of this computer can't use the owner's cookie (#1187).
 

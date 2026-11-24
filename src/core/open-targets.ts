@@ -243,6 +243,12 @@ export const DASHBOARD_SOURCE_LANDING_PREFIX = 'source.';
 export function dashboardSourceLandingToken(sourceId: string): string {
   return `${DASHBOARD_SOURCE_LANDING_PREFIX}${sourceId}`;
 }
+
+export const DASHBOARD_SCOPE_LANDING_PREFIX = 'scope.';
+
+export function dashboardScopeLandingToken(sourceId: string): string {
+  return `${DASHBOARD_SCOPE_LANDING_PREFIX}${sourceId}`;
+}
 /**
  * The panel's own landing on every source's row at once (`#olympus-open=sources`), linked from the Sources
  * tab only: imported archives, a source's imports and each row's details, which Home no longer lists (#1085).

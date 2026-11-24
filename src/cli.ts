@@ -124,7 +124,8 @@ const ZKAPI_FUNDING_DATE_USAGE = 'olympus zkapi funding-date <YYYY-MM-DD>';
 export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
   return olympusCommandHintFor({ ...input, pluginBin: input.pluginBin ?? resolve(olympusPackageRoot(), 'bin', 'olympus') });
 }
-import { allOpenTargets, openTargetFromPath, openTargetPath, parseOlympusOpenUrl, type OpenTarget } from './core/open-targets.ts';
+import { allOpenTargets, DASHBOARD_OPEN_FRAGMENT_KEY, dashboardScopeLandingToken, openTargetFromPath, openTargetPath, parseOlympusOpenUrl, type OpenTarget } from './core/open-targets.ts';
+import { SOURCE_SCOPE_CHOICE_COPY } from './core/source-scope-copy.ts';
 import { installOpenHandler, openHandlerStatus, uninstallOpenHandler, type OpenHandlerResult } from './core/open-handler.ts';
 import {
   dataDeleteCustody,
@@ -2340,6 +2341,7 @@ export function lifecycleRecoverySignalsFromWorkerHttpState(
     const connection = asRecord(source.connection);
     const connectionState = typeof connection?.state === 'string' ? connection.state : '';
     const answerReadiness = asRecord(source.answer_readiness);
+    const scope = asRecord(source.scope_selection);
     const queue = asRecord(source.queue_health);
     const needsAttention = typeof queue?.needs_attention === 'number' && queue.needs_attention > 0;
     // Recovery is a list of things the operator can resume. A source nobody has
@@ -2358,7 +2360,8 @@ export function lifecycleRecoverySignalsFromWorkerHttpState(
         add({ kind: 'missing_dependency', source_id: sourceId, dependency_id: capability.dependencies[0].id });
       }
     }
-    if (answerReadiness?.state === 'needs_attention' || needsAttention) {
+    if (!(scope?.connected === true && scope.status === 'scope_pending')
+      && (answerReadiness?.state === 'needs_attention' || needsAttention)) {
       add({
         kind: capability.authentication.type === 'paired_session' ? 'capture_interrupted' : 'partial_sync',
         source_id: sourceId,
@@ -2700,9 +2703,19 @@ async function runConnect(args: string[]): Promise<unknown> {
     }
     const statusSource = rawStatusSource as typeof supportedStatusSources[number] | undefined;
     const statusOptions = parseConnectOptions(rawStatusSource ? args.slice(2) : args.slice(1));
+    const env = environmentWithWorkerSetupEnv({ env: process.env });
+    const connections = connectedOAuthStatuses(statusSource, statusOptions.registryPath ?? handleRegistryPathFromEnv(env, true)!, env);
     return {
       ok: true,
-      connections: connectedOAuthStatuses(statusSource, statusOptions.registryPath ?? handleRegistryPathFromEnv(process.env, true)!),
+      connections: connections.map((connection) => connection.status === 'needs_you' ? {
+        ...connection,
+        reason: SOURCE_SCOPE_CHOICE_COPY[connection.scope_kind].reason,
+        action: {
+          label: SOURCE_SCOPE_CHOICE_COPY[connection.scope_kind].label,
+          href: new URL(`/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardScopeLandingToken(connection.source_id)}`,
+            remoteAccessUrlsForCli(process.env).local_url).href,
+        },
+      } : connection),
       states: listDetachedOAuthStates({
         ...(statusSource ? { source: statusSource } : {}),
         ...(statusOptions.oauthStateDir ? { stateDir: statusOptions.oauthStateDir } : {}),

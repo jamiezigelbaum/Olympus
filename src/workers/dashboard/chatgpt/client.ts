@@ -202,6 +202,7 @@ export function chatgptDashboardClient(
     landing: string;
     /** The landing opens that card's Import an archive (a Keys link), not its See why. */
     landingImport: boolean;
+    landingScope: boolean;
     /** An open link asked for the privacy settings; they open once the data is in. */
     landingPrivacy: boolean;
     /** The source row outlined after landing, until `until` (ms). */
@@ -240,6 +241,7 @@ export function chatgptDashboardClient(
     unreadablePages: {},
     landing: '',
     landingImport: false,
+    landingScope: false,
     landingPrivacy: false,
     landed: null,
     lastFailure: null,
@@ -352,6 +354,7 @@ export function chatgptDashboardClient(
       else {
         state.landing = landing.sourceId;
         state.landingImport = landing.import === true;
+        state.landingScope = landing.scope === true;
       }
     }
   }
@@ -2275,7 +2278,16 @@ export function chatgptDashboardClient(
       return;
     }
     const sources = Array.isArray(state.data.sources) ? state.data.sources : [];
-    if (!sources.some((source: Any) => source && source.id === id)) return;
+    const source = sources.find((entry: Any) => entry?.id === id);
+    const openScope = state.landingScope;
+    state.landingScope = false;
+    if (!source) return;
+    const fix = source.primary;
+    if (openScope && onComputer() && !state.hostReadOnly && picker
+      && fix?.tool === config.picker.tools.scopeList && picker.handles(fix)) {
+      picker.start(fix, id, source.label, '');
+      return;
+    }
     state.open['why:' + id] = true;
     state.landed = { id, until: Date.now() + H.landedMs };
     render('summary:why:' + id);

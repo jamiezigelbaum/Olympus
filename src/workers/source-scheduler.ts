@@ -7,7 +7,7 @@ import { runningOlympusVersion } from '../core/update-check.ts';
 import { parseSchedulerSourceIds, type OlympusConfig } from '../core/config.ts';
 import { boundedLogErrorMessage } from '../core/log-redaction.ts';
 import { controlPathHeadroom } from './control-path-headroom.ts';
-import { OperationError, SOURCE_SCOPE_APPROVAL_REQUIRED } from '../core/operation-error.ts';
+import { OperationError, SOURCE_SCOPE_APPROVAL_REQUIRED, SourceScopeApprovalRequiredError } from '../core/operation-error.ts';
 import type { SourceIngestionPolicy } from '../core/source-ingestion-policy.ts';
 import {
   dropboxPolicyApprovedScopeKeys,
@@ -308,6 +308,8 @@ export interface SourceSchedulerTaskRunResult {
   retryAt?: SourceSchedulerRetryAt;
   /** The task deferred before it could check the source. */
   deferred?: true;
+  /** A reason to show while the deferred task keeps its normal cadence. */
+  degradedReason?: typeof SOURCE_SCOPE_APPROVAL_REQUIRED;
   /**
    * More work is ready right now (a backlog): run this task again within
    * seconds instead of waiting out its interval. A retryAt deferral wins.
@@ -1248,10 +1250,12 @@ export class SourceScheduler {
           : { ...result, counts: { ...result.counts, zero_change_runs: zeroChangeRuns } },
       );
       const retryAt = normalizeRetryAt(result.retryAt, completedAt);
-      const preserveLastSuccess = runningTask.kind === 'sync' && result.deferred === true;
+      const preserveLastSuccess = runningTask.kind === 'sync' && (result.deferred === true
+        || (result.status === 'idle' && retryAt?.degradedReason === SOURCE_SCOPE_APPROVAL_REQUIRED));
       // A structured provider deferral is the more specific explanation and
       // keeps precedence; the traversal gate fills the silence otherwise.
       const degradedReason = retryAt?.degradedReason
+        ?? result.degradedReason
         ?? (zeroChangeRuns !== undefined && zeroChangeRuns >= this.zeroChangeDegradeRuns
           ? LANE_NOT_ADVANCING_DEGRADED_REASON
           : undefined)
@@ -1473,6 +1477,9 @@ export class SourceScheduler {
       try {
         return await run();
       } catch (error) {
+        if (task.kind === 'sync' && error instanceof SourceScopeApprovalRequiredError) {
+          return { status: 'idle', deferred: true, degradedReason: SOURCE_SCOPE_APPROVAL_REQUIRED };
+        }
         if (error instanceof SourceSchedulerTaskDeferral) {
           return {
             status: 'idle', deferred: true, retryAt: error.retryAt,

@@ -70,6 +70,7 @@ import {
   dashboardOperatorPaused,
   dashboardStatus,
   dashboardSubLine,
+  dashboardScopePending,
   dashboardSyncKeepsFailing,
   dashboardWorkingSummary,
   type DashboardStatus,
@@ -269,7 +270,7 @@ export function buildChatGptDashboardViewModel(
     const connecting = connectingFor(definition, card, now);
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...(degraded ? { degradedCredentials: degraded } : {}) });
     const credentials = credentialProblem(scrubbed, degraded);
-    const choosingScope = scopePending(scrubbed);
+    const choosingScope = dashboardScopePending(scrubbed);
     // What an import source's imports need from the person (an import that
     // stopped, a request, held items no model can judge, an unreadable
     // record) is Needs you whatever the progress says, each with its own
@@ -293,7 +294,7 @@ export function buildChatGptDashboardViewModel(
     // A credential problem (a provider refusal, a degraded or expired sign-in)
     // is Needs you whatever the progress or indexing state: its fix is the
     // owner's, never the engine's.
-    let status: DashboardStatus = connecting || credentials || choosingScope || missingScope(scrubbed) ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
+    let status: DashboardStatus = connecting || credentials || missingScope(scrubbed) ? 'Needs you' : dashboardHonestStatus(vocabularyStatus, progress);
     // A source working normally (a stage unfinished, nothing stalled) offers
     // no action: the only fix this page had for it was "Check again", a
     // button over work that needs nothing (owner fresh-install test,
@@ -527,7 +528,7 @@ function withProviderRejection(card: DashboardSourceCard): DashboardSourceCard {
   const schedule = card.schedule;
   if (!schedule || schedule.consecutive_failures <= 0 || schedule.last_error_kind !== 'credential_reauth_required') return card;
   if (schedule.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason)) return card;
-  if (!CONNECTED_STATES.has(card.connection.state) || scopePending(card)) return card;
+  if (!CONNECTED_STATES.has(card.connection.state) || dashboardScopePending(card)) return card;
   if (Date.parse(card.connection.connected_at ?? '') > Date.parse(schedule.last_attempt_at ?? '')) return card;
   return { ...card, connection: { ...card.connection, state: 'reauth_required', label: DASHBOARD_NEEDS_RECONNECT } };
 }
@@ -585,7 +586,7 @@ function sourceEntry(
   // The owner's Sync now press, while it is the latest word, leads the row:
   // "Checking Dropbox…", then what it found. The engine's own words, so the
   // computer's row reads the same (a fresh row's line already says it).
-  const manualLine = connecting ? undefined : dashboardManualSyncLine(card, now);
+  const manualLine = connecting || dashboardScopePending(card) ? undefined : dashboardManualSyncLine(card, now);
   // A Google connection still on the legacy exchange, offered the move to
   // sign-in on the computer (owner, 2026-10-13): only on a quiet row, where
   // nothing more pressing holds the button or the line.
@@ -610,7 +611,7 @@ function sourceEntry(
     ? connecting.fix
     : status === 'Off'
       ? (actionKind === 'none' ? undefined : connectFix(definition))
-      : scopePending(card) || missingScope(card)
+      : dashboardScopePending(card) || missingScope(card)
         ? scopeFix(definition, card)
         : reconnect ?? (late && captureOnly
           ? captureFix(definition, card)
@@ -633,7 +634,7 @@ function sourceEntry(
   // import would write over.
   if (status !== 'Off' && definition.connect_action.kind === 'archive_import'
     && !card.connection.imports_attention?.some((entry) => entry.kind === 'unreadable')) menu.push(connectFix(definition));
-  if (status !== 'Off' && card.scope_selection && !scopePending(card) && !missingScope(card)) {
+  if (status !== 'Off' && card.scope_selection && !dashboardScopePending(card) && !missingScope(card)) {
     const fix = scopeFix(definition, card);
     if (fix) menu.push(fix);
   }
@@ -761,7 +762,7 @@ function attentionItem(
   // A Needs you button never only re-reads the page: with no fix of its
   // own, it opens this source on the computer, where the owner can act.
   const onComputer = checkAgainFix(openOnComputer(definition, 'reconnect'));
-  const fix = scopePending(card) || missingScope(card)
+  const fix = dashboardScopePending(card) || missingScope(card)
     ? scopeFix(definition, card) ?? onComputer
     : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
       ? reconnectFix(definition, card)
@@ -851,7 +852,7 @@ function syncFix(
   // A missing folder does not hide Sync now: the folder may simply be back, and
   // a press is how a person asks the source to look again (it stays in the menu
   // behind the row's own Choose folders).
-  if (scopePending(card) || wantsReconnect(card, status, actionKind, degraded, progress)) return undefined;
+  if (dashboardScopePending(card) || wantsReconnect(card, status, actionKind, degraded, progress)) return undefined;
   return { label: CHATGPT_SETUP_LABELS.syncNow, tool: SYNC_SOURCE_TOOL_NAME, args: { source_id: definition.source_id as ChatGptSyncSourceId } };
 }
 
@@ -989,7 +990,7 @@ function measuredSourceProgress(
   if (missingScope(scrubbed)) {
     return { progress: { stage: 'listing', unit, done: found, total: 0, percent: 0, stalled: true, stalledReason: 'scope_root_missing' }, counts: { found } };
   }
-  if (scopePending(scrubbed)) {
+  if (dashboardScopePending(scrubbed)) {
     return {
       progress: { stage: 'listing', unit, done: 0, total: 0, percent: 0, stalled: true, stalledReason: 'scope_pending' },
       counts: { found: 0 },
@@ -1289,10 +1290,6 @@ function sourceNeed(
 
 function missingScope(card: DashboardSourceCard): boolean {
   return card.schedule?.degraded_reason === 'scope_root_missing' || (card.schedule?.missing_folders?.length ?? 0) > 0;
-}
-
-function scopePending(card: DashboardSourceCard): boolean {
-  return card.scope_selection?.connected === true && card.scope_selection.status === 'scope_pending';
 }
 
 function scopeFix(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard): DashboardFix | undefined {
