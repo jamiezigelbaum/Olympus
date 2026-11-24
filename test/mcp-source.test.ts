@@ -251,7 +251,7 @@ describe('MCP sign-in and tokens', () => {
     expect(fake.tokenIssues).toBe(before + 1);
   });
 
-  test('a refresh failure after 401 needs reconnect', async () => {
+  test('a token endpoint outage after 401 stays retryable, not a reconnect', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
     const store = secretStoreMcpCredentials(memorySecretStore(), 'mcp.test.1');
     await store.write(await (await signIn(fake)).complete('good-code'));
@@ -267,7 +267,9 @@ describe('MCP sign-in and tokens', () => {
     });
     const rejected = session(fake, { fetch: mcpAuthorizedFetch(tokens, fake.url) });
     try {
-      await expect(rejected.open()).rejects.toMatchObject({ kind: 'auth_revoked', dashboardState: 'reconnect_required' });
+      const failure = await rejected.open().then(() => undefined, (error: unknown) => error);
+      expect(failure).toMatchObject({ kind: 'server_error' });
+      expect((failure as { dashboardState?: string }).dashboardState).not.toBe('reconnect_required');
       expect(refreshes).toBe(1);
     } finally {
       await rejected.close();

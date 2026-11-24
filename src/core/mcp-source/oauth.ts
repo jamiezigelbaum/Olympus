@@ -311,8 +311,10 @@ export function mcpAuthorizedFetch(tokens: McpTokenSource, serverUrl: string, ba
       try {
         renewed = await tokens.refresh();
       } catch (error) {
-        if (error instanceof McpSourceError && (error.dashboardState === 'reconnect_required' || error.kind === 'cancelled')) throw error;
-        throw new McpSourceError('auth_revoked', { cause: error });
+        // renew() already says whether the grant is gone; a token endpoint
+        // that is down or unreachable stays retryable, never a reconnect.
+        if (error instanceof McpSourceError) throw error;
+        throw new McpSourceError('server_error', { cause: error });
       }
       response = await send(renewed);
       if (response.status === 401) {
