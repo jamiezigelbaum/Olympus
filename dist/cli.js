@@ -254750,7 +254750,15 @@ function startEngineControlPlane(input) {
     }
     const controller = new AbortController;
     modelCalls.set(id, controller);
-    runAtLocalInferencePriority(priority, () => modelComplete({ ...request, signal: controller.signal })).then((completion) => {
+    let lastProgressMs = -Infinity;
+    const progress = (model) => {
+      const now = Date.now();
+      if (now - lastProgressMs < 1000)
+        return;
+      lastProgressMs = now;
+      send({ type: "model_progress", id, model });
+    };
+    withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...request, signal: controller.signal }))).then((completion) => {
       send({ type: "model_result", id, completion });
     }, (error) => {
       if (error instanceof OperationError)
@@ -254836,6 +254844,7 @@ var CONTROL_INTS = 4, CONTROL_TICK = 0, CONTROL_BIND = 1, CONTROL_STOPPED = 2, C
 var init_control_plane = __esm(() => {
   init_operation_error();
   init_answer_activity();
+  init_model_stream();
   init_snapshot();
   NEVER2 = new Promise(() => {});
 });

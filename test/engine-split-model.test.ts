@@ -123,3 +123,44 @@ test('model progress in the background reaches the front while the completion ru
   expect(await completion).toEqual({ text: 'done', modelId: 'qwen' });
   expect(seen).toEqual(['qwen']);
 });
+
+// The production background serves the command socket from its control
+// thread, and the model runs on the loop: progress crosses that thread
+// boundary by message (PR #1672 review).
+test('model progress crosses the control thread to the front', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { startEngineControlPlane } = await import('../src/workers/engine-split/control-plane.ts');
+  const { createUnixSocketFetch } = await import('../src/core/worker-transport.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-split-progress-'));
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const plane = startEngineControlPlane({
+    socketPath: join(dir, 'engine.sock'),
+    authToken: TOKEN,
+    instanceId: 'background-progress',
+    ledger: new EngineCommandLedger({ instanceId: 'background-progress', handlers: {} }),
+    modelComplete: async () => {
+      noteModelProgress('qwen');
+      await gate;
+      return { text: 'done', modelId: 'qwen' };
+    },
+    onLost: () => {},
+    log: () => {},
+  });
+  expect(plane).toBeDefined();
+  try {
+    plane!.setReady(true);
+    const seen: string[] = [];
+    const completion = await withModelProgress((model) => {
+      seen.push(model);
+      release();
+    }, () => completeModelInBackground(createUnixSocketFetch(join(dir, 'engine.sock')), TOKEN, { system: 's', prompt: 'p', localOnly: true }));
+    expect(completion).toEqual({ text: 'done', modelId: 'qwen' });
+    expect(seen).toEqual(['qwen']);
+  } finally {
+    plane!.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
