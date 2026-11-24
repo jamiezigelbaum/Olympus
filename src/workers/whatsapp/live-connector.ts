@@ -1337,7 +1337,9 @@ function whatsAppSenderMetadata(message: SpoolMessage): Readonly<Record<string, 
   const addresses = [senderId, ...names].map(whatsAppAddressLabel);
   const senderLabel = name ?? addresses.find(label => label?.startsWith('+')) ?? addresses.find(Boolean);
   return {
-    sender: senderLabel,
+    // The raw id stays the sender of last resort, as before 1.5, so an
+    // unchanged message keeps its names hash and is not judged again.
+    sender: senderLabel ?? senderId,
     senderId,
     senderLabel,
     senderIsOwner: message.fromMe,

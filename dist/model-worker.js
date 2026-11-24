@@ -1697,7 +1697,7 @@ async function downloadPinnedFile(options) {
         };
         while (received <= responseEnd && await readNext()) {}
         if (received !== responseEnd + 1)
-          throw new InterruptedTransfer("the response ended before all requested bytes arrived");
+          throw mismatch(`${url} did not match its pinned size; nothing was installed.`);
         retries = 0;
       } catch (cause) {
         if (!(cause instanceof InterruptedTransfer))
@@ -1727,7 +1727,7 @@ async function downloadPinnedFile(options) {
         await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * 2 ** (retries - 1)));
     }
     close();
-    if (received !== expectedBytes || statSync2(partial).size !== expectedBytes || hash.digest(encoding) !== options.digest) {
+    if (received !== expectedBytes || hash.digest(encoding) !== options.digest) {
       throw mismatch(`${url} did not match its pinned checksum; nothing was installed.`);
     }
     renameSync2(partial, target);

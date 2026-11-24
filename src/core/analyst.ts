@@ -662,7 +662,7 @@ function analystSystem(pack: EvidencePack, compact: boolean, notes: AnalystReadi
   return isReadWidePack(pack) ? `${system}\nState reading coverage from Coverage matches: read N of M matching items, with M minus N left out; a + marks a lower bound. In evidence means supplied passages, not every page of a file.` : system;
 }
 
-function withAuthorRule(system: string, pack: EvidencePack): string {
+export function withAuthorRule(system: string, pack: EvidencePack): string {
   return pack.candidates.some(candidate => candidate.provenance.sourceItem.family === 'chat')
     ? `${system}\n${AUTHOR_RULE}`
     : system;

@@ -375,7 +375,8 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     });
     const [item] = await drainItems(connectorFor(dir));
     expect(item?.metadata['chat']).toBe('chat-1@s.whatsapp.net');
-    expect(item?.metadata['sender']).toBeUndefined();
+    // The raw id stays the sender of last resort so an unchanged message keeps its names hash.
+    expect(item?.metadata['sender']).toBe('sender-1@s.whatsapp.net');
     expect(item?.metadata['fromMe']).toBe(true);
     expect(item?.metadata['senderId']).toBe('sender-1@s.whatsapp.net');
     expect(item?.metadata['senderLabel']).toBeUndefined();

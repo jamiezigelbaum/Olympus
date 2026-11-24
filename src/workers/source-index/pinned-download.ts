@@ -156,7 +156,7 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
         // The pinned count and digest prove completion. A server that has sent
         // the entire range may still leave the response open indefinitely.
         while (received <= responseEnd && await readNext()) { /* consume and release one chunk at a time */ }
-        if (received !== responseEnd + 1) throw new InterruptedTransfer('the response ended before all requested bytes arrived');
+        if (received !== responseEnd + 1) throw mismatch(`${url} did not match its pinned size; nothing was installed.`);
         retries = 0;
       } catch (cause) {
         if (!(cause instanceof InterruptedTransfer)) throw cause;
@@ -179,7 +179,7 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
       if (retry) await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * 2 ** (retries - 1)));
     }
     close();
-    if (received !== expectedBytes || statSync(partial).size !== expectedBytes || hash.digest(encoding) !== options.digest) {
+    if (received !== expectedBytes || hash.digest(encoding) !== options.digest) {
       throw mismatch(`${url} did not match its pinned checksum; nothing was installed.`);
     }
     renameSync(partial, target);
