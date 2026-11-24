@@ -258179,6 +258179,8 @@ function createLocalPrivateRoute(input) {
   const seenUp = new Set;
   return async () => {
     let member;
+    if (input.privateRouteDisabled?.() === true)
+      return;
     try {
       member = input.firstMember();
     } catch (error) {
@@ -283601,6 +283603,7 @@ ${key}`;
     const defaultLocalAnalyst = sovereigntyAnalysts.get("local-source-answer")?.analyst ?? defaultLocal;
     const usesDefaultLocal = (id) => sovereigntyEngine.source === "env_bridge" && id === "local-source-answer";
     localPrivateRoute = createLocalPrivateRoute({
+      privateRouteDisabled: () => sovereigntyEngine.config.routes.secure_local?.mode === "disabled",
       firstMember: () => {
         const pool = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" });
         return (pool.explicitOrder ?? pool.members)[0];

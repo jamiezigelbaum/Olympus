@@ -556,6 +556,11 @@ export function createLocalPrivateRoute(input: {
   window: (modelId: string, baseUrl: string | undefined, member: SovereigntyResolvedProfile) => Promise<{ windowTokens: number } | undefined>;
   /** Whether the built-in model is this member's stand-in (the owner set up no other local model). */
   builtInStandsIn?: (member: SovereigntyResolvedProfile) => boolean;
+  /**
+   * The owner's policy has no Private answer route (secure_local disabled).
+   * That is a choice, not a failure: there is no private model to choose.
+   */
+  privateRouteDisabled?: () => boolean;
   now?: () => number;
   /** Where a failed step is said (default: stderr). Ids and reasons only. */
   log?: (line: string) => void;
@@ -569,6 +574,7 @@ export function createLocalPrivateRoute(input: {
   const seenUp = new Set<string>();
   return async () => {
     let member: SovereigntyResolvedProfile | undefined;
+    if (input.privateRouteDisabled?.() === true) return undefined;
     try { member = input.firstMember(); } catch (error) {
       // The Private pool cannot be read: fail closed, never the built-in model.
       log(`[private-model] pool unreadable reason=${error instanceof Error ? error.name : 'unknown'}`);
