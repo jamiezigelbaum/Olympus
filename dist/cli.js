@@ -116132,13 +116132,13 @@ async function readPrivateEvidenceItem(input) {
   const provider = lanes.contentProviders[corpusId];
   if (!provider)
     return;
-  const content = await provider.fetchLocalContent({
+  const content = await withCachedKeywordExpansion({ missing: false }, () => provider.fetchLocalContent({
     provenance,
     trustDomain,
     maxChars: Math.max(1, Math.floor(input.maxChars)),
     query: input.question,
     maxPassages: PRIVATE_DEPTH_MAX_PASSAGES
-  });
+  }));
   if (!content || content.namesOnly || content.contentPrivate)
     return;
   return content.chunks;
