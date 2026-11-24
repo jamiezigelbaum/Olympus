@@ -26,6 +26,7 @@ import { privateEvidence } from '../src/workers/chatgpt/private-answer-model.ts'
 import type { PrivateEvidenceItem } from '../src/workers/chatgpt/private-answer-contract.ts';
 import { readPrivateEvidenceItem, searchPrivateEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import type { AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
+import { cachedKeywordExpansion } from '../src/core/source-index/keyword-context.ts';
 
 const ACCOUNT = 'personal';
 const CORPUS_ID = 'secure_local.fixture.files';
@@ -147,6 +148,28 @@ describe('reading one Private item in depth', () => {
       expect(await read({ trustDomain: 'internal' })).toBeUndefined();
       expect(await read({})).toBeDefined();
     });
+  });
+});
+
+// 1.5 test-mac canary, 24 Nov 2026: re-reading a found item waited on the
+// local model's keyword translation, which reported progress to nobody, and the
+// private answer's no-progress clock stopped it before its model call.
+test('re-reading a found Private item never waits on a keyword translation', async () => {
+  await withStore(async (store) => {
+    const found = await searchPrivateEvidence({ lanes: lanesFor(store), question: QUESTION, maxCharsPerCandidate: LIVE_ITEM_SHARE });
+    const item = found.candidates[0]! as unknown as Record<string, unknown>;
+    const scopes: Array<ReturnType<typeof cachedKeywordExpansion>> = [];
+    const lanes = () => {
+      const real = lanesFor(store)();
+      const provider = real.contentProviders[CORPUS_ID]!;
+      return { ...real, contentProviders: { [CORPUS_ID]: { ...provider, fetchLocalContent: (request: Parameters<typeof provider.fetchLocalContent>[0]) => {
+        scopes.push(cachedKeywordExpansion());
+        return provider.fetchLocalContent(request);
+      } } } } as unknown as AnalystAnswerLanes;
+    };
+    expect(await readPrivateEvidenceItem({ lanes, item, question: QUESTION, maxChars: 5_000 })).toBeDefined();
+    expect(scopes).toHaveLength(1);
+    expect(scopes[0]).toBeDefined();
   });
 });
 

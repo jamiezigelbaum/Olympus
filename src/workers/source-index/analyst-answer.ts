@@ -3875,14 +3875,20 @@ export async function readPrivateEvidenceItem(input: {
   if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain) return undefined;
   const provider = lanes.contentProviders[corpusId];
   if (!provider) return undefined;
-  const content = await provider.fetchLocalContent({
+  // The search that found this item already translated the question's
+  // keywords. Re-reading it never waits on the local model for them: that wait
+  // shared the model's one slot, reported its progress to nobody, and the
+  // private answer's no-progress clock stopped the answer before its model
+  // call (1.5 test-mac canary, 24 Nov 2026). A finished translation is used; a
+  // missing one only changes which passages lead.
+  const content = await withCachedKeywordExpansion({ missing: false }, () => provider.fetchLocalContent({
     provenance,
     trustDomain,
     maxChars: Math.max(1, Math.floor(input.maxChars)),
     query: input.question,
     // In depth: as many of the item's passages as the budget holds.
     maxPassages: PRIVATE_DEPTH_MAX_PASSAGES,
-  });
+  }));
   if (!content || content.namesOnly || content.contentPrivate) return undefined;
   return content.chunks;
 }
