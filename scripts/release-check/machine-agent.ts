@@ -796,9 +796,14 @@ async function mcpCall(tool: string, rawArgs: string): Promise<never> {
 // The owner-socket bridge: what an owner-authenticated socket forward does for a browser
 
 function startBridge(port: number): () => void {
+  return openBridge(port).stop;
+}
+
+/** The bridge, and the port it took: 0 asks for any free loopback port. */
+function openBridge(port: number): { stop: () => void; port: number } {
   const p = platform();
   // macOS: the engine already listens on the loopback port the browser and the smoke use, so there is nothing to forward.
-  if (p.socketPath === undefined) return () => undefined;
+  if (p.socketPath === undefined) return { stop: () => undefined, port };
   type Upstream = { write(data: Uint8Array): number; end(): void };
   const listen = () => Bun.listen<{ upstream?: Upstream; queue: Uint8Array[]; closed: boolean }>({
     hostname: '127.0.0.1',
@@ -841,7 +846,7 @@ function startBridge(port: number): () => void {
     if (pidAlive(stale)) { try { process.kill(stale, 'SIGKILL'); } catch { /* gone */ } Bun.sleepSync(200); }
     server = listen();
   }
-  return () => server.stop(true);
+  return { stop: () => server.stop(true), port: server.port };
 }
 
 const pidAlive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -912,7 +917,11 @@ async function smokeQuestions(questions: readonly SmokeQuestionIn[], config: {
   privateFacts?: Readonly<Record<string, readonly string[]>>;
   canaryQuestions?: readonly ClientQuestion[];
 }) {
-  const stopBridge = startBridge(config.enginePort);
+  // On an installed Linux machine Olympus itself can serve the loopback port, so the smoke's owner-socket bridge takes any
+  // free port instead of failing to listen.
+  let bridge: { stop: () => void; port: number };
+  try { bridge = openBridge(config.enginePort); } catch { bridge = openBridge(0); }
+  const stopBridge = bridge.stop;
   const observed: Array<{ id: string; obs: SmokeObservation }> = [];
   const printed: string[] = [];
   const realLog = console.log;
@@ -923,7 +932,7 @@ async function smokeQuestions(questions: readonly SmokeQuestionIn[], config: {
   const startedAt = Date.now();
   /** What each Private question looked like on each attempt: panel state and which fixed note, never text. */
   const attempts: Record<string, Array<{ panelState: string | null; noteKind: string | null; atS: number }>> = {};
-  const engine = `http://127.0.0.1:${config.enginePort}`;
+  const engine = `http://127.0.0.1:${bridge.port}`;
   // The owner approves the smoke client as the owner does: with the dashboard session open, which on a Mac is the
   // approval's owner proof (#1186). Minted once, for the approval page's own origin.
   let ownerCookie: string | undefined;
