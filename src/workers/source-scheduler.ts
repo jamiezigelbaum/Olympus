@@ -1489,7 +1489,13 @@ export class SourceScheduler {
             try {
               refreshedOAuth = await oauth.refresh();
             } catch (refreshError) {
-              if (isCredentialRefreshBusyError(refreshError)) throw refreshError;
+              // Only a terminal answer needs the owner. A rate limit or a lost
+              // answer (credential_refresh_failed) keeps the grant and retries
+              // on the normal schedule; repeated failures still surface.
+              if (!(refreshError instanceof CredentialBrokerError)
+                || (refreshError.code !== 'credential_reauth_required' && refreshError.code !== 'credential_missing')) {
+                throw refreshError;
+              }
               await oauth.requireReconnect();
               throw reconnectTaskFailure();
             }

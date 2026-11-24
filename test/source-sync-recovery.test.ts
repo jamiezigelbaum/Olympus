@@ -211,6 +211,13 @@ for (const outcome of ['recovered', 'refresh-failed', 'still-rejected'] as const
         const cached = broker.issueSession(request);
         markConnectedHandleReauthRequired(handleId, f.registryPath, f.clock.date());
         await expect(cached).rejects.toMatchObject({ code: 'credential_reauth_required' });
+      } else if (outcome === 'refresh-failed') {
+        // A token endpoint that is down or rate limited keeps the grant: the
+        // sync fails once and retries on its schedule, with no sign-in asked.
+        expect(task.consecutive_failures).toBe(1);
+        expect(task.last_error_kind).not.toBe('credential_reauth_required');
+        expect(Date.parse(task.next_run_at!)).toBeGreaterThan(f.clock.now());
+        expect(connectedOAuthStatuses('gmail', f.registryPath)[0]?.status).toBe('connected');
       } else {
         expect(task).toMatchObject({ consecutive_failures: 1, last_error_kind: 'credential_reauth_required' });
         expect(Date.parse(task.next_run_at!)).toBeGreaterThan(f.clock.now());

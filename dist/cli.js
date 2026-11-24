@@ -234907,8 +234907,9 @@ ${request.taskId}`);
             try {
               refreshedOAuth = await oauth.refresh();
             } catch (refreshError) {
-              if (isCredentialRefreshBusyError(refreshError))
+              if (!(refreshError instanceof CredentialBrokerError) || refreshError.code !== "credential_reauth_required" && refreshError.code !== "credential_missing") {
                 throw refreshError;
+              }
               await oauth.requireReconnect();
               throw reconnectTaskFailure();
             }
