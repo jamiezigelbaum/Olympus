@@ -575,7 +575,35 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         const said = await panel<string>(pick, (value) => typeof value === 'string' && value.startsWith('{'))
           ?? await panel<string>(pick, (value) => typeof value === 'string');
         if (!said?.startsWith('{')) throw new Error(`answer model could not be changed: ${said ?? 'no Privacy settings page'}`);
-        return JSON.parse(said) as { provider: string; from: string; to: string };
+        const change = JSON.parse(said) as { provider: string; from: string; to: string };
+        // A locked dashboard refuses the save until "Unlock on this computer" is pressed, as a person would press it.
+        let unlocked = 0;
+        let quietSince = Date.now();
+        await until(async () => {
+          if (await panel<boolean>(`(() => {const e=document.querySelector('[data-unlock-here]'); if(e && !e.disabled && (${visible})(e)){e.click();return true;}return false;})()`, Boolean)) {
+            unlocked += 1;
+            quietSince = Date.now();
+          }
+          return Date.now() - quietSince >= 5_000;
+        }, 'the answer model save waited on an unlock', 30_000).catch(() => undefined);
+        // The change counts only once a fresh page shows it saved; a refused save must fail here, not read as a restart miss.
+        const savedNow = `(() => {
+          const c=${JSON.stringify(change)};
+          if (c.provider==='judge') { const j=document.querySelector('form[data-judge-choice]:not([data-first-run-judge])'); return j?.dataset.judgeCurrent || [...(j?.querySelectorAll('input[name=choice]')??[])].find(r=>r.checked)?.value || ''; }
+          const f=[...document.querySelectorAll('form[data-model-choice]')].find(f=>f.querySelector('input[name=provider]')?.value===c.provider);
+          return [...(f?.querySelectorAll('input[name=model][type=radio]')??[])].find(r=>r.checked)?.value || '';
+        })()`;
+        let shown = '';
+        try {
+          await until(async () => {
+            await reload('/dashboard?keys', `!!document.querySelector('form[data-model-choice], form[data-judge-choice]')`);
+            shown = await panel<string>(savedNow, (value) => typeof value === 'string') ?? '';
+            return shown === change.to;
+          }, 'answer model save', 60_000);
+        } catch {
+          throw new Error(`answer model save did not land: wanted ${change.provider} ${change.to}, the page shows ${shown || 'nothing'} (unlock pressed ${unlocked}x)`);
+        }
+        return change;
       },
       close: cleanup,
     };
