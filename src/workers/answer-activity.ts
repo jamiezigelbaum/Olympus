@@ -43,9 +43,8 @@ export function currentLocalInferencePriority(): LocalInferencePriority {
  * forwarding a completion): async context does not cross the socket.
  */
 export function runAtLocalInferencePriority<T>(priority: LocalInferencePriority, work: () => Promise<T>): Promise<T> {
-  if (priority === 'background') return runBackgroundInference(work);
-  if (priority === 'maintenance') return runClassificationInference(work);
-  return work();
+  localInferencePriority ??= new AsyncLocalStorage();
+  return localInferencePriority.run(priority, work);
 }
 
 /**
@@ -201,13 +200,29 @@ export function localModelResourceKey(profile: { baseUrl?: string; model?: strin
   return `${profile.baseUrl?.replace(/\/+$/, '') ?? ''}\u0000${profile.model ?? ''}`;
 }
 
-export function createLocalModelActivity() {
-  const queues = new Map<string, { running: number[]; tasks: Array<{ priority: number; limit: number; queuedAt: number; progress?: (model: string) => void; run: () => Promise<void> }> }>();
+export class LocalModelPreempted extends DOMException {
+  constructor() {
+    super('The local model yielded to an owner call.', 'AbortError');
+  }
+}
+
+interface LocalModelTask {
+  priority: number;
+  limit: number;
+  queuedAt: number;
+  preemption?: AbortController;
+  progress?: (model: string) => void;
+  run: () => Promise<void>;
+}
+
+/** Single-slot resources admit only one call and cancel lower-priority work for the owner. */
+export function createLocalModelActivity({ singleSlotResources = [] }: { singleSlotResources?: readonly string[] } = {}) {
+  const queues = new Map<string, { running: LocalModelTask[]; tasks: LocalModelTask[] }>();
   // `limit` is how many calls on this resource may run alongside this one. The
   // next task in owner-first order starts only while fewer run than its own
   // limit and the limit of every call already running, so an owner call
   // (limit 1) always runs alone.
-  const dispatch = <T>(key: string, work: () => Promise<T>, limit = 1): Promise<T> => new Promise((resolve, reject) => {
+  const dispatch = <T>(key: string, work: (preempted?: AbortSignal) => Promise<T>, limit: number): Promise<T> => new Promise((resolve, reject) => {
     let queue = queues.get(key);
     if (!queue) { queue = { running: [], tasks: [] }; queues.set(key, queue); }
     const pending = queue;
@@ -219,19 +234,15 @@ export function createLocalModelActivity() {
         // The owner's own calls still go first.
         const rank = (task: { priority: number; queuedAt: number }) => task.priority === 2 && now - task.queuedAt >= MAINTENANCE_AGING_MS ? 1 : task.priority;
         const first = pending.tasks.reduce((best, task, index) => rank(task) < rank(pending.tasks[best]!) ? index : best, 0);
-        if (pending.running.length >= Math.min(pending.tasks[first]!.limit, ...pending.running)) return;
+        if (pending.running.length >= Math.min(pending.tasks[first]!.limit, ...pending.running.map(task => task.limit))) return;
         const next = pending.tasks.splice(first, 1)[0]!;
-        pending.running.push(next.limit);
-        void next.run().finally(() => { pending.running.splice(pending.running.indexOf(next.limit), 1); pump(); });
+        pending.running.push(next);
+        void next.run().finally(() => { pending.running.splice(pending.running.indexOf(next), 1); pump(); });
       }
     };
-    const kind = localInferencePriority?.getStore() ?? 'owner';
-    // An owner call that must wait for a busy resource preempts at once, not
-    // when its own call starts: a classification call already running would
-    // otherwise finish first, 30-100 s on a 4-core CPU (#1033). Preempting
-    // cancels it (llama-server stops a cancelled prompt within a 64-token
-    // batch) and no new one starts ahead of this call (owner-first order).
-    if (kind === 'owner' && pending.running.length > 0) notifyBusy(key);
+    const kind = currentLocalInferencePriority();
+    const singleSlot = singleSlotResources.includes(key);
+    const preemption = singleSlot && kind !== 'owner' ? new AbortController() : undefined;
     // A queued call starts from whatever call freed the slot, so it carries
     // its own model clocks with it (otherwise its output refreshed the clocks
     // of the call before it). And a call waiting for the slot is waiting on
@@ -246,10 +257,27 @@ export function createLocalModelActivity() {
       progress?.(model);
       for (const task of pending.tasks) task.progress?.(model);
     };
-    pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 1 : localInferencePriority?.getStore() === 'maintenance' ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), ...(progress ? { progress } : {}), run: async () => {
-      const leased = () => runWithModelProgress(shared, () => lease(key, work));
-      try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, leased) : leased())); } catch (error) { reject(error); }
-    } });
+    pending.tasks.push({
+      priority: kind === 'owner' ? 0 : kind === 'background' ? 1 : 2,
+      limit: singleSlot ? 1 : Math.max(1, Math.floor(limit)),
+      queuedAt: Date.now(),
+      ...(preemption ? { preemption } : {}),
+      ...(progress ? { progress } : {}),
+      run: async () => {
+        const leased = () => runWithModelProgress(shared, () => lease(key, () => work(preemption?.signal)));
+        try {
+          resolve(await runAtLocalInferencePriority(kind, leased));
+        } catch (error) {
+          reject(preemption?.signal.aborted ? preemption.signal.reason : error);
+        }
+      },
+    });
+    if (kind === 'owner' && pending.running.length > 0) {
+      // Close the running lower-priority request at the slot. The owner is
+      // already queued and starts first once the canceled request unwinds.
+      for (const task of pending.running) task.preemption?.abort(new LocalModelPreempted());
+      notifyBusy(key);
+    }
     // Gather simultaneous dispatches before choosing owner-first.
     queueMicrotask(pump);
   });
@@ -303,31 +331,33 @@ export function createLocalModelActivity() {
     // `tag` names the caller's own calls, so `busyExcept` can tell whether
     // anyone else holds the resource (a caller never yields to itself).
     track<T extends import('../core/analyst.ts').AnalystModel & { prepareSniffer?(signal?: AbortSignal): Promise<void> }>(key: string, model: T, options: { serialize?: boolean; concurrency?: number; tag?: string } = {}): T {
-      const coordinate = <R>(work: () => Promise<R>, signal?: AbortSignal, limit = options.concurrency ?? 1): Promise<R> => {
+      const coordinate = <R>(work: (signal?: AbortSignal) => Promise<R>, signal?: AbortSignal, limit = options.concurrency ?? 1): Promise<R> => {
+        if (signal?.aborted) return Promise.reject(signal.reason);
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? <V>(work: () => Promise<V>) => lease(key, work) :<V>(work: () => Promise<V>) => dispatch(key, work, limit);
-        return run(async () => {
+        const checked = async (preempted?: AbortSignal): Promise<R> => {
+          const active = signal && preempted ? AbortSignal.any([signal, preempted]) : signal ?? preempted;
           const tagKey = options.tag === undefined ? undefined : `${key}\u0000${options.tag}`;
           if (tagKey !== undefined) taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
           try {
-            signal?.throwIfAborted();
+            active?.throwIfAborted();
             for (const guard of guards) {
               try { await guard(); } catch (error) {
-                signal?.throwIfAborted();
+                active?.throwIfAborted();
                 throw error;
               }
             }
-            signal?.throwIfAborted();
-            return await work();
+            active?.throwIfAborted();
+            return await work(active);
           } finally {
             if (tagKey !== undefined) taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1);
           }
-        });
+        };
+        return options.serialize === false ? lease(key, checked) : dispatch(key, checked, limit);
       };
       return { ...model,
         // Probes and priming use the same slot as completions, exclusively.
-        ...(model.prepareSniffer ? { prepareSniffer: (signal?: AbortSignal) => coordinate(() => model.prepareSniffer!(signal), signal, 1) } : {}),
-        complete: request => coordinate(() => model.complete(request), request.signal),
+        ...(model.prepareSniffer ? { prepareSniffer: (signal?: AbortSignal) => coordinate(active => model.prepareSniffer!(active), signal, 1) } : {}),
+        complete: request => coordinate(active => model.complete(active && active !== request.signal ? { ...request, signal: active } : request), request.signal),
       };
     },
   };

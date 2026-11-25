@@ -66041,11 +66041,8 @@ function currentLocalInferencePriority() {
   return localInferencePriority?.getStore() ?? "owner";
 }
 function runAtLocalInferencePriority(priority, work) {
-  if (priority === "background")
-    return runBackgroundInference(work);
-  if (priority === "maintenance")
-    return runClassificationInference(work);
-  return work();
+  localInferencePriority ??= new AsyncLocalStorage13;
+  return localInferencePriority.run(priority, work);
 }
 function createAnswerActivity(onBusy, options = {}) {
   const maxLeaseMs = options.maxLeaseMs ?? DEFAULT_ANSWER_LEASE_MS;
@@ -66144,9 +66141,9 @@ function createAnswerActivity(onBusy, options = {}) {
 function localModelResourceKey(profile) {
   return `${profile.baseUrl?.replace(/\/+$/, "") ?? ""}\x00${profile.model ?? ""}`;
 }
-function createLocalModelActivity() {
+function createLocalModelActivity({ singleSlotResources = [] } = {}) {
   const queues = new Map;
-  const dispatch = (key, work, limit = 1) => new Promise((resolve, reject) => {
+  const dispatch = (key, work, limit) => new Promise((resolve, reject) => {
     let queue = queues.get(key);
     if (!queue) {
       queue = { running: [], tasks: [] };
@@ -66158,33 +66155,45 @@ function createLocalModelActivity() {
         const now = Date.now();
         const rank = (task) => task.priority === 2 && now - task.queuedAt >= MAINTENANCE_AGING_MS ? 1 : task.priority;
         const first = pending.tasks.reduce((best, task, index) => rank(task) < rank(pending.tasks[best]) ? index : best, 0);
-        if (pending.running.length >= Math.min(pending.tasks[first].limit, ...pending.running))
+        if (pending.running.length >= Math.min(pending.tasks[first].limit, ...pending.running.map((task) => task.limit)))
           return;
         const next = pending.tasks.splice(first, 1)[0];
-        pending.running.push(next.limit);
+        pending.running.push(next);
         next.run().finally(() => {
-          pending.running.splice(pending.running.indexOf(next.limit), 1);
+          pending.running.splice(pending.running.indexOf(next), 1);
           pump();
         });
       }
     };
-    const kind = localInferencePriority?.getStore() ?? "owner";
-    if (kind === "owner" && pending.running.length > 0)
-      notifyBusy(key);
+    const kind = currentLocalInferencePriority();
+    const singleSlot = singleSlotResources.includes(key);
+    const preemption = singleSlot && kind !== "owner" ? new AbortController : undefined;
     const progress = currentModelProgress();
     const shared = (model) => {
       progress?.(model);
       for (const task of pending.tasks)
         task.progress?.(model);
     };
-    pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 1 : localInferencePriority?.getStore() === "maintenance" ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), ...progress ? { progress } : {}, run: async () => {
-      const leased = () => runWithModelProgress(shared, () => lease(key, work));
-      try {
-        resolve(await (localInferencePriority ? localInferencePriority.run(kind, leased) : leased()));
-      } catch (error) {
-        reject(error);
+    pending.tasks.push({
+      priority: kind === "owner" ? 0 : kind === "background" ? 1 : 2,
+      limit: singleSlot ? 1 : Math.max(1, Math.floor(limit)),
+      queuedAt: Date.now(),
+      ...preemption ? { preemption } : {},
+      ...progress ? { progress } : {},
+      run: async () => {
+        const leased = () => runWithModelProgress(shared, () => lease(key, () => work(preemption?.signal)));
+        try {
+          resolve(await runAtLocalInferencePriority(kind, leased));
+        } catch (error) {
+          reject(preemption?.signal.aborted ? preemption.signal.reason : error);
+        }
       }
-    } });
+    });
+    if (kind === "owner" && pending.running.length > 0) {
+      for (const task of pending.running)
+        task.preemption?.abort(new LocalModelPreempted);
+      notifyBusy(key);
+    }
     queueMicrotask(pump);
   });
   const taggedRunning = new Map;
@@ -66237,42 +66246,50 @@ function createLocalModelActivity() {
     onIdle: (key, listener) => get(key).onInteractiveIdle(listener),
     track(key, model, options = {}) {
       const coordinate = (work, signal, limit = options.concurrency ?? 1) => {
+        if (signal?.aborted)
+          return Promise.reject(signal.reason);
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? (work) => lease(key, work) : (work) => dispatch(key, work, limit);
-        return run(async () => {
+        const checked = async (preempted) => {
+          const active = signal && preempted ? AbortSignal.any([signal, preempted]) : signal ?? preempted;
           const tagKey = options.tag === undefined ? undefined : `${key}\x00${options.tag}`;
           if (tagKey !== undefined)
             taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
           try {
-            signal?.throwIfAborted();
+            active?.throwIfAborted();
             for (const guard of guards) {
               try {
                 await guard();
               } catch (error) {
-                signal?.throwIfAborted();
+                active?.throwIfAborted();
                 throw error;
               }
             }
-            signal?.throwIfAborted();
-            return await work();
+            active?.throwIfAborted();
+            return await work(active);
           } finally {
             if (tagKey !== undefined)
               taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1);
           }
-        });
+        };
+        return options.serialize === false ? lease(key, checked) : dispatch(key, checked, limit);
       };
       return {
         ...model,
-        ...model.prepareSniffer ? { prepareSniffer: (signal) => coordinate(() => model.prepareSniffer(signal), signal, 1) } : {},
-        complete: (request) => coordinate(() => model.complete(request), request.signal)
+        ...model.prepareSniffer ? { prepareSniffer: (signal) => coordinate((active) => model.prepareSniffer(active), signal, 1) } : {},
+        complete: (request) => coordinate((active) => model.complete(active && active !== request.signal ? { ...request, signal: active } : request), request.signal)
       };
     }
   };
 }
-var localInferencePriority, privacyReleaseInference, localInferenceGuards, DEFAULT_ANSWER_LEASE_MS, MAINTENANCE_AGING_MS = 60000;
+var localInferencePriority, privacyReleaseInference, localInferenceGuards, DEFAULT_ANSWER_LEASE_MS, MAINTENANCE_AGING_MS = 60000, LocalModelPreempted;
 var init_answer_activity = __esm(() => {
   init_model_stream();
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+  LocalModelPreempted = class LocalModelPreempted extends DOMException {
+    constructor() {
+      super("The local model yielded to an owner call.", "AbortError");
+    }
+  };
 });
 
 // src/workers/dashboard/backup-paths.ts
@@ -173212,6 +173229,8 @@ async function prepareSnifferModel(options) {
       await options.model.prepareSniffer?.(options.signal);
     });
   } catch (error) {
+    if (error instanceof LocalModelPreempted)
+      return "aborted";
     const reason = stopped();
     if (reason)
       return reason;
@@ -173655,7 +173674,7 @@ async function runSnifferPass(options) {
             report.stoppedBy = "cloud_stopped";
             return;
           }
-          if (options.signal?.aborted) {
+          if (options.signal?.aborted || error instanceof LocalModelPreempted) {
             report.stoppedBy = "preempted";
             return;
           }
@@ -281568,7 +281587,9 @@ async function main() {
   const bootSecretResolver = new WorkerBootSecretResolver({
     resolveSecretRefValueSync: (secretRef, env) => resolveSecretRefValueSync(secretRef, { env })
   });
-  const localModelActivity = createLocalModelActivity();
+  const localModelActivity = createLocalModelActivity({
+    singleSlotResources: engineFront ? [] : [BUILT_IN_ANALYST_NAME]
+  });
   applyBuiltInModelChoice(sovereigntyEngine, process.env);
   const workerBuiltInModel = !builtInModelWanted(sovereigntyEngine, process.env) ? undefined : createWorkerSharedBuiltInModel(process.env, engineFront ? {
     complete: (request) => engineFront.completeModel(request),
@@ -281579,7 +281600,8 @@ async function main() {
       });
     }
   } : undefined);
-  const answerBuiltInModel = workerBuiltInModel ? localModelActivity.track("built_in", workerBuiltInModel.model) : undefined;
+  const builtInProvider = workerBuiltInModel?.model;
+  const answerBuiltInModel = builtInProvider ? localModelActivity.track(BUILT_IN_ANALYST_NAME, builtInProvider, { serialize: !engineFront }) : undefined;
   let localPrivateRoute;
   registerOwnerKeywordModel(async () => {
     const route = await localPrivateRoute?.();
@@ -281587,10 +281609,12 @@ async function main() {
       return;
     return "unavailable" in route ? "unavailable" : route.model;
   });
-  const servingModelPid = workerBuiltInModel?.model.servingPid;
-  registerBuiltInPrivateModel(workerBuiltInModel ? {
+  const servingModelPid = builtInProvider?.servingPid;
+  const builtInSpec = builtInProvider?.spec;
+  registerBuiltInPrivateModel(workerBuiltInModel && answerBuiltInModel && builtInSpec ? {
     ...workerBuiltInModel,
-    cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`,
+    model: answerBuiltInModel,
+    cacheModelId: `${builtInSpec.modelId}:${builtInSpec.revision}:${builtInSpec.file.sha256}`,
     serverReady: () => servingModelPid?.() !== undefined
   } : undefined);
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
@@ -285734,8 +285758,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         modelId: snifferLane.modelId,
         promptVersion: snifferPromptVersions(privacyOwnerWords()).approval
       }, { builtInDefault: snifferRuntime.source === "built_in" });
+      const model = snifferResource ? localModelActivity.track(snifferResource, snifferModel, {
+        serialize: !engineFront || snifferResource !== BUILT_IN_ANALYST_NAME
+      }) : snifferModel;
       return { lane: snifferLane, approved, model: {
-        complete: (request) => runClassificationInference(() => (snifferResource ? localModelActivity.track(snifferResource, snifferModel) : snifferModel).complete(request))
+        complete: (request) => runClassificationInference(() => model.complete(request))
       } };
     } }),
     pendingClassificationCount,
@@ -286254,11 +286281,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     reclaimStore: (store, work) => sourceScheduler ? sourceScheduler.withIdleTasks(work, { quietForMs: store.reclaimQuietWindowMs(), preempt: () => store.preemptReclaim() }) : work()
   });
   const snifferEnv = tierSnifferServiceEnv(process.env);
-  const rawSnifferModel = !snifferEnv.enabled || snifferRuntime.source === "off" ? undefined : snifferRuntime.source === "built_in" ? snifferRuntime.builtIn.model : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeWrapFetch: (fetch2) => judgeSpending.fetch(fetch2, undefined, "tinfoil"), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {} });
+  const rawSnifferModel = !snifferEnv.enabled || snifferRuntime.source === "off" ? undefined : snifferRuntime.source === "built_in" ? builtInProvider : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeWrapFetch: (fetch2) => judgeSpending.fetch(fetch2, undefined, "tinfoil"), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {} });
   snifferModelBuilt = rawSnifferModel !== undefined;
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
   const snifferModel = rawSnifferModel && snifferLane?.kind === "local" ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
-  const snifferResource = snifferRuntime.source === "built_in" ? "built_in" : snifferLane?.kind === "local" ? localModelResourceKey(snifferLane.profile) : undefined;
+  const snifferResource = snifferRuntime.source === "built_in" ? BUILT_IN_ANALYST_NAME : snifferLane?.kind === "local" ? localModelResourceKey(snifferLane.profile) : undefined;
   const judgeChoice = judgeSpending.status();
   const secondRoundVenice = !engineFront && snifferModel && snifferLane?.kind === "local" && judgeChoice.choice === "local-then-venice" && judgeChoice.stop !== "storage" && cloudJudgeRuntime.source !== "off" && isClassifierApproved((await readClassificationLedger(resolveClassificationLedgerPath(process.env))).entries, {
     lane: cloudJudgeRuntime.lane.kind,
@@ -286342,7 +286369,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
   }
-  if (engineFront && snifferResource) {
+  if (engineFront && snifferResource && snifferResource !== BUILT_IN_ANALYST_NAME) {
     const relay = engineFront.ownerBusy;
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));

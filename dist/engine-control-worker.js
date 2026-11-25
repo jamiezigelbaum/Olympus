@@ -590,24 +590,12 @@ function currentModelProgress() {
 
 // src/workers/answer-activity.ts
 var localInferencePriority;
-var privacyReleaseInference;
-function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage5;
-  return localInferencePriority.run("background", work);
-}
-function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage5;
-  return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
-}
 function currentLocalInferencePriority() {
   return localInferencePriority?.getStore() ?? "owner";
 }
 function runAtLocalInferencePriority(priority, work) {
-  if (priority === "background")
-    return runBackgroundInference(work);
-  if (priority === "maintenance")
-    return runClassificationInference(work);
-  return work();
+  localInferencePriority ??= new AsyncLocalStorage5;
+  return localInferencePriority.run(priority, work);
 }
 var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 

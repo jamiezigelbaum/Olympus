@@ -14,7 +14,7 @@
     "src/workers/engine/runtime/judging-models.ts": 6,
     "src/workers/engine/runtime/local-private-answers.ts": 1,
     "src/workers/engine/runtime/model-choices-backend.ts": 2,
-    "src/workers/engine/server.ts": 42,
+    "src/workers/engine/server.ts": 39,
     "src/workers/source-index/analyst-answer.ts": 1,
     "src/workers/source-index/local-analyst-window.ts": 1
   }

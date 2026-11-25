@@ -3,13 +3,18 @@
 // socket (switch-on Mac check, 2026-11-12: a second server in the front made
 // a private answer miss its deadline). This test runs both ends in-process.
 import { AsyncResource } from 'node:async_hooks';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { expect, test } from 'bun:test';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import { noteModelProgress, withModelProgress } from '../src/core/model-stream.ts';
+import { createUnixSocketFetch } from '../src/core/worker-transport.ts';
 import { createEngineCommandHandler, EngineCommandLedger, parseEngineCommandEnvelope } from '../src/workers/engine-split/commands.ts';
+import { startEngineControlPlane } from '../src/workers/engine-split/control-plane.ts';
 import { completeModelInBackground, createEngineFront } from '../src/workers/engine-split/runtime.ts';
-import { currentLocalInferencePriority, runBackgroundInference, runClassificationInference } from '../src/workers/answer-activity.ts';
+import { createLocalModelActivity, currentLocalInferencePriority, runBackgroundInference, runClassificationInference } from '../src/workers/answer-activity.ts';
 
 const TOKEN = 'engine-split-model-token';
 
@@ -128,11 +133,6 @@ test('model progress in the background reaches the front while the completion ru
 // thread, and the model runs on the loop: progress crosses that thread
 // boundary by message (PR #1672 review).
 test('model progress crosses the control thread to the front', async () => {
-  const { mkdtempSync, rmSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
-  const { join } = await import('node:path');
-  const { startEngineControlPlane } = await import('../src/workers/engine-split/control-plane.ts');
-  const { createUnixSocketFetch } = await import('../src/core/worker-transport.ts');
   const dir = mkdtempSync(join(tmpdir(), 'olympus-split-progress-'));
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -162,5 +162,79 @@ test('model progress crosses the control thread to the front', async () => {
   } finally {
     plane!.stop();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test.each([
+  { engine: 'combined', priority: 'maintenance' },
+  { engine: 'combined', priority: 'background' },
+  { engine: 'split', priority: 'maintenance' },
+  { engine: 'split', priority: 'background' },
+] as const)('the $engine engine gives the owner the built-in slot held by $priority', async ({ engine, priority }) => {
+  const activity = createLocalModelActivity({ singleSlotResources: ['built_in'] });
+  const heldStarted = Promise.withResolvers<AbortSignal>();
+  const releaseHeld = Promise.withResolvers<void>();
+  const ownerQueued = Promise.withResolvers<void>();
+  const starts: string[] = [];
+  const model = activity.track('built_in', {
+    async complete(request: AnalystModelRequest) {
+      starts.push(request.prompt);
+      if (request.prompt === 'held') {
+        heldStarted.resolve(request.signal!);
+        await releaseHeld.promise;
+        request.signal?.throwIfAborted();
+      }
+      return { text: request.prompt, modelId: 'fixture' };
+    },
+  }, { concurrency: 4 });
+  const completeOwner = (request: AnalystModelRequest) => {
+    const completion = model.complete(request);
+    ownerQueued.resolve();
+    return completion;
+  };
+  const dir = engine === 'split' ? mkdtempSync(join(tmpdir(), 'olympus-split-slot-')) : undefined;
+  const socketPath = dir && join(dir, 'engine.sock');
+  const plane = socketPath ? startEngineControlPlane({
+    socketPath,
+    authToken: TOKEN,
+    instanceId: 'background-slot',
+    ledger: new EngineCommandLedger({ instanceId: 'background-slot', handlers: {} }),
+    modelComplete: completeOwner,
+    onLost: () => {},
+    log: () => {},
+  }) : undefined;
+  const request = (prompt: string) => ({ system: 's', prompt, localOnly: true });
+  const calls: Promise<unknown>[] = [];
+  try {
+    if (socketPath) {
+      expect(plane).toBeDefined();
+      plane!.setReady(true);
+    }
+    const runHeld = priority === 'maintenance' ? runClassificationInference : runBackgroundInference;
+    // No sniffer preempt callback. Protected sniffer calls may decline it,
+    // and other background calls never have one.
+    const held = runHeld(() => model.complete({ ...request('held'), signal: new AbortController().signal }))
+      .then(() => 'finished', (error: Error) => error.name);
+    calls.push(held);
+    const heldSignal = await heldStarted.promise;
+    calls.push(runClassificationInference(() => model.complete(request('next maintenance'))));
+    const owner = socketPath
+      ? completeModelInBackground(createUnixSocketFetch(socketPath), TOKEN, request('owner'))
+      : completeOwner(request('owner'));
+    calls.push(owner);
+    await ownerQueued.promise;
+    expect(heldSignal.aborted).toBe(true);
+    expect(starts).toEqual(['held']);
+
+    releaseHeld.resolve();
+    expect(await held).toBe('AbortError');
+    expect(await owner).toEqual({ text: 'owner', modelId: 'fixture' });
+    await Promise.all(calls);
+    expect(starts).toEqual(['held', 'owner', 'next maintenance']);
+  } finally {
+    releaseHeld.resolve();
+    await Promise.allSettled(calls);
+    plane?.stop();
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
 });
