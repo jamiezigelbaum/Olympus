@@ -150,6 +150,8 @@ test('the installed tier service hides old Personal text and judges it without a
   expect(secure.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(BODY);
   expect(f.ledger.getCurrent(identity)).toMatchObject({ contentPending: true, reasons: expect.arrayContaining([HELD_UNTIL_JUDGED_REASON]) });
   expect(f.ledger.copies(identity)).toContainEqual(expect.objectContaining({ trustDomain: 'secure_local', state: 'current', embedHold: true }));
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  expect(queue.questionFor(identity, 'content')?.flags).toContain(contentDigestReason(BODY));
 
   expect(f.service.backlog().legacyPersonalBodies).toEqual({ held: 1, judged: 0 });
   expect(f.logs.filter(line => line.startsWith('Olympus tier hold: 1 item(s)'))).toHaveLength(1);
@@ -165,6 +167,10 @@ test('the installed tier service hides old Personal text and judges it without a
   expect(personal.searchItems(MARKER, 10).map(row => row.sourceItem.providerItemId)).toEqual(['old-picnic']);
   expect(personal.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(BODY);
   expect(f.service.backlog().legacyPersonalBodies).toEqual({ held: 1, judged: 1 });
+  const settled = f.ledger.getCurrent(identity);
+  expect(placePersonalBody(f.set, personal, { identity: personal.exportItemCopy(identity)!.identity, text: BODY },
+    queue, 'walk', { movesAvailable: true })).toBe('unchanged');
+  expect(f.ledger.getCurrent(identity)).toEqual(settled);
 });
 
 test('an interrupted hold finishes privately after the embedding choice changes, while new items stay searchable', async () => {

@@ -478,6 +478,7 @@ interface MovingPageOptions {
   direction?: 'raise' | 'lower';
   legacyHoldsOnly?: boolean;
   recordedOnly?: boolean;
+  skipWriteIntents?: boolean;
 }
 
 function listMovingRead(options: MovingPageOptions): LedgerRead {
@@ -486,6 +487,9 @@ function listMovingRead(options: MovingPageOptions): LedgerRead {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
+      ${options.skipWriteIntents ? `AND NOT EXISTS (SELECT 1 FROM tier_write_intents w
+        WHERE (w.provider, w.account_scope, w.conversation_key, w.provider_item_id)
+          = (tier_items.provider, tier_items.account_scope, tier_items.conversation_key, tier_items.provider_item_id))` : ''}
       ${options.recordedOnly ? "AND (target_metadata_tier = 'secure' OR target_content_tier = 'secure') AND content_pending = 0 AND metadata_pending = 0" : ''}
       ${options.legacyHoldsOnly || options.recordedOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
         AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
@@ -899,9 +903,12 @@ export function tierMovingDirectionClause(direction?: 'raise' | 'lower'): string
 }
 
 export class TierLedgerGenerationConflictError extends Error {
-  constructor(message = 'Tier ledger generation changed; re-read the row before flipping.') {
+  /** Which check refused, as a fixed word for the log (never an item's names or content). */
+  readonly code: string | undefined;
+  constructor(message = 'Tier ledger generation changed; re-read the row before flipping.', code?: string) {
     super(message);
     this.name = 'TierLedgerGenerationConflictError';
+    this.code = code;
   }
 }
 

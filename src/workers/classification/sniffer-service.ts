@@ -27,7 +27,7 @@ import { AUTO_MOVE_WHY, automaticTierMoveOptions, automaticTierMovesAllowed, set
 import { BUILT_IN_SNIFFER_LANE } from './built-in-sniffer.ts';
 import { LEGACY_PERSONAL_BODY_REASON } from './tier-classifier.ts';
 import type { InstalledTierClassification } from './installed-tier-classification.ts';
-import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions, type SnifferLaneKind } from './sniffer.ts';
+import { CachedTierSniffer, snifferId, snifferMaterialCarriesSecret, snifferPromptVersions, type SnifferLaneKind } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
@@ -69,6 +69,7 @@ import { sweepImageContentToPrivateOffThread } from '../connector-store/tier-ima
 import { applyMediaJudgmentsOffThread } from '../connector-store/tier-media-judgment-sweep.ts';
 import {
   TierLedger,
+  TierLedgerGenerationConflictError,
   TierLedgerRaiseAbandonRefusedError,
   TIER_LEDGER_UNREAD_RELABEL_DONE,
   RETIRED_EMBEDDING_CLEARANCE_REASON,
@@ -319,6 +320,8 @@ export const DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60_000;
  */
 export const ARRIVAL_STAND_BACK_MS = 15_000;
 export const DEFAULT_STALE_MOVE_MS = 60 * 60_000;
+const FIRST_MOVE_CONFLICT_BACKOFF_MS = 30_000;
+const MAX_MOVE_CONFLICT_BACKOFF_MS = 5 * 60_000;
 export const BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = 'built-in local model, nothing leaves the Mac (owner default 2026-10-01)';
 
 export interface TierAutoMoveReport {
@@ -668,7 +671,7 @@ export class TierSnifferService {
   private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
-  private readonly moveFailures = new Map<string, number>();
+  private readonly moveFailures = new Map<string, { firstFailedAt: number; retryAt: number }>();
   /** Items whose queued move the primitive refused last time it was tried (ledger and item), with the refusal's fixed word. */
   private readonly movesRefusedNow = new Map<string, string>();
   private moveRefusalAttempts = 0;
@@ -2386,8 +2389,14 @@ export class TierSnifferService {
       // Found on the ledger's read worker; each move re-checks its generation as it lands.
       const builtInOnly = !recoveryOnly && setEmbedsWithBuiltInOnly(set);
       const legacyHoldsOnly = direction === 'raise' && !builtInOnly;
+      const failureKeyFor = (record: TierLedgerRecord) =>
+        `${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`;
+      // A source write can finish on its own schedule. Leave that item in
+      // the queue without spending a move slot or abandoning its verdict.
       const queued = (await ledgerReadOffThread(set.ledger,
-        set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly, recordedOnly: !this.options.lane }))).filter(isAutoMoveCandidate);
+        set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly, recordedOnly: !this.options.lane,
+          skipWriteIntents: direction === 'lower' })))
+        .filter(record => isAutoMoveCandidate(record) && (this.moveFailures.get(failureKeyFor(record))?.retryAt ?? 0) <= now);
       if (set.openStores().some(store => store.reclaiming)) continue;
       if (!builtInOnly && direction === 'lower') { report.notEligible += queued.length; continue; }
       // A stopped installation may have hidden the source of an authorized raise
@@ -2396,14 +2405,24 @@ export class TierSnifferService {
       // Reorder retries within a bounded page while their generation is queued.
       const deferRetry = (identity: TierLedgerIdentity, generation: number) => {
         try {
-          set.ledger.recordMoveFailure(identity, { expectedGeneration: generation });
+          return set.ledger.recordMoveFailure(identity, { expectedGeneration: generation });
         } catch {
           // Counting is best effort.
+          return 1;
         }
       };
       const failure = (record: TierLedgerRecord, error: unknown) => {
         const identity = recordIdentity(record);
-        const failureKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}\u0000${record.generation}`;
+        const failureKey = failureKeyFor(record);
+        const conflict = error instanceof TierLedgerGenerationConflictError;
+        if (conflict) {
+          const current = set.ledger.getCurrent(identity);
+          if (current?.state !== 'moving' || current.generation !== record.generation
+            || current.targetMetadataTier !== record.targetMetadataTier || current.targetContentTier !== record.targetContentTier) {
+            this.moveFailures.delete(failureKey);
+            return;
+          }
+        }
         if (error instanceof TierMoveRefusedError && error.code === 'rule_policy_unavailable') {
           if (direction === 'raise') deferRetry(identity, record.generation);
           this.moveFailures.delete(failureKey);
@@ -2445,10 +2464,13 @@ export class TierSnifferService {
           this.moveFailures.delete(failureKey);
           return;
         }
-        deferRetry(identity, record.generation);
-        const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
-        this.moveFailures.set(failureKey, firstFailedAt);
-        if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set, record, report)) {
+        const attempts = deferRetry(identity, record.generation);
+        const firstFailedAt = this.moveFailures.get(failureKey)?.firstFailedAt ?? now;
+        const backoff = conflict ? Math.min(MAX_MOVE_CONFLICT_BACKOFF_MS,
+          FIRST_MOVE_CONFLICT_BACKOFF_MS * 2 ** Math.max(0, attempts - 1)) : 0;
+        this.moveFailures.set(failureKey, { firstFailedAt, retryAt: this.clockMs() + backoff });
+        if (now - firstFailedAt >= staleAfterMs && !(conflict && set.ledger.writeIntent(identity))
+          && this.settleStaleMove(set, record, report)) {
           this.moveFailures.delete(failureKey);
         }
       };
@@ -2458,8 +2480,7 @@ export class TierSnifferService {
         for (const destination of result.destinations) {
           if (!recoveryOnly && destination.chunksToEmbed > 0) embeddingCorpora.add(destination.corpusId);
         }
-        const key = `${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`;
-        this.moveFailures.delete(key);
+        this.moveFailures.delete(failureKeyFor(record));
         this.movesRefusedNow.delete(`${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}`);
       };
       // A live label read happens outside the batch's synchronous write transactions.
@@ -2492,6 +2513,12 @@ export class TierSnifferService {
           for (const { record, move } of pending) {
             try { succeeded(record, await moveTieredItem(move)); }
             catch (error) { failure(record, error); }
+            if (direction === 'raise' && record.contentPending && record.reasons.includes(LEGACY_PERSONAL_BODY_REASON)) {
+              try { this.queueLandedLegacyHold(set, move.identity); }
+              catch {
+                this.options.log?.('Olympus tier sniffer: could not queue a held body after its move; missing-question recovery will retry.');
+              }
+            }
           }
         } else if (pending.length) {
           try {
@@ -2537,6 +2564,26 @@ export class TierSnifferService {
       );
     }
     return recoveryOnly && !didWork ? undefined : report;
+  }
+
+  /** The hold's own drain opens its question as soon as its Private source is ready. */
+  private queueLandedLegacyHold(set: TieredStoreSet, identity: TierLedgerIdentity): void {
+    const lane = this.options.lane;
+    if (!lane) return;
+    const record = set.ledger.getCurrent(identity);
+    if (record?.state !== 'pending' || !record.contentPending || record.metadataPending
+      || !record.reasons.includes(LEGACY_PERSONAL_BODY_REASON)) return;
+    const classification = set.classification();
+    if (classification?.unavailableReason) return;
+    const queue = this.options.installed.snifferStoreForLedger(set.ledger.dbPath);
+    if (queue.questionFor(identity, 'content')) return;
+    // Queue now, but leave model and cache verdicts to the approved pass.
+    const sniffer = new CachedTierSniffer(queue, { ...lane, snifferMode: 'pending' },
+      snifferPromptVersions(this.options.ownerContext?.()).cache);
+    rejudgeStoredContent(set, record, {
+      sniffer, queueOnly: true, autoMoves: false, report: emptyTierRejudgeReport(),
+      ...(classification?.retirePublic ? { retirePublic: true } : {}),
+    });
   }
 
   /**
@@ -2670,6 +2717,7 @@ function positiveInteger(value: string | undefined, fallback: number, minimum: n
 export function moveFailureName(error: unknown): string {
   if (!(error instanceof Error)) return 'unknown';
   if (error instanceof TierMoveRefusedError && error.code !== 'refused') return `${error.name}:${error.code}`;
+  if (error instanceof TierLedgerGenerationConflictError && error.code) return `${error.name}:${error.code}`;
   if (error.constructor !== Error) return error.name || error.constructor.name || 'Error';
   return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : 'Error';
 }

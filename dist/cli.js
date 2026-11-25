@@ -43427,6 +43427,9 @@ function listMovingRead(options) {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
+      ${options.skipWriteIntents ? `AND NOT EXISTS (SELECT 1 FROM tier_write_intents w
+        WHERE (w.provider, w.account_scope, w.conversation_key, w.provider_item_id)
+          = (tier_items.provider, tier_items.account_scope, tier_items.conversation_key, tier_items.provider_item_id))` : ""}
       ${options.recordedOnly ? "AND (target_metadata_tier = 'secure' OR target_content_tier = 'secure') AND content_pending = 0 AND metadata_pending = 0" : ""}
       ${options.legacyHoldsOnly || options.recordedOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
         AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
@@ -47842,9 +47845,11 @@ var init_tier_ledger = __esm(() => {
   REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
   REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
   TierLedgerGenerationConflictError = class TierLedgerGenerationConflictError extends Error {
-    constructor(message = "Tier ledger generation changed; re-read the row before flipping.") {
+    code;
+    constructor(message = "Tier ledger generation changed; re-read the row before flipping.", code) {
       super(message);
       this.name = "TierLedgerGenerationConflictError";
+      this.code = code;
     }
   };
   TierLedgerRaiseAbandonRefusedError = class TierLedgerRaiseAbandonRefusedError extends Error {
@@ -62842,6 +62847,8 @@ function rejudgeStoredContent(set, record, options) {
     report.failed += 1;
     return;
   }
+  if (options.queueOnly && !content.contentPending)
+    return;
   if (content.contentPending && record.state === "pending") {
     const retiredClearance = record.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
     ledger.recordRoutedPlacement(identity, {
@@ -65359,7 +65366,7 @@ async function moveTieredItem(options) {
     if (!record || !record.routed)
       throw new Error("Only a routed item can move; adopt a legacy placement first.");
     if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration)
-      throw new TierLedgerGenerationConflictError;
+      throw new TierLedgerGenerationConflictError(undefined, "generation");
     return moveToSecrets(options, record.generation);
   }
   const result = await withCurrentMoveLabels(options.set, options.identity, target, () => moveTieredItemNow(options));
@@ -65505,7 +65512,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     throw new Error("Only a routed item can move; adopt a legacy placement first.");
   const rehomeTagged = record.reasons.includes(ROW_REHOME_REASON);
   if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
-    throw new TierLedgerGenerationConflictError;
+    throw new TierLedgerGenerationConflictError(undefined, "generation");
   }
   if (target.contentTier === "secrets" || target.metadataTier === "secrets") {
     throw new TierMoveRefusedError("Secrets cannot use the content repair path.", "secrets_in_repair");
@@ -65519,7 +65526,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
   if (receiptToResume) {
     const receipt = receiptToResume;
     if ((receipt.result?.generation ?? receipt.generation) !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
-      throw new TierLedgerGenerationConflictError;
+      throw new TierLedgerGenerationConflictError(undefined, "resume_receipt_target");
     if (loweringOnly && receipt.raise)
       throw new TierMoveRefusedError("Raises cannot enter a lowering batch.", "resumed_raise_in_lowering");
     return () => receipt;
@@ -65610,10 +65617,10 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
   const staged = timed(options.timings, "stageMs", () => ledger.withGenerationFence(identity, record.generation, () => {
     const now = ledger.getCurrent(identity);
     if (now.state === "moving" && (now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier)) {
-      throw new TierLedgerGenerationConflictError;
+      throw new TierLedgerGenerationConflictError(undefined, "moving_other_target");
     }
     if (lowering && ledger.writeIntent(identity))
-      throw new TierLedgerGenerationConflictError;
+      throw new TierLedgerGenerationConflictError(undefined, "write_intent");
     if (tierMoveRuleAuthorization(set, now, target, sources, placement.copies) === undefined) {
       retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
       return authorityRefusal(set, now, target, sources, placement.copies);
@@ -65638,16 +65645,16 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
       const alreadyVerified = readVerifiedMove(ledger, identity);
       if (alreadyVerified) {
         if (alreadyVerified.target.metadataTier !== target.metadataTier || alreadyVerified.target.contentTier !== target.contentTier) {
-          throw new TierLedgerGenerationConflictError;
+          throw new TierLedgerGenerationConflictError(undefined, "verified_other_target");
         }
         return alreadyVerified;
       }
       const now = ledger.getCurrent(identity);
       if (now.state !== "moving" || now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier) {
-        throw new TierLedgerGenerationConflictError;
+        throw new TierLedgerGenerationConflictError(undefined, "not_moving_target");
       }
       if (lowering && ledger.writeIntent(identity))
-        throw new TierLedgerGenerationConflictError;
+        throw new TierLedgerGenerationConflictError(undefined, "write_intent");
       const lockOrder = [...sources].sort((a, b) => a.corpusId.localeCompare(b.corpusId));
       const copyWithLockedSources = (index) => {
         const source = lockOrder[index];
@@ -66240,7 +66247,7 @@ function flipVerifiedMove(options, receipt) {
       if (record.state !== "moving" || record.targetMetadataTier !== receipt.target.metadataTier || record.targetContentTier !== receipt.target.contentTier)
         throw new TierLedgerGenerationConflictError;
       if (lowering && ledger.writeIntent(identity))
-        throw new TierLedgerGenerationConflictError;
+        throw new TierLedgerGenerationConflictError(undefined, "write_intent");
       const revision = policyRefusal ? undefined : tierMoveRuleAuthorization(set, record, receipt.target, receipt.sources, receipt.placement);
       if (revision === undefined) {
         retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement, receipt);
@@ -254061,7 +254068,14 @@ class TierSnifferService {
         continue;
       const builtInOnly = !recoveryOnly && setEmbedsWithBuiltInOnly(set);
       const legacyHoldsOnly = direction === "raise" && !builtInOnly;
-      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly, recordedOnly: !this.options.lane }))).filter(isAutoMoveCandidate);
+      const failureKeyFor = (record) => `${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}\x00${record.generation}`;
+      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({
+        limit: budget,
+        direction,
+        legacyHoldsOnly,
+        recordedOnly: !this.options.lane,
+        skipWriteIntents: direction === "lower"
+      }))).filter((record) => isAutoMoveCandidate(record) && (this.moveFailures.get(failureKeyFor(record))?.retryAt ?? 0) <= now);
       if (set.openStores().some((store) => store.reclaiming))
         continue;
       if (!builtInOnly && direction === "lower") {
@@ -254072,12 +254086,22 @@ class TierSnifferService {
         continue;
       const deferRetry = (identity, generation) => {
         try {
-          set.ledger.recordMoveFailure(identity, { expectedGeneration: generation });
-        } catch {}
+          return set.ledger.recordMoveFailure(identity, { expectedGeneration: generation });
+        } catch {
+          return 1;
+        }
       };
       const failure = (record, error) => {
         const identity = recordIdentity2(record);
-        const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record.generation}`;
+        const failureKey = failureKeyFor(record);
+        const conflict = error instanceof TierLedgerGenerationConflictError;
+        if (conflict) {
+          const current = set.ledger.getCurrent(identity);
+          if (current?.state !== "moving" || current.generation !== record.generation || current.targetMetadataTier !== record.targetMetadataTier || current.targetContentTier !== record.targetContentTier) {
+            this.moveFailures.delete(failureKey);
+            return;
+          }
+        }
         if (error instanceof TierMoveRefusedError && error.code === "rule_policy_unavailable") {
           if (direction === "raise")
             deferRetry(identity, record.generation);
@@ -254117,10 +254141,11 @@ class TierSnifferService {
           this.moveFailures.delete(failureKey);
           return;
         }
-        deferRetry(identity, record.generation);
-        const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
-        this.moveFailures.set(failureKey, firstFailedAt);
-        if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set, record, report)) {
+        const attempts = deferRetry(identity, record.generation);
+        const firstFailedAt = this.moveFailures.get(failureKey)?.firstFailedAt ?? now;
+        const backoff = conflict ? Math.min(MAX_MOVE_CONFLICT_BACKOFF_MS, FIRST_MOVE_CONFLICT_BACKOFF_MS * 2 ** Math.max(0, attempts - 1)) : 0;
+        this.moveFailures.set(failureKey, { firstFailedAt, retryAt: this.clockMs() + backoff });
+        if (now - firstFailedAt >= staleAfterMs && !(conflict && set.ledger.writeIntent(identity)) && this.settleStaleMove(set, record, report)) {
           this.moveFailures.delete(failureKey);
         }
       };
@@ -254131,8 +254156,7 @@ class TierSnifferService {
           if (!recoveryOnly && destination.chunksToEmbed > 0)
             embeddingCorpora.add(destination.corpusId);
         }
-        const key = `${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}\x00${record.generation}`;
-        this.moveFailures.delete(key);
+        this.moveFailures.delete(failureKeyFor(record));
         this.movesRefusedNow.delete(`${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}`);
       };
       const liveProviders = new Set(queued.map((record) => record.provider).filter((provider) => mutableItemLabels(set, provider)));
@@ -254177,6 +254201,13 @@ class TierSnifferService {
             } catch (error) {
               failure(record, error);
             }
+            if (direction === "raise" && record.contentPending && record.reasons.includes(LEGACY_PERSONAL_BODY_REASON)) {
+              try {
+                this.queueLandedLegacyHold(set, move.identity);
+              } catch {
+                this.options.log?.("Olympus tier sniffer: could not queue a held body after its move; missing-question recovery will retry.");
+              }
+            }
           }
         } else if (pending.length) {
           try {
@@ -254215,6 +254246,28 @@ class TierSnifferService {
       this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs)} ` + (direction === "lower" ? `backlog=${backlog} slice_ms=${Math.round(sliceMs)} ` : "") + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(" ") + ".");
     }
     return recoveryOnly && !didWork ? undefined : report;
+  }
+  queueLandedLegacyHold(set, identity) {
+    const lane = this.options.lane;
+    if (!lane)
+      return;
+    const record = set.ledger.getCurrent(identity);
+    if (record?.state !== "pending" || !record.contentPending || record.metadataPending || !record.reasons.includes(LEGACY_PERSONAL_BODY_REASON))
+      return;
+    const classification = set.classification();
+    if (classification?.unavailableReason)
+      return;
+    const queue = this.options.installed.snifferStoreForLedger(set.ledger.dbPath);
+    if (queue.questionFor(identity, "content"))
+      return;
+    const sniffer = new CachedTierSniffer(queue, { ...lane, snifferMode: "pending" }, snifferPromptVersions(this.options.ownerContext?.()).cache);
+    rejudgeStoredContent(set, record, {
+      sniffer,
+      queueOnly: true,
+      autoMoves: false,
+      report: emptyTierRejudgeReport(),
+      ...classification?.retirePublic ? { retirePublic: true } : {}
+    });
   }
   settleStaleMove(set, record, report) {
     try {
@@ -254300,6 +254353,8 @@ function moveFailureName(error) {
     return "unknown";
   if (error instanceof TierMoveRefusedError && error.code !== "refused")
     return `${error.name}:${error.code}`;
+  if (error instanceof TierLedgerGenerationConflictError && error.code)
+    return `${error.name}:${error.code}`;
   if (error.constructor !== Error)
     return error.name || error.constructor.name || "Error";
   return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : "Error";
@@ -254363,7 +254418,7 @@ function runBacklogCountWorker(message) {
     worker.postMessage(message);
   });
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_STALL_MS, ROUTED_ROWS_GRACE_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, ARRIVAL_STAND_BACK_MS = 15000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, STORED_WALK_BACKSTOP_MS, unattendedEmbedHoldWalks, BACKLOG_COUNT_WORKER_SOURCE = `
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_STALL_MS, ROUTED_ROWS_GRACE_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, ARRIVAL_STAND_BACK_MS = 15000, DEFAULT_STALE_MOVE_MS, FIRST_MOVE_CONFLICT_BACKOFF_MS = 30000, MAX_MOVE_CONFLICT_BACKOFF_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, STORED_WALK_BACKSTOP_MS, unattendedEmbedHoldWalks, BACKLOG_COUNT_WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 self.onmessage = ({ data }) => {
   const out = [];
@@ -254427,6 +254482,7 @@ var init_sniffer_service = __esm(() => {
   EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
   DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
   DEFAULT_STALE_MOVE_MS = 60 * 60000;
+  MAX_MOVE_CONFLICT_BACKOFF_MS = 5 * 60000;
   STORED_WALK_BACKSTOP_MS = 60 * 60000;
   unattendedEmbedHoldWalks = new WeakMap;
   BACKLOG_COUNT_WORKER_TIMEOUT_MS = 10 * 60000;
