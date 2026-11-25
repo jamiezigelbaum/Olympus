@@ -25435,6 +25435,12 @@ function withModelProgress(listener, work) {
 function noteModelProgress(model) {
   progress.getStore()?.(model);
 }
+function runWithModelProgress(listener, work) {
+  return listener ? progress.run(listener, work) : progress.exit(work);
+}
+function currentModelProgress() {
+  return progress.getStore();
+}
 async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_IDLE_TIMEOUT_MS) {
   const controller = new AbortController;
   let timer;
@@ -66165,9 +66171,16 @@ function createLocalModelActivity() {
     const kind = localInferencePriority?.getStore() ?? "owner";
     if (kind === "owner" && pending.running.length > 0)
       notifyBusy(key);
-    pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 1 : localInferencePriority?.getStore() === "maintenance" ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
+    const progress = currentModelProgress();
+    const shared = (model) => {
+      progress?.(model);
+      for (const task of pending.tasks)
+        task.progress?.(model);
+    };
+    pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 1 : localInferencePriority?.getStore() === "maintenance" ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), ...progress ? { progress } : {}, run: async () => {
+      const leased = () => runWithModelProgress(shared, () => lease(key, work));
       try {
-        resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => lease(key, work)) : lease(key, work)));
+        resolve(await (localInferencePriority ? localInferencePriority.run(kind, leased) : leased()));
       } catch (error) {
         reject(error);
       }
@@ -66258,6 +66271,7 @@ function createLocalModelActivity() {
 }
 var localInferencePriority, privacyReleaseInference, localInferenceGuards, DEFAULT_ANSWER_LEASE_MS, MAINTENANCE_AGING_MS = 60000;
 var init_answer_activity = __esm(() => {
+  init_model_stream();
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
 

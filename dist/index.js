@@ -13114,6 +13114,7 @@ var init_tier_move = __esm(() => {
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS;
 var init_answer_activity = __esm(() => {
+  init_model_stream();
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
 
