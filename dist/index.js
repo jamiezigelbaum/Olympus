@@ -14362,7 +14362,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-store-set.ts
-var LOWER_CONTENT_REPAIR_INTERVAL_MS;
+var ABANDONED_WRITE_INTENT_MS, LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
   init_tier_label_observations();
   init_source_connector_labels();
@@ -14390,6 +14390,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
   init_tier_secrets_floor_sweep();
+  ABANDONED_WRITE_INTENT_MS = 7 * 24 * 60 * 60000;
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 

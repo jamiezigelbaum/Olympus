@@ -134,6 +134,9 @@ import { sweepAutomaticSupersededCopiesInTurns } from './tier-auto-prune-sweep.t
 import { flushTierMoveNotes, moveTieredItem, type TierMoveOptions } from './tier-move.ts';
 import { automaticTierMoveOptions, automaticTierMovesAllowed } from './tier-auto-move.ts';
 
+/** A `content` or `names` write still open after this long is not coming back from its source. */
+const ABANDONED_WRITE_INTENT_MS = 7 * 24 * 60 * 60_000;
+
 export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
 /** Time the one-time superseded-copy sweep may take on each maintenance call. */
 export const SUPERSEDED_SWEEP_SLICE_MS = 100;
@@ -1162,13 +1165,36 @@ export class TieredStoreSet {
     });
   }
 
+  /**
+   * A `content` or `names` write whose version every current copy's store already holds. A `content` write also
+   * needs the body there (chunks), and a body owed from an older record (`bodyVersion`) is never taken as landed.
+   */
+  private intentLanded(intent: TierWriteIntent): boolean {
+    const copies = this.ledger.copies(intent.identity).filter((copy) => copy.state === 'current');
+    if (copies.length === 0) return false;
+    // Past the replay window the source is not sending this record again (an unchanged email from a replaced
+    // connection): what every leg holds is the item, and a later move still checks the text it was judged on.
+    const abandoned = this.ledger.writeIntentRecordedBefore(intent.identity,
+      new Date(Date.now() - ABANDONED_WRITE_INTENT_MS).toISOString());
+    if (!abandoned && (intent.version === undefined || intent.bodyVersion !== undefined)) return false;
+    const identity = { ...intent.identity, ...(intent.version !== undefined ? { sourceVersion: intent.version } : {}) } as SourceItemIdentity;
+    return copies.every((copy) => {
+      const domain = this.domainForCorpus(copy.corpusId);
+      const row = domain ? this.store(domain)?.storedItemState(identity) : undefined;
+      return row !== undefined && !row.tombstoned && (abandoned || row.version === intent.version)
+        && (intent.kind !== 'content' || row.chunkCount > 0);
+    });
+  }
+
   finishPendingIntents(): boolean {
     let removed = false;
     for (const intent of this.ledger.writeIntents()) {
       const identity = { ...intent.identity, ...(intent.version !== undefined ? { sourceVersion: intent.version } : {}) } as SourceItemIdentity;
       if (intent.kind === 'content' || intent.kind === 'names') {
-        // Owed until its own record is read again, or until the stored state supersedes it.
-        if (this.intentSuperseded(intent)) this.ledger.clearWriteIntent(intent.identity);
+        // Owed until its own record is read again, or until the stored state supersedes it. A write every serving
+        // leg already holds was cut off only before its intent was cleared: a source that never sends the record
+        // again (an unchanged email) would otherwise keep the item out of every lowering for good (Sparta, 25 Nov).
+        if (this.intentSuperseded(intent) || this.intentLanded(intent)) this.ledger.clearWriteIntent(intent.identity);
         continue;
       }
       if (intent.kind === 'advance') {
