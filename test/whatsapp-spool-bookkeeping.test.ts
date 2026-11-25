@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { Database } from 'bun:sqlite';
+import { setSqliteCheckpointsOffLoop, sqliteFilesForOffLoopCheckpoints } from '../src/core/sqlite-store.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { WHATSAPP_SPOOL_INDEX_FILE, WhatsAppSpoolIndex } from '../src/workers/whatsapp/spool-index.ts';
 import { createWhatsAppLiveSourceConnector, emptyWhatsAppSpoolPassFindings } from '../src/workers/whatsapp/live-connector.ts';
@@ -712,4 +713,30 @@ describe('spool bookkeeping under churn', () => {
       }
     }, 120_000);
   }
+});
+
+describe('WhatsAppSpoolIndex WAL checkpoint registration', () => {
+  test('registers spool-index.sqlite for off-loop checkpointing with idle truncation and caps journal_size_limit', () => {
+    const root = mkdtempSync(join(tmpdir(), 'whatsapp-spool-wal-'));
+    roots.push(root);
+    const spoolDir = join(root, 'spool');
+    mkdirSync(spoolDir, { recursive: true });
+    setSqliteCheckpointsOffLoop(true);
+    try {
+      const index = WhatsAppSpoolIndex.open(spoolDir);
+      expect(index).toBeDefined();
+      const dbPath = join(spoolDir, WHATSAPP_SPOOL_INDEX_FILE);
+      const registered = [...sqliteFilesForOffLoopCheckpoints()].find((file) => file.dbPath === dbPath);
+      expect(registered).toMatchObject({ dbPath, truncateIdleWal: true });
+      index!.close();
+      const verifyDb = new Database(dbPath, { readonly: true });
+      try {
+        expect((verifyDb.query('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode.toLowerCase()).toBe('wal');
+      } finally {
+        verifyDb.close();
+      }
+    } finally {
+      setSqliteCheckpointsOffLoop(false);
+    }
+  });
 });

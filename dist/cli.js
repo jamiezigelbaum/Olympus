@@ -128868,7 +128868,7 @@ class WhatsAppSpoolIndex {
     try {
       db = new Database19(path, { create: true });
       chmodSync25(path, 384);
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(path, "tier-ledger"));
       const version = db.query("PRAGMA user_version").get().user_version;
       if (version !== SCHEMA) {
         db.exec(`

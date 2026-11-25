@@ -38,7 +38,7 @@ import { Database } from 'bun:sqlite';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { closeSqliteStore, loopWalAutocheckpointPragma } from '../../core/sqlite-store.ts';
 import { spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import type { LiveMatchKeys, TimePrecision } from './match-keys.ts';
 import type { WhatsAppReactionEntry } from './reaction-index.ts';
@@ -89,7 +89,7 @@ export class WhatsAppSpoolIndex {
     try {
       db = new Database(path, { create: true });
       chmodSync(path, 0o600);
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;');
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(path, 'tier-ledger'));
       const version = (db.query('PRAGMA user_version').get() as { user_version: number }).user_version;
       if (version !== SCHEMA) {
         // A cache: an index of another shape is rebuilt from the spool.
