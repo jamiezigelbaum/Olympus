@@ -206,7 +206,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
   if (target?.contentTier === 'secrets' || target?.metadataTier === 'secrets') {
     const record = options.set.ledger.getCurrent(options.identity);
     if (!record || !record.routed) throw new Error('Only a routed item can move; adopt a legacy placement first.');
-    if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) throw new TierLedgerGenerationConflictError();
+    if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) throw new TierLedgerGenerationConflictError(undefined, 'generation');
     return moveToSecrets(options, record.generation);
   }
   const result = await withCurrentMoveLabels(options.set, options.identity, target, () => moveTieredItemNow(options));
@@ -358,7 +358,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
   // A raise the re-home pass queued (whoever carries it out) keeps the one receipt identity.
   const rehomeTagged = record.reasons.includes(ROW_REHOME_REASON);
   if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) {
-    throw new TierLedgerGenerationConflictError();
+    throw new TierLedgerGenerationConflictError(undefined, 'generation');
   }
 
   if (target.contentTier === 'secrets' || target.metadataTier === 'secrets') {
@@ -380,7 +380,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
   if (receiptToResume) {
     const receipt = receiptToResume;
     if ((receipt.result?.generation ?? receipt.generation) !== record.generation || receipt.target.metadataTier !== target.metadataTier
-      || receipt.target.contentTier !== target.contentTier) throw new TierLedgerGenerationConflictError();
+      || receipt.target.contentTier !== target.contentTier) throw new TierLedgerGenerationConflictError(undefined, 'resume_receipt_target');
     if (loweringOnly && receipt.raise) throw new TierMoveRefusedError('Raises cannot enter a lowering batch.', 'resumed_raise_in_lowering');
     return () => receipt;
   }
@@ -483,9 +483,9 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
   const staged = timed(options.timings, 'stageMs', () => ledger.withGenerationFence(identity, record.generation, () => {
     const now = ledger.getCurrent(identity)!;
     if (now.state === 'moving' && (now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier)) {
-      throw new TierLedgerGenerationConflictError();
+      throw new TierLedgerGenerationConflictError(undefined, 'moving_other_target');
     }
-    if (lowering && ledger.writeIntent(identity)) throw new TierLedgerGenerationConflictError();
+    if (lowering && ledger.writeIntent(identity)) throw new TierLedgerGenerationConflictError(undefined, 'write_intent');
     if (tierMoveRuleAuthorization(set, now, target, sources, placement.copies) === undefined) {
       retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
       return authorityRefusal(set, now, target, sources, placement.copies);
@@ -512,15 +512,15 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
       const alreadyVerified = readVerifiedMove(ledger, identity);
       if (alreadyVerified) {
         if (alreadyVerified.target.metadataTier !== target.metadataTier || alreadyVerified.target.contentTier !== target.contentTier) {
-          throw new TierLedgerGenerationConflictError();
+          throw new TierLedgerGenerationConflictError(undefined, 'verified_other_target');
         }
         return alreadyVerified;
       }
       const now = ledger.getCurrent(identity)!;
       if (now.state !== 'moving' || now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier) {
-        throw new TierLedgerGenerationConflictError();
+        throw new TierLedgerGenerationConflictError(undefined, 'not_moving_target');
       }
-      if (lowering && ledger.writeIntent(identity)) throw new TierLedgerGenerationConflictError();
+      if (lowering && ledger.writeIntent(identity)) throw new TierLedgerGenerationConflictError(undefined, 'write_intent');
       const lockOrder = [...sources].sort((a, b) => a.corpusId.localeCompare(b.corpusId));
       const copyWithLockedSources = (index: number): VerifiedMove | MoveAuthorityRefusal => {
         const source = lockOrder[index];
@@ -1239,7 +1239,7 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
       if (ledger.readMeta(purgeReceiptKey(identity)) !== JSON.stringify(receipt)) throw new TierLedgerGenerationConflictError();
       if (record.state !== 'moving' || record.targetMetadataTier !== receipt.target.metadataTier
         || record.targetContentTier !== receipt.target.contentTier) throw new TierLedgerGenerationConflictError();
-      if (lowering && ledger.writeIntent(identity)) throw new TierLedgerGenerationConflictError();
+      if (lowering && ledger.writeIntent(identity)) throw new TierLedgerGenerationConflictError(undefined, 'write_intent');
       const revision = policyRefusal ? undefined : tierMoveRuleAuthorization(set, record, receipt.target, receipt.sources, receipt.placement);
       if (revision === undefined) {
         retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement, receipt);

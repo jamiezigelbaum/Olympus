@@ -286,6 +286,41 @@ test('a refused stale lowering cannot prevent its batch neighbours from landing'
   expect(f.f.stores.internal!.localContent(localId(f.specs[1]!.id))?.chunks ?? []).toEqual([]);
 });
 
+test('a lowering blocked by a write intent stays Private and retries after backoff', async () => {
+  const f = await fixture(2, true);
+  const identity = identityOf(f.specs[0]!.id);
+  const clock = createTestClock();
+  const { service, lines } = serviceFor(f.f, {}, [], { now: clock.date });
+  const find = f.f.ledger.listMovingSteps.bind(f.f.ledger);
+  const read = spyOn(f.f.ledger, 'listMovingSteps').mockImplementation(function* (options) {
+    const rows = yield* find(options);
+    if (options?.direction === 'lower') f.f.ledger.putWriteIntent({ identity, kind: 'content', connectorId: 'synthetic-write' });
+    return rows;
+  });
+
+  try { await service.runOnce(); } finally { read.mockRestore(); }
+  expect(lines.some(line => line.includes('TierLedgerGenerationConflictError:write_intent ×1'))).toBe(true);
+  expect(f.f.ledger.moveAttempts(identity)).toBe(1);
+  expect(f.f.stores.internal!.searchItems('orchard', 20)
+    .map(row => row.sourceItem.providerItemId)).toEqual([f.specs[1]!.id]);
+
+  await service.runOnce();
+  expect(f.f.ledger.moveAttempts(identity)).toBe(1);
+  f.f.ledger.clearWriteIntent(identity);
+  await clock.advance(1_000);
+  await service.runOnce();
+  expect(f.f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving' });
+
+  await clock.advance(30_000);
+  f.f.ledger.putWriteIntent({ identity, kind: 'content', connectorId: 'synthetic-write' });
+  await service.runOnce();
+  expect(f.f.ledger.moveAttempts(identity)).toBe(1);
+  f.f.ledger.clearWriteIntent(identity);
+  await service.runOnce();
+  expect(f.f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'private' });
+  expect(f.f.stores.internal!.searchItems('orchard', 20)).toHaveLength(2);
+});
+
 test('a hide-first raise beats a lowering backlog even with a zero lowering slice', async () => {
   const f = await fixture(40);
   const raised = { id: 'synthetic-raise', name: 'Synthetic', text: body };

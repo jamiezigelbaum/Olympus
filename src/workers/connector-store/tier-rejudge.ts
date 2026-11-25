@@ -332,6 +332,8 @@ export function rejudgeStoredContent(
     hideRaises?: boolean;
     /** A content-window verdict says nothing new about the item's names. */
     preserveMetadata?: boolean;
+    /** Before classifier approval, open questions without settling an ordinary decision. */
+    queueOnly?: boolean;
     /**
      * The owner asked to check this item's chat or source again (#638): its
      * names are judged again by the model whatever judged them before, and
@@ -467,6 +469,7 @@ export function rejudgeStoredContent(
     report.failed += 1;
     return;
   }
+  if (options.queueOnly && !content.contentPending) return;
   if (content.contentPending && record.state === 'pending') {
     // Already held for this question: the content pass just queued it again
     // (`subject` above); the sniffer's answer settles the row.

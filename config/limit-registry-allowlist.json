@@ -714,6 +714,12 @@
     "retire_when": "the legacy reason alias is replaced by its registered limit id; this boundary already reports the corresponding owner limit stop"
   },
   {
+    "path": "src/workers/classification/sniffer-service.ts",
+    "symbol": "retry:failure:retryAt",
+    "reason": "pacing",
+    "retire_when": "the move queue owns conflict retry timing"
+  },
+  {
     "path": "src/workers/classification/tier-ledger.ts",
     "symbol": "retry:markRejudgeUnavailable:retryAt",
     "reason": "pacing",
