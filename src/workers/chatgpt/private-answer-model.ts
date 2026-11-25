@@ -34,6 +34,7 @@ import type {
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import type { AnalystModel, AnalystModelRequest } from '../../core/analyst.ts';
 import { BUILT_IN_ANALYST_NAME } from '../../core/analyst-built-in.ts';
+import { markModelCall } from '../../core/model-call-trace.ts';
 import { localAnalystPromptBytesForWindow } from '../source-index/local-analyst-window.ts';
 import { SourceModelPolicyDeniedError } from '../../core/source-model-policy.ts';
 import { EVIDENCE_COPY_SIMILARITY, evidenceDateValue, evidenceVersionGroups, evidenceVersions } from '../../core/evidence-versions.ts';
@@ -438,6 +439,7 @@ export function createBuiltInPrivateAnswerModel(options: BuiltInPrivateAnswerMod
           };
           return runWithLocalInferenceGuard(guard, async () => {
             await guard();
+            markModelCall('guards_done');
             observe?.modelStarting?.();
             return answering.complete(modelRequest);
           });

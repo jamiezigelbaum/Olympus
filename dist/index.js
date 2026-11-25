@@ -3442,6 +3442,8 @@ class ControlPathHeadroom {
   overBudget = 0;
   heartbeat;
   expectedBeatAt = 0;
+  modelLagHistory;
+  modelLagSamples = 0;
   turns = 0;
   rests = 0;
   freezes = 0;
@@ -3519,6 +3521,25 @@ class ControlPathHeadroom {
       overBudget: this.overBudget
     };
   }
+  startModelLagSampling() {
+    this.modelLagHistory ??= new Float64Array(2 * MODEL_LAG_SAMPLES);
+    this.ensureHeartbeat();
+  }
+  modelLoopLagSince(startedAt) {
+    this.startModelLagSampling();
+    const since = startedAt - performance.timeOrigin;
+    let max = Math.max(0, this.now() - Math.max(since, this.expectedBeatAt));
+    const history = this.modelLagHistory;
+    const oldest = Math.max(0, this.modelLagSamples - MODEL_LAG_SAMPLES);
+    for (let sample = this.modelLagSamples - 1;sample >= oldest; sample -= 1) {
+      const index = 2 * (sample % MODEL_LAG_SAMPLES);
+      const elapsed = history[index] - since;
+      if (elapsed <= max)
+        break;
+      max = Math.max(max, Math.min(elapsed, history[index + 1]));
+    }
+    return Math.round(max);
+  }
   stop() {
     if (this.heartbeat)
       clearInterval(this.heartbeat);
@@ -3532,6 +3553,11 @@ class ControlPathHeadroom {
       const now = this.now();
       this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
       this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.modelLagHistory) {
+        const index = 2 * (this.modelLagSamples++ % MODEL_LAG_SAMPLES);
+        this.modelLagHistory[index] = now;
+        this.modelLagHistory[index + 1] = this.lastLagMs;
+      }
       if (this.lastLagMs > this.maxLagMs)
         this.maxLagMs = this.lastLagMs;
       if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS)
@@ -3545,7 +3571,7 @@ class ControlPathHeadroom {
     this.heartbeat.unref?.();
   }
 }
-var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_LAG_COUNTED_MS = 250, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom;
+var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, MODEL_LAG_SAMPLES = 24000, CONTROL_PATH_LAG_COUNTED_MS = 250, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom;
 var init_control_path_headroom = __esm(() => {
   init_engine_split();
   controlPathHeadroom = new ControlPathHeadroom;
@@ -7846,9 +7872,30 @@ var init_source_answer_jobs = __esm(() => {
   SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
   progressSink = new AsyncLocalStorage3;
 });
+// src/core/model-call-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+function markModelCall(point, trace = currentModelCallTrace(), at) {
+  if (trace)
+    trace.offsets[point] = Math.max(0, Math.round((at ?? modelTraceClock()) - trace.startedAt));
+}
+var BACKGROUND_POINTS, POINTS, active, currentModelCallTrace = () => active.getStore(), modelTraceClock = () => performance.timeOrigin + performance.now();
+var init_model_call_trace = __esm(() => {
+  BACKGROUND_POINTS = [
+    "bg_socket_received",
+    "bg_received",
+    "queue_enter",
+    "queue_admit",
+    "http_sent",
+    "first_sse",
+    "last_sse",
+    "bg_result_posted"
+  ];
+  POINTS = ["guards_done", "forward_sent", ...BACKGROUND_POINTS, "front_result", "main_end"];
+  active = new AsyncLocalStorage4;
+});
 
 // src/core/model-stream.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_IDLE_TIMEOUT_MS) {
   const controller = new AbortController;
   let timer;
@@ -7874,6 +7921,7 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
   arm();
   progress.getStore()?.(model);
   let reader;
+  const trace = currentModelCallTrace();
   let lastNote = -Infinity;
   const token = () => {
     if (Date.now() - lastNote >= 1000) {
@@ -7884,6 +7932,8 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
   try {
     if (typeof init.body === "string")
       addMemoryPayloadText(init.body);
+    if (trace)
+      markModelCall("http_sent", trace);
     const response = await Promise.race([fetchModelEndpoint(fetchImpl, url, { ...init, signal: controller.signal }), stopped]);
     if (!response.body)
       return response;
@@ -7905,6 +7955,10 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
 `);
       if (!data)
         return;
+      if (trace) {
+        markModelCall("last_sse", trace);
+        trace.offsets.first_sse ??= trace.offsets.last_sse;
+      }
       if (data.trim() === "[DONE]") {
         done = true;
         return;
@@ -8004,7 +8058,8 @@ var init_model_stream = __esm(() => {
   init_memory_counters();
   init_model_transport();
   init_source_answer_jobs();
-  progress = new AsyncLocalStorage4;
+  init_model_call_trace();
+  progress = new AsyncLocalStorage5;
   ModelStreamError = class ModelStreamError extends Error {
     model;
     constructor(model) {
@@ -9154,10 +9209,10 @@ function isExecutableFile(path) {
 var init_openclaw_executable = () => {};
 
 // src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var progress2;
 var init_read_progress = __esm(() => {
-  progress2 = new AsyncLocalStorage5;
+  progress2 = new AsyncLocalStorage6;
 });
 
 // src/core/read-wide.ts
@@ -9182,13 +9237,13 @@ var init_partial_search = __esm(() => {
 });
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
-  context = new AsyncLocalStorage6;
-  disabled = new AsyncLocalStorage6;
-  cachedOnly = new AsyncLocalStorage6;
-  requestContext = new AsyncLocalStorage6;
+  context = new AsyncLocalStorage7;
+  disabled = new AsyncLocalStorage7;
+  cachedOnly = new AsyncLocalStorage7;
+  requestContext = new AsyncLocalStorage7;
 });
 // src/core/store-reclaim-admission.ts
 var init_store_reclaim_admission = __esm(() => {
@@ -9197,15 +9252,15 @@ var init_store_reclaim_admission = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 var poolSqlSites, storage2, queryStorage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   init_source_answer_jobs();
   init_store_reclaim_admission();
   poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage7;
-  queryStorage = new AsyncLocalStorage7;
-  laneStorage = new AsyncLocalStorage7;
+  storage2 = new AsyncLocalStorage8;
+  queryStorage = new AsyncLocalStorage8;
+  laneStorage = new AsyncLocalStorage8;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -9361,14 +9416,15 @@ var init_privacy_language = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage8;
+  storage3 = new AsyncLocalStorage9;
   completedPrivateAnswers = new Set;
   JOB_QUESTION_TTL_MS = 30 * 60000;
   jobQuestions = new Map;
 });
+
 // src/core/parent-label.ts
 var init_parent_label = __esm(() => {
   init_types();
@@ -11692,7 +11748,7 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_memory_counters();
@@ -11701,7 +11757,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage9;
+  priorityQueryEmbedding = new AsyncLocalStorage10;
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
@@ -11888,7 +11944,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", CLAIM_RULE = `Each citation's "claim" is one sentence copied word for word from "answer": the sentence that item supports. One citation per sentence and item.`, ANALYST_SYSTEM, NOTES_MAX = 12, NOTES_FACT_KINDS = "each value, amount, date, name, condition or exception", NOTES_FIRST_RULE, NOTES_GIVEN_RULE = '- "Reading notes" after the evidence are facts already copied from the items. Check each against its item; "answer" gives every one that answers the question. Drop words to stay short, never facts.', ANALYST_NOTES_SYSTEM_START = "You are reading evidence for a question.", ANALYST_NOTES_SYSTEM, NOTES_BATCHED_RULE = `- The items are too many to show their text at once. "Reading notes" after the item list are the facts already copied from each item's text: answer from the notes and the item lines only, cite each note's item by its [number], and give every note that answers the question. Drop words to stay short, never facts.`, compactSystem = (notes = "off") => [
   "You are an evidence analyst. Answer the question USING ONLY the numbered evidence below.",
   "Each evidence item starts with its number and name, then its date and source, then its text in source_data.",
@@ -11922,7 +11978,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage10;
+  analystAbortSignalStorage = new AsyncLocalStorage11;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -12498,11 +12554,22 @@ var init_built_in_sniffer = __esm(() => {
   });
 });
 
+// src/workers/answer-activity.ts
+import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
+var localInferenceCaller, DEFAULT_ANSWER_LEASE_MS;
+var init_answer_activity = __esm(() => {
+  init_model_stream();
+  init_model_call_trace();
+  localInferenceCaller = new AsyncLocalStorage12;
+  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+});
+
 // src/core/source-index/keyword-expansion.ts
 var caches, sharedCalls, EMPTY2, failedTranslations, SYSTEM, lastTranslationMs, runningTranslations;
 var init_keyword_expansion = __esm(() => {
   init_keyword_equivalents();
   init_built_in_sniffer();
+  init_answer_activity();
   init_fts();
   init_keyword_context();
   caches = new WeakMap;
@@ -12589,11 +12656,11 @@ var init_media_cache = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage11;
+  readAuthorization = new AsyncLocalStorage13;
 });
 
 // src/workers/connector-store/tier-placement.ts
@@ -13111,13 +13178,6 @@ var init_tier_move = __esm(() => {
   init_tier_move_rule_policy();
 });
 
-// src/workers/answer-activity.ts
-var DEFAULT_ANSWER_LEASE_MS;
-var init_answer_activity = __esm(() => {
-  init_model_stream();
-  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
-});
-
 // src/workers/engine-split/commands.ts
 var ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_BODY_MAX_BYTES, forwardedRecordIds, HOP_HEADERS;
 var init_commands = __esm(() => {
@@ -13126,6 +13186,8 @@ var init_commands = __esm(() => {
   init_operation_error();
   init_http();
   init_answer_activity();
+  init_model_call_trace();
+  init_control_path_headroom();
   init_model_stream();
   init_click_trace();
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
@@ -13162,7 +13224,7 @@ var init_tier_visibility = __esm(() => {
 var init_reactions = () => {};
 
 // src/workers/connector-store/local-index.ts
-import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
@@ -13306,7 +13368,7 @@ var init_local_index = __esm(() => {
           (o.first_seen_sync_run_id <> i.sync_run_id OR o.last_seen_sync_run_id <> i.sync_run_id OR o.first_seen_at <> o.last_seen_at))
         AND NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk)
       END AS originalListing`;
-  readAncestorPlans = new AsyncLocalStorage12;
+  readAncestorPlans = new AsyncLocalStorage14;
   lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_V4_ITEM_COLUMNS = [
     "item_pk",
@@ -15299,7 +15361,7 @@ var init_bounded_text = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/command-runner.ts
-import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
 import { Buffer as Buffer2 } from "node:buffer";
 import { execFile as execFile2, spawn as spawn2 } from "node:child_process";
 import { readFile as readFile2, readdir } from "node:fs/promises";
@@ -15566,7 +15628,7 @@ var init_command_runner = __esm(() => {
   init_memory_counters();
   init_descendant_groups();
   init_native_process_service();
-  activeExtraction = new AsyncLocalStorage13;
+  activeExtraction = new AsyncLocalStorage15;
   ExtractionCommandError = class ExtractionCommandError extends Error {
     command;
     exitCode;
@@ -21087,6 +21149,7 @@ var init_sniffer_decision = __esm(() => {
 var GAP_GENERIC_WORDS, utf8;
 var init_analyst_built_in = __esm(() => {
   init_model_stream();
+  init_model_call_trace();
   init_local_analyst_window();
   init_sniffer_decision();
   init_sniffer_lane();

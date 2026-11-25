@@ -5,14 +5,24 @@ import equivalents from './keyword-equivalents.json';
 // the built-in never stands in for it. No corpus text is passed to either, and
 // no cloud analyst is consulted, even on failure.
 import { registeredBuiltInPrivateModel } from '../../workers/classification/built-in-sniffer.ts';
+import { LocalModelPreempted, runBackgroundInference, runWithLocalInferenceCaller } from '../../workers/answer-activity.ts';
 import type { AnalystModel } from '../analyst.ts';
 import { sourceIndexFtsTermGroups, sourceIndexQueryLanguage } from './fts.ts';
-import { withKeywordAlternatives, requestKeywordAlternatives, pinKeywordAlternatives, keywordExpansionDisabled, cachedKeywordExpansion, type CachedKeywordExpansion, type KeywordExpansionMap } from './keyword-context.ts';
+import { withKeywordAlternatives, requestKeywordAlternatives, pinKeywordAlternatives, keywordExpansionDisabled, cachedKeywordExpansion, keywordRequestSignal, withKeywordRequestScope, type CachedKeywordExpansion, type KeywordExpansionMap } from './keyword-context.ts';
 
+type TranslationScope = AbortSignal | 'opportunistic' | undefined;
 // `value` is set once the translation has finished, so a caller that must not wait can use it.
-interface CachedExpansion { pending: Promise<KeywordExpansionMap>; expires: number; value?: KeywordExpansionMap }
+interface CachedExpansion { pending: Promise<KeywordExpansionMap>; expires: number; value?: KeywordExpansionMap; scope: TranslationScope }
 const caches = new WeakMap<AnalystModel, Map<string, CachedExpansion>>();
-const sharedCalls = new WeakMap<AnalystModel, { seen: Set<string>; calls: Map<string, { query: string; languages: readonly string[]; pending: Promise<unknown>; expires: number }> }>();
+interface SharedCall {
+  query: string;
+  languages: readonly string[];
+  pending: Promise<unknown>;
+  expires: number;
+  scope: TranslationScope;
+  finished: boolean;
+}
+const sharedCalls = new WeakMap<AnalystModel, { seen: Set<string>; calls: Set<SharedCall> }>();
 
 /** The owner's local Private model from the shared chooser: a model, 'unavailable' when it is set up but down, undefined when there is none. */
 export type OwnerKeywordModel = () => Promise<AnalystModel | 'unavailable' | undefined>;
@@ -114,7 +124,9 @@ export async function expandSourceIndexKeywords(
       onCold = () => { status.keyword_model = 'cold'; nextTurn(); };
     } else nextTurn();
   });
-  const full = expandCachedSourceIndexKeywords(query, once, builtIn, cachedKeywordExpansion(), onCold);
+  // Preparation may stop waiting and pin the static terms. The translation
+  // can still fill the cache, but has to yield the slot to the owner's answer.
+  const full = runBackgroundInference(() => expandCachedSourceIndexKeywords(query, once, builtIn, cachedKeywordExpansion(), onCold, true));
   const waited = await Promise.race([full, patience]);
   clearTimeout(timer);
   const cached = { missing: false };
@@ -126,7 +138,7 @@ export async function expandSourceIndexKeywords(
 }
 
 async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLanguageProfile, builtIn: Expander | undefined,
-  cachedOnly?: CachedKeywordExpansion, onCold?: () => void): Promise<KeywordExpansionMap> {
+  cachedOnly?: CachedKeywordExpansion, onCold?: () => void, opportunistic = false): Promise<KeywordExpansionMap> {
   if (!query.trim() || query.length > 8000) return EMPTY;
   const sources = sourceIndexFtsTermGroups(query).map(group => group[0]!).filter(term => !/\p{N}/u.test(term));
   const vocabulary = equivalents as Record<string, Record<string, string[]>>;
@@ -153,6 +165,9 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
   if (!builtIn?.available()) return builtIn ? failedCopy(fallback) : fallback;
   const expander = builtIn.model;
   if (!expander) return fallback;
+  const signal = opportunistic ? undefined : keywordRequestSignal();
+  const scope = opportunistic ? 'opportunistic' : signal;
+  if (signal?.aborted) return failedCopy(fallback);
   let cache = caches.get(expander);
   if (!cache) { cache = new Map(); caches.set(expander, cache); }
   const key = JSON.stringify([query, languages]);
@@ -166,11 +181,14 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
   // The server may have stopped while this store was reading its languages.
   const cold = builtIn?.serverReady?.() === false;
   if (cold) onCold?.();
-  if (existing && existing.expires > Date.now()) return existing.pending;
+  // A fully awaited search owns its in-flight call. It can reuse a finished
+  // result, or share a pending call with other stores in the same search.
+  if (existing && existing.expires > Date.now() && (existing.value || existing.scope === scope)) return existing.pending;
   // The model's speed is timed on its own call, never on a store that shares
   // a finished call (that would read as instant and bring the wait back). A
   // call that fails says nothing quicker than the last one that finished.
   let callStartedAt: number | undefined;
+  let interrupted = false;
   const pending = translate();
   // Startup is not a sample of how long translation takes on a serving model.
   if (!cold && callStartedAt !== undefined) {
@@ -182,13 +200,23 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
     const calls = running;
     pending.then((value) => {
       calls.delete(startedAt);
+      if (interrupted) return;
       const took = Date.now() - startedAt;
       lastTranslationMs.set(model, failedTranslations.has(value) ? Math.max(lastTranslationMs.get(model) ?? 0, took) : took);
     }, () => { calls.delete(startedAt); });
   }
-  const entry: CachedExpansion = {pending, expires: Date.now() + 5 * 60_000};
+  const entry: CachedExpansion = { pending, expires: Date.now() + 5 * 60_000, scope };
   cache.set(key, entry);
-  pending.then(value => { entry.value = value; }, () => {});
+  pending.then(value => {
+    if (interrupted) {
+      // The current search keeps its static terms and incomplete status. Do
+      // not cache that as a translation: a later search retries the call.
+      if (cache.get(key) === entry) cache.delete(key);
+    } else {
+      entry.value = value;
+      if (failedTranslations.has(value)) entry.expires = Date.now() + 30_000;
+    }
+  });
   if (cache.size > 128) cache.delete(cache.keys().next().value!);
   return pending;
 
@@ -197,20 +225,19 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
   // languages a call already covers shares that call.
   function askOnce(): Promise<unknown> {
     let shared = sharedCalls.get(expander!);
-    if (!shared) { shared = { seen: new Set(), calls: new Map() }; sharedCalls.set(expander!, shared); }
+    if (!shared) { shared = { seen: new Set(), calls: new Set() }; sharedCalls.set(expander!, shared); }
+    const calls = shared.calls;
     for (const language of languages) shared.seen.add(language);
-    for (const [callKey, call] of shared.calls) {
-      if (call.expires <= Date.now()) shared.calls.delete(callKey);
-      else if (call.query === query && languages.every(language => call.languages.includes(language))) return call.pending;
+    for (const call of calls) {
+      if (call.expires <= Date.now()) calls.delete(call);
+      else if ((call.finished || call.scope === scope) && call.query === query && languages.every(language => call.languages.includes(language))) return call.pending;
     }
     const union = [...shared.seen].filter(code => !sourceLanguages.includes(code)).sort();
     const asked = union.length <= MAX_LANGUAGES ? union : languages;
     const names = Object.fromEntries(asked.map(code => [code, new Intl.DisplayNames(['en'], {type:'language'}).of(code) ?? code]));
-    // No give-up clock: the search has already started on the static word
-    // list, and the model's own silence limit ends a call that stops producing.
-    const pending = expander!.complete({
+    const pending = runWithLocalInferenceCaller('keyword_translation', () => expander!.complete({
       system: SYSTEM + '\nTarget languages: ' + asked.map(code => code + ' = ' + names[code]).join('; '), prompt: JSON.stringify({ context: query, concepts: sources.map((term,index)=>({id:String(index),term})), languages: asked, languageNames: names }),
-      localOnly: true, maxOutputChars: 6000,
+      localOnly: true, maxOutputChars: 6000, ...(signal ? { signal } : {}),
       responseSchema: {
         type: 'object', properties: Object.fromEntries(asked.map(language => [language, {
           type: 'object', properties: Object.fromEntries(sources.map((_,index) => [String(index), {
@@ -218,13 +245,16 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
           }])), additionalProperties: false,
         }])), required: asked, additionalProperties: false,
       },
-    }).then(completion => JSON.parse(completion.text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')) as unknown);
+    })).then(completion => {
+      signal?.throwIfAborted();
+      return JSON.parse(completion.text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')) as unknown;
+    });
     callStartedAt = Date.now();
-    const callKey = JSON.stringify([query, asked]);
-    shared.calls.set(callKey, { query, languages: asked, pending, expires: Date.now() + 5 * 60_000 });
+    const call: SharedCall = { query, languages: asked, pending, expires: Date.now() + 5 * 60_000, scope, finished: false };
+    calls.add(call);
     // A failed call is not shared with a later request.
-    pending.catch(() => { if (shared!.calls.get(callKey)?.pending === pending) shared!.calls.delete(callKey); });
-    if (shared.calls.size > 128) shared.calls.delete(shared.calls.keys().next().value!);
+    pending.then(() => { call.finished = true; }, () => { calls.delete(call); });
+    if (calls.size > 128) calls.delete(calls.values().next().value!);
     return pending;
   }
 
@@ -246,10 +276,9 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
         merged[language]=decoded;
       }
       return parseKeywordExpansion(JSON.stringify(merged),sources,languages);
-    } catch {
-      // Keep failure for this request and its hydration; retry on a later request.
-      const failed = cache!.get(key);
-      if (failed) failed.expires = Date.now() + 30_000;
+    } catch (error) {
+      interrupted = signal?.aborted === true || error instanceof LocalModelPreempted;
+      // Report degraded preparation and keep static terms for this request.
       return failedCopy(fallback);
     }
   }
@@ -300,6 +329,8 @@ export function parseKeywordExpansion(text: string, sources: readonly string[], 
 
 export async function withExpandedSourceIndexKeywords<T>(query: string | undefined, languages: KeywordLanguageProfile, run: () => T, owner?: object): Promise<Awaited<T>> {
   if (!query) return await run();
-  const alternatives = await expandSourceIndexKeywords(query, languages, owner);
-  return await withKeywordAlternatives(query, alternatives, run);
+  return withKeywordRequestScope(async () => {
+    const alternatives = await expandSourceIndexKeywords(query, languages, owner);
+    return await withKeywordAlternatives(query, alternatives, run);
+  });
 }

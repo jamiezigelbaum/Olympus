@@ -25,7 +25,9 @@ import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/ana
 import { OperationError } from '../../core/operation-error.ts';
 import { hasValidWorkerBearerToken } from '../http.ts';
 import { boundedLogErrorMessage, logErrorOrigin } from '../../core/log-redaction.ts';
-import { runAtLocalInferencePriority, type LocalInferencePriority } from '../answer-activity.ts';
+import { LocalModelPreempted, runAtLocalInferencePriority, runWithLocalInferenceCaller, type LocalInferencePriority } from '../answer-activity.ts';
+import { markModelCall, modelTraceClock, readModelCallTraceStart, withModelCallTrace } from '../../core/model-call-trace.ts';
+import { controlPathHeadroom } from '../control-path-headroom.ts';
 import { withModelProgress } from '../../core/model-stream.ts';
 import { CLICK_ID_HEADER, logClickTrace, PRIVACY_ITEM_SET_PATH, readClickId } from './click-trace.ts';
 
@@ -657,6 +659,8 @@ export interface EngineCommandServerOptions {
   maxWaitMs?: number;
   /** The built-in private model's completion, run by the one process that holds the model. */
   modelComplete?: (request: AnalystModelRequest) => Promise<AnalystModelCompletion>;
+  /** A control-thread socket forwards to the loop, where dispatch and lag are measured. */
+  modelOnControlThread?: boolean;
   /** Timer seam for the wait. */
   setTimeout?: (callback: () => void, ms: number) => unknown;
   clearTimeout?: (timer: unknown) => void;
@@ -719,12 +723,22 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
     }
     if (url.pathname === ENGINE_MODEL_COMPLETE_PATH && request.method === 'POST') {
       if (!options.ready() || !options.modelComplete) return Response.json({ error: 'model_unavailable' }, { status: 503 });
+      const received = modelTraceClock();
       const body = await request.json().catch(() => undefined);
       const parsed = parseModelRequest(body);
-      const priority = parseModelPriority(asRecord(body)?.priority);
+      const metadata = asRecord(body);
+      const priority = parseModelPriority(metadata?.priority);
       if (!parsed || !priority) return Response.json({ error: 'invalid_model_request' }, { status: 400 });
+      const trace = readModelCallTraceStart(metadata?.trace);
+      const caller = metadata?.caller === 'keyword_translation' ? metadata.caller : undefined;
+      if (trace) {
+        markModelCall('bg_socket_received', trace, received);
+        if (!options.modelOnControlThread) markModelCall('bg_received', trace);
+      }
       const modelComplete = options.modelComplete;
       const encoder = new TextEncoder();
+      const cancelled = new AbortController();
+      const signal = AbortSignal.any([request.signal, cancelled.signal]);
       let closed = false;
       let lastProgressMs = -Infinity;
       const stream = new ReadableStream<Uint8Array>({
@@ -739,15 +753,26 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
             lastProgressMs = now;
             send({ progress: model });
           };
+          const result = (value: Record<string, unknown>): void => {
+            if (trace && !options.modelOnControlThread) {
+              trace.bgLoopLagMaxMs = controlPathHeadroom.modelLoopLagSince(trace.startedAt);
+              markModelCall('bg_result_posted', trace);
+            }
+            send({ ...value, ...(trace ? { trace } : {}) });
+          };
           // The front's call keeps its priority here: a background answer stays
           // background, so the judge still gets its fair turn behind it.
-          void withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal })))
-            .then((completion) => send({ completion }), (error: unknown) => {
+          const complete = () => runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal }));
+          void withModelProgress(progress, () => withModelCallTrace(trace, () => runWithLocalInferenceCaller(caller, complete)))
+            .then((completion) => result({ completion }), (error: unknown) => {
+              // The caller has already stopped reading this stream.
+              if (signal.aborted) return;
               // The model's own answer, typed as it would be in one process: a
               // download still running or a server that failed to start.
-              if (error instanceof OperationError) return send({ operation_error: error.toJSON() });
+              if (error instanceof LocalModelPreempted) return result({ preempted: true });
+              if (error instanceof OperationError) return result({ operation_error: error.toJSON() });
               console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
-              send({ error: 'model_failed', message: error instanceof Error ? error.message : 'unknown error' });
+              result({ error: 'model_failed', message: error instanceof Error ? error.message : 'unknown error' });
             })
             .finally(() => {
               if (closed) return;
@@ -755,7 +780,7 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
               try { controller.close(); } catch { /* the front already went away */ }
             });
         },
-        cancel() { closed = true; },
+        cancel() { closed = true; cancelled.abort(); },
       });
       return new Response(stream, { status: 200, headers: { 'content-type': ENGINE_MODEL_STREAM_CONTENT_TYPE } });
     }

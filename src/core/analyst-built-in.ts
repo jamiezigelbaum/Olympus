@@ -1,4 +1,5 @@
 import { fetchStreamingModel } from './model-stream.ts';
+import { logModelCallTrace, markModelCall, startModelCallTrace, withModelCallTrace } from './model-call-trace.ts';
 import { registerLocalAnalystFallback } from '../workers/source-index/local-analyst-window.ts';
 // The built-in private analyst (`built_in`): a small local LLM that ships
 // inside Olympus with zero setup. It answers Private-tier questions from
@@ -714,29 +715,28 @@ const GAP_GENERIC_WORDS = new Set([
   'citations', 'citation', 'unanswered', 'sufficient', 'insufficient', 'claim', 'claims',
 ]);
 
-/** The model, reporting each call's stage (the first is the answer, any later one the audit) and cost. */
+/** The model, reporting each call's stage (the first is the answer, any later one the audit) and cost; only an observed answer (the engine's private-answer jobs) traces its calls, so a CLI's stdout stays its own. */
 function timedModel(model: AnalystModel, report: (call: PrivateModelCallTiming) => void): AnalystModel {
   let calls = 0;
   return {
     async complete(request) {
       const stage = calls === 0 ? 'main' : 'audit';
       calls += 1;
-      const started = performance.now();
+      const trace = startModelCallTrace();
       const promptBytes = utf8.encode(request.system).length + utf8.encode(request.prompt).length;
-      const done = (ok: boolean, usage?: AnalystModelUsage) => {
+      let completion: AnalystModelCompletion | undefined;
+      try {
+        completion = await withModelCallTrace(trace, () => model.complete(request));
+        return completion;
+      } finally {
+        markModelCall('main_end', trace);
+        const ok = completion !== undefined;
+        logModelCallTrace(trace, stage, ok);
         try {
-          report({ stage, ms: Math.round(performance.now() - started), promptBytes, ok, ...(usage ?? {}) });
+          report({ stage, ms: trace.offsets.main_end!, promptBytes, ok, ...completion?.usage });
         } catch {
           // A reporting hook never fails the answer.
         }
-      };
-      try {
-        const completion = await model.complete(request);
-        done(true, completion.usage);
-        return completion;
-      } catch (error) {
-        done(false);
-        throw error;
       }
     },
   };

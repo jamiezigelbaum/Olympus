@@ -6,15 +6,18 @@ import { AsyncResource } from 'node:async_hooks';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
+import { answerPrivately, BUILT_IN_ANALYST_NAME, createBuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
 import { OperationError } from '../src/core/operation-error.ts';
-import { noteModelProgress, withModelProgress } from '../src/core/model-stream.ts';
+import { fetchStreamingModel, noteModelProgress, withModelProgress } from '../src/core/model-stream.ts';
 import { createUnixSocketFetch } from '../src/core/worker-transport.ts';
 import { createEngineCommandHandler, EngineCommandLedger, parseEngineCommandEnvelope } from '../src/workers/engine-split/commands.ts';
 import { startEngineControlPlane } from '../src/workers/engine-split/control-plane.ts';
 import { completeModelInBackground, createEngineFront } from '../src/workers/engine-split/runtime.ts';
-import { createLocalModelActivity, currentLocalInferencePriority, runBackgroundInference, runClassificationInference } from '../src/workers/answer-activity.ts';
+import { LocalModelPreempted, createLocalModelActivity, currentLocalInferencePriority, runBackgroundInference, runClassificationInference, runWithLocalInferenceCaller } from '../src/workers/answer-activity.ts';
+import { createBuiltInPrivateAnswerModel } from '../src/workers/chatgpt/private-answer-model.ts';
+import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 
 const TOKEN = 'engine-split-model-token';
 
@@ -161,6 +164,123 @@ test('model progress crosses the control thread to the front', async () => {
     expect(seen).toEqual(['qwen']);
   } finally {
     plane!.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('each main and audit call logs all split timings and queue occupants without content', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-split-trace-'));
+  const socketPath = join(dir, 'engine.sock');
+  const held = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const activity = createLocalModelActivity({ singleSlotResources: [BUILT_IN_ANALYST_NAME] });
+  const answer = 'Hemoglobin was 13.9 g/dL';
+  const reply = JSON.stringify({ answer: `${answer} [1].`, citations: [{ evidence: 1, claim: answer }], unanswered: [], sufficient: true });
+  const fakeLlama = async () => new Response(
+    `data: ${JSON.stringify({ choices: [{ delta: { content: reply }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`,
+    { headers: { 'content-type': 'text/event-stream' } },
+  );
+  const model = activity.track(BUILT_IN_ANALYST_NAME, {
+    async complete(request: AnalystModelRequest) {
+      if (request.prompt === 'held') {
+        held.resolve();
+        request.signal!.addEventListener('abort', () => release.resolve(), { once: true });
+        await release.promise;
+        request.signal!.throwIfAborted();
+      }
+      const response = await fetchStreamingModel(fakeLlama, 'http://llama/v1/chat/completions', { signal: request.signal ?? null }, 'qwen');
+      const parsed = await response.json() as { choices: Array<{ message: { content: string } }> };
+      return { text: parsed.choices[0]!.message.content, modelId: 'private-model-name' };
+    },
+  });
+  const plane = startEngineControlPlane({
+    socketPath, authToken: TOKEN, instanceId: 'background-trace',
+    ledger: new EngineCommandLedger({ instanceId: 'background-trace', handlers: {} }),
+    modelComplete: model.complete, onLost: () => {}, log: () => {},
+  });
+  const log = spyOn(console, 'log').mockImplementation(() => {});
+  try {
+    expect(plane).toBeDefined();
+    plane!.setReady(true);
+    const fetchBackground = createUnixSocketFetch(socketPath);
+    const complete = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, TOKEN, request);
+    const occupying = runBackgroundInference(() => runWithLocalInferenceCaller('keyword_translation', () =>
+      complete({ system: 'private fixture system', prompt: 'held', localOnly: true }),
+    )).then(() => undefined, (error: unknown) => error);
+    await held.promise;
+    const front = createLocalModelActivity().track(BUILT_IN_ANALYST_NAME, {
+      ...createBuiltInAnalystModel({ model: QWEN35_4B }), complete,
+    }, { serialize: false });
+    const panel = createBuiltInPrivateAnswerModel({
+      model: front, answer: answerPrivately, available: () => true,
+      eligible: async items => items.map(() => true), limits: { audit: true },
+    });
+    await panel.answerPrivately('What did my June blood work show?', [
+      { title: 'Private lab results', trust_domain: 'secure_local', provider_item_id: 'private-item-id', chunks: ['Hemoglobin 13.9 g/dL, collected 12 June 2026.'] },
+      { title: 'Private clinic note', trust_domain: 'secure_local', chunks: ['Follow-up booked for July.'] },
+    ], undefined, { modelCall: () => {} });
+    expect(await occupying).toBeInstanceOf(LocalModelPreempted);
+
+    const prefix = '[private-model-call] ';
+    const lines = log.mock.calls.map(args => String(args[0])).filter(line => line.startsWith(prefix));
+    expect(lines).toHaveLength(2);
+    expect(lines.join('\n')).not.toMatch(/Hemoglobin|blood work|Private lab results|private-item-id|private fixture system|private-model-name|Follow-up|citation/i);
+    const traces = lines.map(line => JSON.parse(line.slice(prefix.length)));
+    expect(traces.map(trace => trace.stage)).toEqual(['main', 'audit']);
+    expect(traces[0].call_id).not.toBe(traces[1].call_id);
+    expect(traces[0].queued_behind).toEqual([{ priority: 'background', caller: 'keyword_translation' }]);
+    expect(traces[1].queued_behind).toEqual([]);
+    const phases = ['main_start', 'guards_done', 'forward_sent', 'bg_socket_received', 'bg_received',
+      'queue_enter', 'queue_admit', 'http_sent', 'first_sse', 'last_sse', 'bg_result_posted', 'front_result', 'main_end'];
+    for (const trace of traces) {
+      expect(trace.call_id).toMatch(/^[a-f0-9-]{36}$/);
+      expect(trace.ok).toBe(true);
+      expect(trace.main_start).toBe(0);
+      expect(trace.bg_loop_lag_max_ms).toBeGreaterThanOrEqual(0);
+      expect(Object.keys(trace).sort()).toEqual([...phases, 'call_id', 'stage', 'ok', 'queued_behind', 'bg_loop_lag_max_ms'].sort());
+      let previous = 0;
+      for (const phase of phases) {
+        expect(Number.isInteger(trace[phase])).toBe(true);
+        expect(trace[phase]).toBeGreaterThanOrEqual(previous);
+        previous = trace[phase];
+      }
+    }
+  } finally {
+    release.resolve();
+    log.mockRestore();
+    plane?.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ending a front search aborts its active model request on the background loop', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-split-search-abort-'));
+  const socketPath = join(dir, 'engine.sock');
+  const backgroundStopped = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const plane = startEngineControlPlane({
+    socketPath, authToken: TOKEN, instanceId: 'background-cancel',
+    ledger: new EngineCommandLedger({ instanceId: 'background-cancel', handlers: {} }),
+    async modelComplete(request) {
+      request.signal!.addEventListener('abort', () => backgroundStopped.resolve(), { once: true });
+      noteModelProgress('fixture');
+      await finish.promise;
+      return { text: 'done', modelId: 'fixture' };
+    },
+    onLost: () => {}, log: () => {},
+  });
+  const controller = new AbortController();
+  try {
+    expect(plane).toBeDefined();
+    plane!.setReady(true);
+    const pending = withModelProgress(() => controller.abort(), () => completeModelInBackground(createUnixSocketFetch(socketPath), TOKEN, {
+      system: 's', prompt: 'p', localOnly: true, signal: controller.signal,
+    })).then(() => 'finished', (error: Error) => error.name);
+    await backgroundStopped.promise;
+    expect(await pending).toBe('AbortError');
+  } finally {
+    finish.resolve();
+    plane?.stop();
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -19,16 +19,28 @@ const cachedOnly = new AsyncLocalStorage<CachedKeywordExpansion>();
 export function withCachedKeywordExpansion<T>(state: CachedKeywordExpansion, run: () => T): T { return cachedOnly.run(state, run); }
 export function cachedKeywordExpansion(): CachedKeywordExpansion | undefined { return cachedOnly.getStore(); }
 
-const requestContext = new AsyncLocalStorage<Map<object, Map<string, KeywordExpansionMap>>>();
+const requestContext = new AsyncLocalStorage<{
+  pinned: Map<object, Map<string, KeywordExpansionMap>>;
+  lifetime: AbortController;
+}>();
 
-export function withKeywordRequestScope<T>(run: () => T): T {
-  return requestContext.getStore() ? run() : requestContext.run(new Map(), run);
+/** A routed search can keep the outer request's pinned terms with its own cancellation boundary. */
+export async function withKeywordRequestScope<T>(run: () => T, newLifetime = false): Promise<Awaited<T>> {
+  const current = requestContext.getStore();
+  if (current && !newLifetime) return await run();
+  const lifetime = new AbortController();
+  try {
+    return await requestContext.run({ pinned: current?.pinned ?? new Map(), lifetime }, run);
+  } finally {
+    lifetime.abort();
+  }
 }
+export function keywordRequestSignal(): AbortSignal | undefined { return requestContext.getStore()?.lifetime.signal; }
 export function requestKeywordAlternatives(owner: object | undefined, query: string): KeywordExpansionMap | undefined {
-  return owner ? requestContext.getStore()?.get(owner)?.get(query) : undefined;
+  return owner ? requestContext.getStore()?.pinned.get(owner)?.get(query) : undefined;
 }
 export function pinKeywordAlternatives(owner: object | undefined, query: string, alternatives: KeywordExpansionMap): void {
-  const request = requestContext.getStore();
+  const request = requestContext.getStore()?.pinned;
   if (!owner || !request) return;
   let queries = request.get(owner);
   if (!queries) { queries = new Map(); request.set(owner, queries); }

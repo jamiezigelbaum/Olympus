@@ -25423,8 +25423,104 @@ var init_source_answer_jobs = __esm(() => {
   progressSink = new AsyncLocalStorage3;
 });
 
-// src/core/model-stream.ts
+// src/core/log-redaction.ts
+function redactLogLine(line) {
+  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+function boundedLogErrorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const oneLine = message.replace(/\s+/g, " ").trim();
+  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+function logErrorOrigin(error) {
+  if (!(error instanceof Error))
+    return JSON.stringify(typeof error);
+  const frame = errorFirstFrame(error);
+  return JSON.stringify(redactLogLine(frame ? `${error.name} at ${frame}` : error.name).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+function errorFirstFrame(error) {
+  const line = error.stack?.split(`
+`).map((entry) => entry.trim()).find((entry) => entry.startsWith("at "));
+  if (!line)
+    return;
+  return line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+(?::\d+)?)/g, "$1").slice(0, 160);
+}
+function errorFromBoundary(message, name, frame, where) {
+  const error = new Error(message);
+  if (name)
+    error.name = name;
+  error.stack = `${error.name}: ${message}
+    at ${frame ?? "unknown"} (${where})`;
+  return error;
+}
+var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
+
+// src/core/model-call-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { randomUUID as randomUUID5 } from "node:crypto";
+function readModelCallTraceStart(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const { id, startedAt } = value;
+  if (typeof id !== "string" || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id) || typeof startedAt !== "number" || !Number.isFinite(startedAt) || startedAt <= 0)
+    return;
+  return { id, startedAt, offsets: {} };
+}
+function markModelCall(point, trace = currentModelCallTrace(), at) {
+  if (trace)
+    trace.offsets[point] = Math.max(0, Math.round((at ?? modelTraceClock()) - trace.startedAt));
+}
+function mergeBackgroundModelTrace(trace, value) {
+  if (!value || typeof value !== "object")
+    return;
+  const background = value;
+  if (background.id !== trace.id)
+    return;
+  for (const point of BACKGROUND_POINTS) {
+    const ms = background.offsets?.[point];
+    if (typeof ms === "number" && Number.isFinite(ms) && ms >= 0)
+      trace.offsets[point] = ms;
+  }
+  const lag = background.bgLoopLagMaxMs;
+  if (typeof lag === "number" && Number.isFinite(lag) && lag >= 0)
+    trace.bgLoopLagMaxMs = lag;
+  if (Array.isArray(background.queuedBehind)) {
+    trace.queuedBehind = background.queuedBehind.flatMap((entry) => PRIORITIES.includes(entry?.priority) && CALLERS.includes(entry?.caller) ? [{ priority: entry.priority, caller: entry.caller }] : []);
+  }
+}
+function logModelCallTrace(trace, stage, ok) {
+  const offsets = Object.fromEntries(POINTS.map((point) => [point, trace.offsets[point] ?? null]));
+  const line = JSON.stringify({
+    call_id: trace.id,
+    stage,
+    ok,
+    main_start: 0,
+    ...offsets,
+    queued_behind: trace.queuedBehind ?? [],
+    bg_loop_lag_max_ms: trace.bgLoopLagMaxMs ?? null
+  });
+  console.log(redactLogLine(`[private-model-call] ${line}`));
+}
+var BACKGROUND_POINTS, POINTS, CALLERS, PRIORITIES, active, currentModelCallTrace = () => active.getStore(), withModelCallTrace = (trace, run) => active.run(trace, run), modelTraceClock = () => performance.timeOrigin + performance.now(), startModelCallTrace = () => ({ id: randomUUID5(), startedAt: modelTraceClock(), offsets: {} });
+var init_model_call_trace = __esm(() => {
+  BACKGROUND_POINTS = [
+    "bg_socket_received",
+    "bg_received",
+    "queue_enter",
+    "queue_admit",
+    "http_sent",
+    "first_sse",
+    "last_sse",
+    "bg_result_posted"
+  ];
+  POINTS = ["guards_done", "forward_sent", ...BACKGROUND_POINTS, "front_result", "main_end"];
+  CALLERS = ["keyword_translation", "tier_sniffer", "private_answer", "untagged"];
+  PRIORITIES = ["owner", "background", "maintenance"];
+  active = new AsyncLocalStorage4;
+});
+
+// src/core/model-stream.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 function withModelProgress(listener, work) {
   const parent = progress.getStore();
   return progress.run((model) => {
@@ -25466,6 +25562,7 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
   arm();
   progress.getStore()?.(model);
   let reader;
+  const trace = currentModelCallTrace();
   let lastNote = -Infinity;
   const token = () => {
     if (Date.now() - lastNote >= 1000) {
@@ -25476,6 +25573,8 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
   try {
     if (typeof init.body === "string")
       addMemoryPayloadText(init.body);
+    if (trace)
+      markModelCall("http_sent", trace);
     const response = await Promise.race([fetchModelEndpoint(fetchImpl, url, { ...init, signal: controller.signal }), stopped]);
     if (!response.body)
       return response;
@@ -25497,6 +25596,10 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
 `);
       if (!data)
         return;
+      if (trace) {
+        markModelCall("last_sse", trace);
+        trace.offsets.first_sse ??= trace.offsets.last_sse;
+      }
       if (data.trim() === "[DONE]") {
         done = true;
         return;
@@ -25596,7 +25699,8 @@ var init_model_stream = __esm(() => {
   init_memory_counters();
   init_model_transport();
   init_source_answer_jobs();
-  progress = new AsyncLocalStorage4;
+  init_model_call_trace();
+  progress = new AsyncLocalStorage5;
   ModelStreamError = class ModelStreamError extends Error {
     model;
     constructor(model) {
@@ -26051,7 +26155,7 @@ var init_stopwords_iso = __esm(() => {
 });
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 function withKeywordExpansionDisabled(run) {
   return disabled.run(true, run);
 }
@@ -26064,14 +26168,25 @@ function withCachedKeywordExpansion(state, run) {
 function cachedKeywordExpansion() {
   return cachedOnly.getStore();
 }
-function withKeywordRequestScope(run) {
-  return requestContext.getStore() ? run() : requestContext.run(new Map, run);
+async function withKeywordRequestScope(run, newLifetime = false) {
+  const current = requestContext.getStore();
+  if (current && !newLifetime)
+    return await run();
+  const lifetime = new AbortController;
+  try {
+    return await requestContext.run({ pinned: current?.pinned ?? new Map, lifetime }, run);
+  } finally {
+    lifetime.abort();
+  }
+}
+function keywordRequestSignal() {
+  return requestContext.getStore()?.lifetime.signal;
 }
 function requestKeywordAlternatives(owner, query) {
-  return owner ? requestContext.getStore()?.get(owner)?.get(query) : undefined;
+  return owner ? requestContext.getStore()?.pinned.get(owner)?.get(query) : undefined;
 }
 function pinKeywordAlternatives(owner, query, alternatives) {
-  const request = requestContext.getStore();
+  const request = requestContext.getStore()?.pinned;
   if (!owner || !request)
     return;
   let queries = request.get(owner);
@@ -26092,10 +26207,10 @@ function withKeywordAlternatives(query, alternatives, run) {
 }
 var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
-  context = new AsyncLocalStorage5;
-  disabled = new AsyncLocalStorage5;
-  cachedOnly = new AsyncLocalStorage5;
-  requestContext = new AsyncLocalStorage5;
+  context = new AsyncLocalStorage6;
+  disabled = new AsyncLocalStorage6;
+  cachedOnly = new AsyncLocalStorage6;
+  requestContext = new AsyncLocalStorage6;
 });
 
 // src/core/source-index/keyword-stopwords.ts
@@ -26973,7 +27088,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel) {
   if (!request.localOnly)
     return;
@@ -27983,7 +28098,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage6;
+  analystAbortSignalStorage = new AsyncLocalStorage7;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -32347,7 +32462,7 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { randomUUID as randomUUID5 } from "node:crypto";
+import { randomUUID as randomUUID6 } from "node:crypto";
 import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync18 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
 import { dirname as dirname19, join as join22 } from "node:path";
@@ -32378,7 +32493,7 @@ async function withConnectedHandleGrantCustody(registryPath, options, mutation) 
         throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
       }
       if (options.advanceEpoch === true) {
-        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID5() }, null, 2)}
+        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID6() }, null, 2)}
 `);
       }
       return await mutation();
@@ -33378,7 +33493,7 @@ var init_file_scope_sources = __esm(() => {
 });
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash10, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash10, randomUUID as randomUUID7 } from "node:crypto";
 import { existsSync as existsSync12, readFileSync as readFileSync21 } from "node:fs";
 import { dirname as dirname21, join as join24 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -33543,7 +33658,7 @@ function approveFileSourceScope(input) {
       throw new OperationError("source_index_policy_violation", "The previous folder save still has on-demand reads to revoke.");
     const existing = readState(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
-    const revision = randomUUID6();
+    const revision = randomUUID7();
     approvals.push({
       source_id: input.sourceId,
       account_generation: input.accountGeneration,
@@ -33738,7 +33853,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash11, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash11, randomUUID as randomUUID8 } from "node:crypto";
 import { existsSync as existsSync13, readFileSync as readFileSync22 } from "node:fs";
 import { dirname as dirname22, join as join25 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -33849,7 +33964,7 @@ function approveMailSourceScope(input) {
     const scope = normalizeMailScope({ ...input.scope, ...keptCutoff ? { contentAfter: keptCutoff } : {} }, now);
     const existing = readState2(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
-    const revision = randomUUID7();
+    const revision = randomUUID8();
     const ownerTierRules = mailScopeOwnerTierRules(scope);
     approvals.push({
       source_id: MAIL_SOURCE_SCOPE_ID,
@@ -37152,6 +37267,8 @@ class ControlPathHeadroom {
   overBudget = 0;
   heartbeat;
   expectedBeatAt = 0;
+  modelLagHistory;
+  modelLagSamples = 0;
   turns = 0;
   rests = 0;
   freezes = 0;
@@ -37229,6 +37346,25 @@ class ControlPathHeadroom {
       overBudget: this.overBudget
     };
   }
+  startModelLagSampling() {
+    this.modelLagHistory ??= new Float64Array(2 * MODEL_LAG_SAMPLES);
+    this.ensureHeartbeat();
+  }
+  modelLoopLagSince(startedAt) {
+    this.startModelLagSampling();
+    const since = startedAt - performance.timeOrigin;
+    let max = Math.max(0, this.now() - Math.max(since, this.expectedBeatAt));
+    const history = this.modelLagHistory;
+    const oldest = Math.max(0, this.modelLagSamples - MODEL_LAG_SAMPLES);
+    for (let sample = this.modelLagSamples - 1;sample >= oldest; sample -= 1) {
+      const index = 2 * (sample % MODEL_LAG_SAMPLES);
+      const elapsed = history[index] - since;
+      if (elapsed <= max)
+        break;
+      max = Math.max(max, Math.min(elapsed, history[index + 1]));
+    }
+    return Math.round(max);
+  }
   stop() {
     if (this.heartbeat)
       clearInterval(this.heartbeat);
@@ -37242,6 +37378,11 @@ class ControlPathHeadroom {
       const now = this.now();
       this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
       this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.modelLagHistory) {
+        const index = 2 * (this.modelLagSamples++ % MODEL_LAG_SAMPLES);
+        this.modelLagHistory[index] = now;
+        this.modelLagHistory[index + 1] = this.lastLagMs;
+      }
       if (this.lastLagMs > this.maxLagMs)
         this.maxLagMs = this.lastLagMs;
       if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS)
@@ -37371,7 +37512,7 @@ async function startCpuSampleLog(env = process.env, loadProfiler = () => import(
     clearInterval(lag);
   };
 }
-var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_LAG_COUNTED_MS = 250, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom, CPU_SAMPLE_LOG_ENV = "OLYMPUS_CPU_SAMPLE_LOG", CPU_SAMPLE_FLUSH_MS = 30000, CPU_SAMPLE_TOP = 30, CPU_SAMPLE_STALL_MS = 1000, CPU_SAMPLE_LAG_TICK_MS = 100;
+var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, MODEL_LAG_SAMPLES = 24000, CONTROL_PATH_LAG_COUNTED_MS = 250, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom, CPU_SAMPLE_LOG_ENV = "OLYMPUS_CPU_SAMPLE_LOG", CPU_SAMPLE_FLUSH_MS = 30000, CPU_SAMPLE_TOP = 30, CPU_SAMPLE_STALL_MS = 1000, CPU_SAMPLE_LAG_TICK_MS = 100;
 var init_control_path_headroom = __esm(() => {
   init_engine_split();
   controlPathHeadroom = new ControlPathHeadroom;
@@ -37816,7 +37957,7 @@ var init_zip = () => {};
 
 // src/workers/source-index/built-in-embedding/assets.ts
 import { isMainThread as isMainThread2 } from "node:worker_threads";
-import { createHash as createHash14, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash14, randomUUID as randomUUID9 } from "node:crypto";
 import {
   closeSync as closeSync11,
   createReadStream as createReadStream2,
@@ -38116,7 +38257,7 @@ async function liteRtLibraryIntact(runtimeDir, wheel) {
   return expected !== undefined && await sha256File(join31(runtimeDir, basename4(wheel.library))) === expected;
 }
 async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID8()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID9()}`;
   ensureDirectory(staging);
   try {
     const archivePath = join31(staging, wheel.name);
@@ -38188,7 +38329,7 @@ function runtimeInstalled(runtimeDir, packages) {
   }
 }
 async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporter, stallMs) {
-  const staging = `${runtimeDir}.staging-${randomUUID8()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID9()}`;
   ensureDirectory(staging);
   try {
     for (const pack of packages) {
@@ -38238,7 +38379,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     fetchImpl,
     url,
     target,
-    partial: `${target}.partial-${process.pid}-${randomUUID8()}`,
+    partial: `${target}.partial-${process.pid}-${randomUUID9()}`,
     expectedBytes,
     algorithm,
     digest: expected.kind === "sha256" ? expected.expected : expected.expected.slice(algorithm.length + 1),
@@ -43086,7 +43227,7 @@ var init_tier_classifier = __esm(() => {
 
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
-import { randomUUID as randomUUID9 } from "node:crypto";
+import { randomUUID as randomUUID10 } from "node:crypto";
 import { chmodSync as chmodSync5, closeSync as closeSync12, existsSync as existsSync25, mkdirSync as mkdirSync14, openSync as openSync12, statSync as statSync12 } from "node:fs";
 import { dirname as dirname30 } from "node:path";
 function isFailSafeMissingContentQuestion(reason) {
@@ -44563,7 +44704,7 @@ class TierLedger {
       if (cleared && before && settled && !this.itemIsSecret(identity) && before.metadataTier !== "secrets" && before.contentTier !== "secrets") {
         const generation = settled.state === "moving" ? settled.generation + 1 : settled.generation;
         this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
-          id: randomUUID9(),
+          id: randomUUID10(),
           generation,
           landing: settled.state === "moving",
           historyPk: this.latestHistoryPk(identity),
@@ -47832,8 +47973,8 @@ var init_store_reclaim_admission = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-import { createHash as createHash18, randomUUID as randomUUID10 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { createHash as createHash18, randomUUID as randomUUID11 } from "node:crypto";
 function poolSqlSite(sql) {
   const shape = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (token) => token.startsWith("--") || token.startsWith("/*") ? " " : "?").replace(/\b(?:0x[\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, "N").replace(/\s+/g, " ").trim();
   const hash = createHash18("sha256").update(shape).digest("hex").slice(0, 16);
@@ -47990,7 +48131,7 @@ function beginSourceAnswerPoolRead(statement, label) {
 function createSourceAnswerTrace(now = () => new Date) {
   const received = now();
   return {
-    correlationId: randomUUID10(),
+    correlationId: randomUUID11(),
     receivedAt: received.toISOString(),
     receivedAtMs: received.getTime(),
     sqliteRetryCount: 0,
@@ -48362,9 +48503,9 @@ var init_answer_latency_trace = __esm(() => {
   init_source_answer_jobs();
   init_store_reclaim_admission();
   poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage7;
-  queryStorage = new AsyncLocalStorage7;
-  laneStorage = new AsyncLocalStorage7;
+  storage2 = new AsyncLocalStorage8;
+  queryStorage = new AsyncLocalStorage8;
+  laneStorage = new AsyncLocalStorage8;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -48384,7 +48525,7 @@ var init_answer_latency_trace = __esm(() => {
 });
 
 // src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 function withSourceIndexReadProgress(report, run) {
   return progress2.run(report, run);
 }
@@ -48399,40 +48540,8 @@ function currentSourceIndexReadProgress() {
 }
 var progress2;
 var init_read_progress = __esm(() => {
-  progress2 = new AsyncLocalStorage8;
+  progress2 = new AsyncLocalStorage9;
 });
-
-// src/core/log-redaction.ts
-function redactLogLine(line) {
-  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
-}
-function boundedLogErrorMessage(error) {
-  const message = error instanceof Error ? error.message : String(error);
-  const oneLine = message.replace(/\s+/g, " ").trim();
-  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
-}
-function logErrorOrigin(error) {
-  if (!(error instanceof Error))
-    return JSON.stringify(typeof error);
-  const frame = errorFirstFrame(error);
-  return JSON.stringify(redactLogLine(frame ? `${error.name} at ${frame}` : error.name).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
-}
-function errorFirstFrame(error) {
-  const line = error.stack?.split(`
-`).map((entry) => entry.trim()).find((entry) => entry.startsWith("at "));
-  if (!line)
-    return;
-  return line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+(?::\d+)?)/g, "$1").slice(0, 160);
-}
-function errorFromBoundary(message, name, frame, where) {
-  const error = new Error(message);
-  if (name)
-    error.name = name;
-  error.stack = `${error.name}: ${message}
-    at ${frame ?? "unknown"} (${where})`;
-  return error;
-}
-var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
 
 // src/core/source-index/lane-busy.ts
 function isSourceIndexLaneBusyError(error) {
@@ -49204,7 +49313,7 @@ function childProviderItemId(parentProviderItemId, key) {
 var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/workers/connector-store/child-visibility.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 function* visibilityRead(here, offThread) {
   return yield { here, offThread };
 }
@@ -49394,7 +49503,7 @@ function parentIdentityField(child) {
   return identity ? { identity } : {};
 }
 function withSearchVisibilityStores(allowed, read) {
-  searchStores ??= new AsyncLocalStorage9;
+  searchStores ??= new AsyncLocalStorage10;
   return searchStores.run(allowed, read);
 }
 function searchVisibilityScoped() {
@@ -51684,7 +51793,7 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
 import { createHash as createHash23 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -52545,7 +52654,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage10;
+  priorityQueryEmbedding = new AsyncLocalStorage11;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -54371,7 +54480,7 @@ import { chmodSync as chmodSync8, existsSync as existsSync31, mkdirSync as mkdir
 import { dirname as dirname35, join as join41, resolve as resolve11 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { randomUUID as randomUUID11 } from "node:crypto";
+import { randomUUID as randomUUID12 } from "node:crypto";
 function isStandaloneEngineProcess(env) {
   const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
   return (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine");
@@ -54815,7 +54924,7 @@ function migratePrivateMeaningSearch(path) {
       }
     };
     validateSovereigntyConfig(next);
-    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID11()}`;
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID12()}`;
     lease.commit(() => {
       writePrivateFileAtomicSync(backup, original);
       writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}
@@ -56635,6 +56744,301 @@ var init_built_in_sniffer = __esm(() => {
   });
 });
 
+// src/workers/answer-activity.ts
+import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
+function currentLocalInferenceCaller() {
+  return localInferenceCaller.getStore();
+}
+function runWithLocalInferenceCaller(caller, work) {
+  return localInferenceCaller.run(caller, work);
+}
+function runPrivacyReleaseInference(work) {
+  privacyReleaseInference ??= new AsyncLocalStorage12;
+  localInferencePriority ??= new AsyncLocalStorage12;
+  return privacyReleaseInference.run(true, () => localInferencePriority.run("owner", work));
+}
+function runWithLocalInferenceGuard(guard, work) {
+  localInferenceGuards ??= new AsyncLocalStorage12;
+  return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
+}
+function runBackgroundInference(work) {
+  localInferencePriority ??= new AsyncLocalStorage12;
+  return localInferencePriority.run("background", work);
+}
+function runClassificationInference(work) {
+  localInferencePriority ??= new AsyncLocalStorage12;
+  return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
+}
+function currentLocalInferencePriority() {
+  return localInferencePriority?.getStore() ?? "owner";
+}
+function runAtLocalInferencePriority(priority, work) {
+  localInferencePriority ??= new AsyncLocalStorage12;
+  return localInferencePriority.run(priority, work);
+}
+function createAnswerActivity(onBusy, options = {}) {
+  const maxLeaseMs = options.maxLeaseMs ?? DEFAULT_ANSWER_LEASE_MS;
+  const now = options.now ?? Date.now;
+  const leases = new Map;
+  const idleListeners = new Set;
+  let interactive = 0;
+  let nextId = 0;
+  let expired = 0;
+  const drop = (id) => {
+    const lease = leases.get(id);
+    if (!lease)
+      return;
+    leases.delete(id);
+    if (lease.kind === "background")
+      return;
+    interactive -= 1;
+    if (interactive > 0 || idleListeners.size === 0)
+      return;
+    queueMicrotask(() => {
+      if (interactive > 0)
+        return;
+      for (const listener of [...idleListeners]) {
+        try {
+          listener();
+        } catch {}
+      }
+    });
+  };
+  const sweep = () => {
+    const at = now();
+    for (const [id, { startedAt }] of leases) {
+      if (at - startedAt < maxLeaseMs)
+        break;
+      drop(id);
+      expired += 1;
+      try {
+        options.onExpired?.(at - startedAt);
+      } catch {}
+    }
+  };
+  const activity = {
+    get busy() {
+      sweep();
+      return leases.size > 0;
+    },
+    get inFlight() {
+      sweep();
+      return leases.size;
+    },
+    get interactiveInFlight() {
+      sweep();
+      return interactive;
+    },
+    get expired() {
+      sweep();
+      return expired;
+    },
+    begin(kind = "owner") {
+      sweep();
+      const id = nextId++;
+      leases.set(id, { startedAt: now(), kind });
+      if (kind !== "background")
+        interactive += 1;
+      if (leases.size === 1) {
+        try {
+          onBusy();
+        } catch {}
+      }
+      return () => {
+        drop(id);
+      };
+    },
+    end() {
+      const oldest = leases.keys().next();
+      if (!oldest.done)
+        drop(oldest.value);
+    },
+    onInteractiveIdle(listener) {
+      idleListeners.add(listener);
+      return () => {
+        idleListeners.delete(listener);
+      };
+    },
+    async run(work, kind) {
+      const release = activity.begin(kind);
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    }
+  };
+  return activity;
+}
+function localModelResourceKey(profile) {
+  return `${profile.baseUrl?.replace(/\/+$/, "") ?? ""}\x00${profile.model ?? ""}`;
+}
+function createLocalModelActivity({ singleSlotResources = [] } = {}) {
+  const queues = new Map;
+  const dispatch = (key, work, limit, tag) => new Promise((resolve, reject) => {
+    let queue = queues.get(key);
+    if (!queue) {
+      queue = { running: [], tasks: [] };
+      queues.set(key, queue);
+    }
+    const pending = queue;
+    const pump = () => {
+      while (pending.tasks.length > 0) {
+        const now = Date.now();
+        const rank = (task) => task.priority === 2 && now - task.queuedAt >= MAINTENANCE_AGING_MS ? 1 : task.priority;
+        const first = pending.tasks.reduce((best, task, index) => rank(task) < rank(pending.tasks[best]) ? index : best, 0);
+        if (pending.running.length >= Math.min(pending.tasks[first].limit, ...pending.running.map((task) => task.limit)))
+          return;
+        const next = pending.tasks.splice(first, 1)[0];
+        pending.running.push(next);
+        next.run().finally(() => {
+          pending.running.splice(pending.running.indexOf(next), 1);
+          pump();
+        });
+      }
+    };
+    const kind = currentLocalInferencePriority();
+    const trace = currentModelCallTrace();
+    const caller = currentLocalInferenceCaller();
+    if (trace) {
+      markModelCall("queue_enter", trace);
+      trace.queuedBehind = pending.running.map((task) => task.occupant);
+    }
+    const singleSlot = singleSlotResources.includes(key);
+    const preemption = singleSlot && kind !== "owner" ? new AbortController : undefined;
+    const progress = currentModelProgress();
+    const shared = (model) => {
+      progress?.(model);
+      for (const task of pending.tasks)
+        task.progress?.(model);
+    };
+    pending.tasks.push({
+      priority: kind === "owner" ? 0 : kind === "background" ? 1 : 2,
+      occupant: { priority: kind, caller: caller ?? (tag === "tier_sniffer" ? tag : trace ? "private_answer" : "untagged") },
+      limit: singleSlot ? 1 : Math.max(1, Math.floor(limit)),
+      queuedAt: Date.now(),
+      ...preemption ? { preemption } : {},
+      ...progress ? { progress } : {},
+      run: async () => {
+        if (trace)
+          markModelCall("queue_admit", trace);
+        const leased = () => runWithModelProgress(shared, () => lease(key, () => work(preemption?.signal)));
+        try {
+          const result = await withModelCallTrace(trace, () => runWithLocalInferenceCaller(caller, () => runAtLocalInferencePriority(kind, leased)));
+          preemption?.signal.throwIfAborted();
+          resolve(result);
+        } catch (error) {
+          reject(preemption?.signal.aborted ? preemption.signal.reason : error);
+        }
+      }
+    });
+    if (kind === "owner" && pending.running.length > 0) {
+      for (const task of pending.running)
+        task.preemption?.abort(new LocalModelPreempted);
+      notifyBusy(key);
+    }
+    queueMicrotask(pump);
+  });
+  const taggedRunning = new Map;
+  const ownerRunning = new Map;
+  const lease = async (key, work) => {
+    const store = localInferencePriority?.getStore();
+    const owner = store !== "background" && store !== "maintenance";
+    if (owner)
+      ownerRunning.set(key, (ownerRunning.get(key) ?? 0) + 1);
+    try {
+      return await get(key).run(work);
+    } finally {
+      if (owner)
+        ownerRunning.set(key, (ownerRunning.get(key) ?? 1) - 1);
+    }
+  };
+  const resources = new Map;
+  const busyListeners = new Map;
+  const notifyBusy = (key) => {
+    for (const listener of busyListeners.get(key) ?? []) {
+      try {
+        listener();
+      } catch {}
+    }
+  };
+  const get = (key) => {
+    let activity = resources.get(key);
+    if (!activity) {
+      activity = createAnswerActivity(() => {
+        if (localInferencePriority?.getStore() !== "background" && localInferencePriority?.getStore() !== "maintenance")
+          notifyBusy(key);
+      });
+      resources.set(key, activity);
+    }
+    return activity;
+  };
+  return {
+    busy: (key) => get(key).busy,
+    busyExcept: (key, tag) => get(key).inFlight > (taggedRunning.get(`${key}\x00${tag}`) ?? 0),
+    ownerInFlight: (key) => (ownerRunning.get(key) ?? 0) > 0,
+    run: (key, work) => lease(key, work),
+    onBusy(key, listener) {
+      const listeners = busyListeners.get(key) ?? new Set;
+      busyListeners.set(key, listeners);
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    onIdle: (key, listener) => get(key).onInteractiveIdle(listener),
+    track(key, model, options = {}) {
+      const coordinate = (work, signal, limit = options.concurrency ?? 1) => {
+        if (signal?.aborted)
+          return Promise.reject(signal.reason);
+        const guards = localInferenceGuards?.getStore() ?? [];
+        const checked = async (preempted) => {
+          const active = signal && preempted ? AbortSignal.any([signal, preempted]) : signal ?? preempted;
+          const tagKey = options.tag === undefined ? undefined : `${key}\x00${options.tag}`;
+          if (tagKey !== undefined)
+            taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
+          try {
+            active?.throwIfAborted();
+            for (const guard of guards) {
+              try {
+                await guard();
+              } catch (error) {
+                active?.throwIfAborted();
+                throw error;
+              }
+            }
+            if (guards.length > 0)
+              markModelCall("guards_done");
+            active?.throwIfAborted();
+            return await work(active);
+          } finally {
+            if (tagKey !== undefined)
+              taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1);
+          }
+        };
+        return options.serialize === false ? lease(key, checked) : dispatch(key, checked, limit, options.tag);
+      };
+      return {
+        ...model,
+        ...model.prepareSniffer ? { prepareSniffer: (signal) => coordinate((active) => model.prepareSniffer(active), signal, 1) } : {},
+        complete: (request) => coordinate((active) => model.complete(active && active !== request.signal ? { ...request, signal: active } : request), request.signal)
+      };
+    }
+  };
+}
+var localInferencePriority, localInferenceCaller, privacyReleaseInference, localInferenceGuards, DEFAULT_ANSWER_LEASE_MS, MAINTENANCE_AGING_MS = 60000, LocalModelPreempted;
+var init_answer_activity = __esm(() => {
+  init_model_stream();
+  init_model_call_trace();
+  localInferenceCaller = new AsyncLocalStorage12;
+  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+  LocalModelPreempted = class LocalModelPreempted extends DOMException {
+    constructor() {
+      super("The local model yielded to an owner call.", "AbortError");
+    }
+  };
+});
+
 // src/core/source-index/keyword-expansion.ts
 function registerOwnerKeywordModel(resolve) {
   ownerKeywordModel = resolve;
@@ -56697,7 +57101,7 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
     } else
       nextTurn();
   });
-  const full = expandCachedSourceIndexKeywords(query, once, builtIn, cachedKeywordExpansion(), onCold);
+  const full = runBackgroundInference(() => expandCachedSourceIndexKeywords(query, once, builtIn, cachedKeywordExpansion(), onCold, true));
   const waited = await Promise.race([full, patience]);
   clearTimeout(timer);
   const cached = { missing: false };
@@ -56709,7 +57113,7 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
   pinKeywordAlternatives(owner, query, alternatives);
   return alternatives;
 }
-async function expandCachedSourceIndexKeywords(query, profile, builtIn, cachedOnly, onCold) {
+async function expandCachedSourceIndexKeywords(query, profile, builtIn, cachedOnly, onCold, opportunistic = false) {
   if (!query.trim() || query.length > 8000)
     return EMPTY2;
   const sources = sourceIndexFtsTermGroups(query).map((group) => group[0]).filter((term) => !/\p{N}/u.test(term));
@@ -56741,6 +57145,10 @@ async function expandCachedSourceIndexKeywords(query, profile, builtIn, cachedOn
   const expander = builtIn.model;
   if (!expander)
     return fallback;
+  const signal = opportunistic ? undefined : keywordRequestSignal();
+  const scope = opportunistic ? "opportunistic" : signal;
+  if (signal?.aborted)
+    return failedCopy(fallback);
   let cache = caches2.get(expander);
   if (!cache) {
     cache = new Map;
@@ -56757,9 +57165,10 @@ async function expandCachedSourceIndexKeywords(query, profile, builtIn, cachedOn
   const cold = builtIn?.serverReady?.() === false;
   if (cold)
     onCold?.();
-  if (existing && existing.expires > Date.now())
+  if (existing && existing.expires > Date.now() && (existing.value || existing.scope === scope))
     return existing.pending;
   let callStartedAt;
+  let interrupted = false;
   const pending = translate();
   if (!cold && callStartedAt !== undefined) {
     const model = expander;
@@ -56773,43 +57182,54 @@ async function expandCachedSourceIndexKeywords(query, profile, builtIn, cachedOn
     const calls = running;
     pending.then((value) => {
       calls.delete(startedAt);
+      if (interrupted)
+        return;
       const took = Date.now() - startedAt;
       lastTranslationMs.set(model, failedTranslations.has(value) ? Math.max(lastTranslationMs.get(model) ?? 0, took) : took);
     }, () => {
       calls.delete(startedAt);
     });
   }
-  const entry = { pending, expires: Date.now() + 5 * 60000 };
+  const entry = { pending, expires: Date.now() + 5 * 60000, scope };
   cache.set(key, entry);
   pending.then((value) => {
-    entry.value = value;
-  }, () => {});
+    if (interrupted) {
+      if (cache.get(key) === entry)
+        cache.delete(key);
+    } else {
+      entry.value = value;
+      if (failedTranslations.has(value))
+        entry.expires = Date.now() + 30000;
+    }
+  });
   if (cache.size > 128)
     cache.delete(cache.keys().next().value);
   return pending;
   function askOnce() {
     let shared = sharedCalls.get(expander);
     if (!shared) {
-      shared = { seen: new Set, calls: new Map };
+      shared = { seen: new Set, calls: new Set };
       sharedCalls.set(expander, shared);
     }
+    const calls = shared.calls;
     for (const language of languages)
       shared.seen.add(language);
-    for (const [callKey, call] of shared.calls) {
+    for (const call of calls) {
       if (call.expires <= Date.now())
-        shared.calls.delete(callKey);
-      else if (call.query === query && languages.every((language) => call.languages.includes(language)))
+        calls.delete(call);
+      else if ((call.finished || call.scope === scope) && call.query === query && languages.every((language) => call.languages.includes(language)))
         return call.pending;
     }
     const union = [...shared.seen].filter((code) => !sourceLanguages.includes(code)).sort();
     const asked = union.length <= MAX_LANGUAGES ? union : languages;
     const names = Object.fromEntries(asked.map((code) => [code, new Intl.DisplayNames(["en"], { type: "language" }).of(code) ?? code]));
-    const pending = expander.complete({
+    const pending = runWithLocalInferenceCaller("keyword_translation", () => expander.complete({
       system: SYSTEM + `
 Target languages: ` + asked.map((code) => code + " = " + names[code]).join("; "),
       prompt: JSON.stringify({ context: query, concepts: sources.map((term, index) => ({ id: String(index), term })), languages: asked, languageNames: names }),
       localOnly: true,
       maxOutputChars: 6000,
+      ...signal ? { signal } : {},
       responseSchema: {
         type: "object",
         properties: Object.fromEntries(asked.map((language) => [language, {
@@ -56824,16 +57244,20 @@ Target languages: ` + asked.map((code) => code + " = " + names[code]).join("; ")
         required: asked,
         additionalProperties: false
       }
-    }).then((completion) => JSON.parse(completion.text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, "")));
-    callStartedAt = Date.now();
-    const callKey = JSON.stringify([query, asked]);
-    shared.calls.set(callKey, { query, languages: asked, pending, expires: Date.now() + 5 * 60000 });
-    pending.catch(() => {
-      if (shared.calls.get(callKey)?.pending === pending)
-        shared.calls.delete(callKey);
+    })).then((completion) => {
+      signal?.throwIfAborted();
+      return JSON.parse(completion.text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, ""));
     });
-    if (shared.calls.size > 128)
-      shared.calls.delete(shared.calls.keys().next().value);
+    callStartedAt = Date.now();
+    const call = { query, languages: asked, pending, expires: Date.now() + 5 * 60000, scope, finished: false };
+    calls.add(call);
+    pending.then(() => {
+      call.finished = true;
+    }, () => {
+      calls.delete(call);
+    });
+    if (calls.size > 128)
+      calls.delete(calls.values().next().value);
     return pending;
   }
   async function translate() {
@@ -56855,10 +57279,8 @@ Target languages: ` + asked.map((code) => code + " = " + names[code]).join("; ")
         merged[language] = decoded;
       }
       return parseKeywordExpansion(JSON.stringify(merged), sources, languages);
-    } catch {
-      const failed = cache.get(key);
-      if (failed)
-        failed.expires = Date.now() + 30000;
+    } catch (error) {
+      interrupted = signal?.aborted === true || error instanceof LocalModelPreempted;
       return failedCopy(fallback);
     }
   }
@@ -56916,8 +57338,10 @@ function parseKeywordExpansion(text, sources, languages) {
 async function withExpandedSourceIndexKeywords(query, languages, run, owner) {
   if (!query)
     return await run();
-  const alternatives = await expandSourceIndexKeywords(query, languages, owner);
-  return await withKeywordAlternatives(query, alternatives, run);
+  return withKeywordRequestScope(async () => {
+    const alternatives = await expandSourceIndexKeywords(query, languages, owner);
+    return await withKeywordAlternatives(query, alternatives, run);
+  });
 }
 var caches2, sharedCalls, ownerKeywordModel, EMPTY2, failedTranslations, failedCopy = (fallback) => {
   const copy = new Map(fallback);
@@ -56928,6 +57352,7 @@ var init_keyword_expansion = __esm(() => {
   init_stemmer();
   init_keyword_equivalents();
   init_built_in_sniffer();
+  init_answer_activity();
   init_fts();
   init_keyword_context();
   caches2 = new WeakMap;
@@ -57657,7 +58082,7 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash27, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash27, randomUUID as randomUUID13 } from "node:crypto";
 import {
   chmodSync as chmodSync9,
   closeSync as closeSync15,
@@ -57720,10 +58145,10 @@ function writeMediaCacheFile(dir, bytes, mimeType) {
   const sha256 = createHash27("sha256").update(bytes).digest("hex");
   const path = join45(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
   ensureOwnerOnlyDir(dir);
-  const stagingHolder = `staging:${randomUUID12()}`;
+  const stagingHolder = `staging:${randomUUID13()}`;
   addMarker(path, stagingHolder);
   if (!existsSync34(path)) {
-    const temporary = join45(dir, `.${sha256}.${randomUUID12()}.tmp`);
+    const temporary = join45(dir, `.${sha256}.${randomUUID13()}.tmp`);
     writeFileSync9(temporary, bytes, { mode: 384 });
     chmodSync9(temporary, 384);
     renameSync4(temporary, path);
@@ -57992,7 +58417,7 @@ var init_source_item_read = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
 function privateQuestionKey(ref) {
   if (!ref || typeof ref !== "object")
     return;
@@ -58155,7 +58580,7 @@ function recordRemoteOperation(input) {
 }
 var storage3, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage3 = new AsyncLocalStorage11;
+  storage3 = new AsyncLocalStorage13;
   PROVIDER_APP_NAMES = {
     openai: "ChatGPT",
     anthropic: "Claude",
@@ -59617,7 +60042,7 @@ var init_remote_result = __esm(() => {
 });
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
 function currentAccess(authorized) {
   try {
     return authorized();
@@ -59639,7 +60064,7 @@ function currentRemoteReadAccess() {
 var readAuthorization;
 var init_remote_access_recheck = __esm(() => {
   init_remote_result();
-  readAuthorization = new AsyncLocalStorage12;
+  readAuthorization = new AsyncLocalStorage14;
 });
 
 // src/workers/connector-store/tier-placement.ts
@@ -66018,280 +66443,6 @@ var init_tier_move = __esm(() => {
   };
 });
 
-// src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
-function runPrivacyReleaseInference(work) {
-  privacyReleaseInference ??= new AsyncLocalStorage13;
-  localInferencePriority ??= new AsyncLocalStorage13;
-  return privacyReleaseInference.run(true, () => localInferencePriority.run("owner", work));
-}
-function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage13;
-  return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
-}
-function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage13;
-  return localInferencePriority.run("background", work);
-}
-function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage13;
-  return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
-}
-function currentLocalInferencePriority() {
-  return localInferencePriority?.getStore() ?? "owner";
-}
-function runAtLocalInferencePriority(priority, work) {
-  localInferencePriority ??= new AsyncLocalStorage13;
-  return localInferencePriority.run(priority, work);
-}
-function createAnswerActivity(onBusy, options = {}) {
-  const maxLeaseMs = options.maxLeaseMs ?? DEFAULT_ANSWER_LEASE_MS;
-  const now = options.now ?? Date.now;
-  const leases = new Map;
-  const idleListeners = new Set;
-  let interactive = 0;
-  let nextId = 0;
-  let expired = 0;
-  const drop = (id) => {
-    const lease = leases.get(id);
-    if (!lease)
-      return;
-    leases.delete(id);
-    if (lease.kind === "background")
-      return;
-    interactive -= 1;
-    if (interactive > 0 || idleListeners.size === 0)
-      return;
-    queueMicrotask(() => {
-      if (interactive > 0)
-        return;
-      for (const listener of [...idleListeners]) {
-        try {
-          listener();
-        } catch {}
-      }
-    });
-  };
-  const sweep = () => {
-    const at = now();
-    for (const [id, { startedAt }] of leases) {
-      if (at - startedAt < maxLeaseMs)
-        break;
-      drop(id);
-      expired += 1;
-      try {
-        options.onExpired?.(at - startedAt);
-      } catch {}
-    }
-  };
-  const activity = {
-    get busy() {
-      sweep();
-      return leases.size > 0;
-    },
-    get inFlight() {
-      sweep();
-      return leases.size;
-    },
-    get interactiveInFlight() {
-      sweep();
-      return interactive;
-    },
-    get expired() {
-      sweep();
-      return expired;
-    },
-    begin(kind = "owner") {
-      sweep();
-      const id = nextId++;
-      leases.set(id, { startedAt: now(), kind });
-      if (kind !== "background")
-        interactive += 1;
-      if (leases.size === 1) {
-        try {
-          onBusy();
-        } catch {}
-      }
-      return () => {
-        drop(id);
-      };
-    },
-    end() {
-      const oldest = leases.keys().next();
-      if (!oldest.done)
-        drop(oldest.value);
-    },
-    onInteractiveIdle(listener) {
-      idleListeners.add(listener);
-      return () => {
-        idleListeners.delete(listener);
-      };
-    },
-    async run(work, kind) {
-      const release = activity.begin(kind);
-      try {
-        return await work();
-      } finally {
-        release();
-      }
-    }
-  };
-  return activity;
-}
-function localModelResourceKey(profile) {
-  return `${profile.baseUrl?.replace(/\/+$/, "") ?? ""}\x00${profile.model ?? ""}`;
-}
-function createLocalModelActivity({ singleSlotResources = [] } = {}) {
-  const queues = new Map;
-  const dispatch = (key, work, limit) => new Promise((resolve, reject) => {
-    let queue = queues.get(key);
-    if (!queue) {
-      queue = { running: [], tasks: [] };
-      queues.set(key, queue);
-    }
-    const pending = queue;
-    const pump = () => {
-      while (pending.tasks.length > 0) {
-        const now = Date.now();
-        const rank = (task) => task.priority === 2 && now - task.queuedAt >= MAINTENANCE_AGING_MS ? 1 : task.priority;
-        const first = pending.tasks.reduce((best, task, index) => rank(task) < rank(pending.tasks[best]) ? index : best, 0);
-        if (pending.running.length >= Math.min(pending.tasks[first].limit, ...pending.running.map((task) => task.limit)))
-          return;
-        const next = pending.tasks.splice(first, 1)[0];
-        pending.running.push(next);
-        next.run().finally(() => {
-          pending.running.splice(pending.running.indexOf(next), 1);
-          pump();
-        });
-      }
-    };
-    const kind = currentLocalInferencePriority();
-    const singleSlot = singleSlotResources.includes(key);
-    const preemption = singleSlot && kind !== "owner" ? new AbortController : undefined;
-    const progress = currentModelProgress();
-    const shared = (model) => {
-      progress?.(model);
-      for (const task of pending.tasks)
-        task.progress?.(model);
-    };
-    pending.tasks.push({
-      priority: kind === "owner" ? 0 : kind === "background" ? 1 : 2,
-      limit: singleSlot ? 1 : Math.max(1, Math.floor(limit)),
-      queuedAt: Date.now(),
-      ...preemption ? { preemption } : {},
-      ...progress ? { progress } : {},
-      run: async () => {
-        const leased = () => runWithModelProgress(shared, () => lease(key, () => work(preemption?.signal)));
-        try {
-          resolve(await runAtLocalInferencePriority(kind, leased));
-        } catch (error) {
-          reject(preemption?.signal.aborted ? preemption.signal.reason : error);
-        }
-      }
-    });
-    if (kind === "owner" && pending.running.length > 0) {
-      for (const task of pending.running)
-        task.preemption?.abort(new LocalModelPreempted);
-      notifyBusy(key);
-    }
-    queueMicrotask(pump);
-  });
-  const taggedRunning = new Map;
-  const ownerRunning = new Map;
-  const lease = async (key, work) => {
-    const store = localInferencePriority?.getStore();
-    const owner = store !== "background" && store !== "maintenance";
-    if (owner)
-      ownerRunning.set(key, (ownerRunning.get(key) ?? 0) + 1);
-    try {
-      return await get(key).run(work);
-    } finally {
-      if (owner)
-        ownerRunning.set(key, (ownerRunning.get(key) ?? 1) - 1);
-    }
-  };
-  const resources = new Map;
-  const busyListeners = new Map;
-  const notifyBusy = (key) => {
-    for (const listener of busyListeners.get(key) ?? []) {
-      try {
-        listener();
-      } catch {}
-    }
-  };
-  const get = (key) => {
-    let activity = resources.get(key);
-    if (!activity) {
-      activity = createAnswerActivity(() => {
-        if (localInferencePriority?.getStore() !== "background" && localInferencePriority?.getStore() !== "maintenance")
-          notifyBusy(key);
-      });
-      resources.set(key, activity);
-    }
-    return activity;
-  };
-  return {
-    busy: (key) => get(key).busy,
-    busyExcept: (key, tag) => get(key).inFlight > (taggedRunning.get(`${key}\x00${tag}`) ?? 0),
-    ownerInFlight: (key) => (ownerRunning.get(key) ?? 0) > 0,
-    run: (key, work) => lease(key, work),
-    onBusy(key, listener) {
-      const listeners = busyListeners.get(key) ?? new Set;
-      busyListeners.set(key, listeners);
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    onIdle: (key, listener) => get(key).onInteractiveIdle(listener),
-    track(key, model, options = {}) {
-      const coordinate = (work, signal, limit = options.concurrency ?? 1) => {
-        if (signal?.aborted)
-          return Promise.reject(signal.reason);
-        const guards = localInferenceGuards?.getStore() ?? [];
-        const checked = async (preempted) => {
-          const active = signal && preempted ? AbortSignal.any([signal, preempted]) : signal ?? preempted;
-          const tagKey = options.tag === undefined ? undefined : `${key}\x00${options.tag}`;
-          if (tagKey !== undefined)
-            taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
-          try {
-            active?.throwIfAborted();
-            for (const guard of guards) {
-              try {
-                await guard();
-              } catch (error) {
-                active?.throwIfAborted();
-                throw error;
-              }
-            }
-            active?.throwIfAborted();
-            return await work(active);
-          } finally {
-            if (tagKey !== undefined)
-              taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1);
-          }
-        };
-        return options.serialize === false ? lease(key, checked) : dispatch(key, checked, limit);
-      };
-      return {
-        ...model,
-        ...model.prepareSniffer ? { prepareSniffer: (signal) => coordinate((active) => model.prepareSniffer(active), signal, 1) } : {},
-        complete: (request) => coordinate((active) => model.complete(active && active !== request.signal ? { ...request, signal: active } : request), request.signal)
-      };
-    }
-  };
-}
-var localInferencePriority, privacyReleaseInference, localInferenceGuards, DEFAULT_ANSWER_LEASE_MS, MAINTENANCE_AGING_MS = 60000, LocalModelPreempted;
-var init_answer_activity = __esm(() => {
-  init_model_stream();
-  DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
-  LocalModelPreempted = class LocalModelPreempted extends DOMException {
-    constructor() {
-      super("The local model yielded to an owner call.", "AbortError");
-    }
-  };
-});
-
 // src/workers/dashboard/backup-paths.ts
 var DASHBOARD_BACKUP_PATHS;
 var init_backup_paths = __esm(() => {
@@ -67246,9 +67397,9 @@ var init_http = __esm(() => {
 });
 
 // src/workers/engine-split/commands.ts
-import { randomUUID as randomUUID13 } from "node:crypto";
+import { randomUUID as randomUUID14 } from "node:crypto";
 function newEngineCommandId() {
-  return randomUUID13();
+  return randomUUID14();
 }
 function asRecord9(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -67622,15 +67773,26 @@ function createEngineCommandHandler(options) {
     if (url.pathname === ENGINE_MODEL_COMPLETE_PATH && request.method === "POST") {
       if (!options.ready() || !options.modelComplete)
         return Response.json({ error: "model_unavailable" }, { status: 503 });
+      const received = modelTraceClock();
       const body = await request.json().catch(() => {
         return;
       });
       const parsed = parseModelRequest(body);
-      const priority = parseModelPriority(asRecord9(body)?.priority);
+      const metadata = asRecord9(body);
+      const priority = parseModelPriority(metadata?.priority);
       if (!parsed || !priority)
         return Response.json({ error: "invalid_model_request" }, { status: 400 });
+      const trace = readModelCallTraceStart(metadata?.trace);
+      const caller = metadata?.caller === "keyword_translation" ? metadata.caller : undefined;
+      if (trace) {
+        markModelCall("bg_socket_received", trace, received);
+        if (!options.modelOnControlThread)
+          markModelCall("bg_received", trace);
+      }
       const modelComplete = options.modelComplete;
       const encoder = new TextEncoder;
+      const cancelled = new AbortController;
+      const signal = AbortSignal.any([request.signal, cancelled.signal]);
       let closed = false;
       let lastProgressMs = -Infinity;
       const stream = new ReadableStream({
@@ -67652,11 +67814,23 @@ function createEngineCommandHandler(options) {
             lastProgressMs = now;
             send({ progress: model });
           };
-          withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }))).then((completion) => send({ completion }), (error) => {
+          const result = (value) => {
+            if (trace && !options.modelOnControlThread) {
+              trace.bgLoopLagMaxMs = controlPathHeadroom.modelLoopLagSince(trace.startedAt);
+              markModelCall("bg_result_posted", trace);
+            }
+            send({ ...value, ...trace ? { trace } : {} });
+          };
+          const complete = () => runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal }));
+          withModelProgress(progress, () => withModelCallTrace(trace, () => runWithLocalInferenceCaller(caller, complete))).then((completion) => result({ completion }), (error) => {
+            if (signal.aborted)
+              return;
+            if (error instanceof LocalModelPreempted)
+              return result({ preempted: true });
             if (error instanceof OperationError)
-              return send({ operation_error: error.toJSON() });
+              return result({ operation_error: error.toJSON() });
             console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
-            send({ error: "model_failed", message: error instanceof Error ? error.message : "unknown error" });
+            result({ error: "model_failed", message: error instanceof Error ? error.message : "unknown error" });
           }).finally(() => {
             if (closed)
               return;
@@ -67668,6 +67842,7 @@ function createEngineCommandHandler(options) {
         },
         cancel() {
           closed = true;
+          cancelled.abort();
         }
       });
       return new Response(stream, { status: 200, headers: { "content-type": ENGINE_MODEL_STREAM_CONTENT_TYPE } });
@@ -67724,6 +67899,8 @@ var init_commands = __esm(() => {
   init_operation_error();
   init_http();
   init_answer_activity();
+  init_model_call_trace();
+  init_control_path_headroom();
   init_model_stream();
   init_click_trace();
   ENGINE_RELOAD_KINDS = ["sources", "scope", "exclusions", "embedding", "models", "archive", "extraction", "pacing"];
@@ -68900,7 +69077,7 @@ function routeHit(hit, corpus) {
   return { ...candidate, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain };
 }
 async function routeSourceIndexSearch(options) {
-  return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
+  return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options), true);
 }
 async function routePreparedSourceIndexSearch(options) {
   const request = normalizeSearchRequest(options.request);
@@ -69583,8 +69760,8 @@ var init_router = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
-import { createHash as createHash36, randomUUID as randomUUID14 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
+import { createHash as createHash36, randomUUID as randomUUID15 } from "node:crypto";
 import { closeSync as closeSync17, existsSync as existsSync41, fsyncSync as fsyncSync3, lstatSync as lstatSync22, mkdirSync as mkdirSync24, openSync as openSync17, statSync as statSync18, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { basename as basename9, dirname as dirname48, resolve as resolve15 } from "node:path";
@@ -74230,7 +74407,7 @@ var init_local_index = __esm(() => {
     constructor(options) {
       this.hiddenSetIncrementalOffLoop = process.env.OLYMPUS_HIDDEN_SET_INCREMENTAL_OFF_LOOP?.trim() === "1";
       installMainThreadSqlTrace();
-      this.visibilityOwner = randomUUID14();
+      this.visibilityOwner = randomUUID15();
       this.visibilityNow = () => Date.now();
       this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
       this.visibilityTimers = {
@@ -74242,7 +74419,7 @@ var init_local_index = __esm(() => {
       this.readOnly = options.readOnly === true;
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID14()}` : options.mediaHolder ?? this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID15()}` : options.mediaHolder ?? this.dbPath;
       const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
       this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
       this.family = options.family;
@@ -76605,7 +76782,7 @@ ${parentKey(ref)}`, { ref, origin });
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID14()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID15()}`;
       const startedAt = nowIso();
       try {
         return this.db.transaction(() => {
@@ -76638,7 +76815,7 @@ ${parentKey(ref)}`, { ref, origin });
           return "held";
         if (!row && options.record !== true)
           return "none";
-        const syncRunId = `connector-secret-retired-${randomUUID14()}`;
+        const syncRunId = `connector-secret-retired-${randomUUID15()}`;
         const now = nowIso();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -76728,7 +76905,7 @@ ${parentKey(ref)}`, { ref, origin });
           }
           if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
             return "stale_claim";
-          const syncRunId = `connector-secrets-extraction-${randomUUID14()}`;
+          const syncRunId = `connector-secrets-extraction-${randomUUID15()}`;
           const startedAt = nowIso();
           this.db.query(`
           INSERT INTO sync_runs (
@@ -76853,7 +77030,7 @@ ${parentKey(ref)}`, { ref, origin });
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID14()}`;
+      const syncRunId = `connector-tier-move-${randomUUID15()}`;
       const now = nowIso();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -77233,7 +77410,7 @@ ${parentKey(ref)}`, { ref, origin });
       return { items, ...rows.length === limit ? { nextAfterItemPk: rows[rows.length - 1].item_pk } : {} };
     }
     watchPersonalBody(itemPk) {
-      const token = randomUUID14();
+      const token = randomUUID15();
       return this.db.transaction(() => {
         this.db.exec("CREATE TABLE IF NOT EXISTS legacy_body_watch (item_pk INTEGER PRIMARY KEY, token TEXT NOT NULL)");
         for (const [name, event, keys] of PERSONAL_BODY_WATCH_EVENTS) {
@@ -77463,7 +77640,7 @@ ${parentKey(ref)}`, { ref, origin });
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID14()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID15()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
@@ -77749,7 +77926,7 @@ ${parentKey(ref)}`, { ref, origin });
         return this.readVisibilityMarker();
       } catch {
         this.visibilityStamp = undefined;
-        return this.visibilityEpoch = randomUUID14();
+        return this.visibilityEpoch = randomUUID15();
       }
     }
     readVisibilityMarker() {
@@ -77763,10 +77940,10 @@ ${parentKey(ref)}`, { ref, origin });
       const children = this.hasChildItems();
       if (children && lane.ledger() !== ledger) {
         this.visibilityStamp = undefined;
-        return this.visibilityEpoch = randomUUID14();
+        return this.visibilityEpoch = randomUUID15();
       }
       const siblings = new Map(children ? childVisibilityStores(lane).filter((store) => store !== this).map((store) => {
-        const marker = store.childVisibilityMarker?.() ?? randomUUID14();
+        const marker = store.childVisibilityMarker?.() ?? randomUUID15();
         return [store, store instanceof LocalConnectorStore && !store.visibilityFeedPresent ? `${store.visibilityOwner}:${marker}` : marker];
       }) : []);
       const memo = this.hiddenChildMemo;
@@ -77792,7 +77969,7 @@ ${parentKey(ref)}`, { ref, origin });
       const ledgerMoved = !prior || prior.ledger !== ledger || prior.cursor !== delta.cursor && (ids === undefined || delta.corpusChanged === true || ids.length > 0 && children && (!knownParents || movedSiblings) || ids.some((id) => knownParents?.has(`i:${tierLedgerIdentityKey(id)}`)) || this.itemRowsForIdentities(ids, (id) => normalizeConversationId(id.providerConversationId)).length > 0 || [...ledger.copiesForMany(ids).values()].some((copies) => copies.some((copy) => copy.corpusId === this.corpusId)));
       const replaced = prior && (prior.ledger !== ledger && prior.ledgerId === ledgerId || delta.cursor < prior.cursor || this.visibilityFeedPresent && Number(own) < Number(prior.own) || [...siblings].some(([store, marker]) => Number(marker) < Number(prior.siblings.get(store))));
       if (replaced || prior && !sameLane)
-        this.visibilityEpoch = randomUUID14();
+        this.visibilityEpoch = randomUUID15();
       if (!this.visibilityFeedPresent)
         this.visibilityEpoch ??= this.visibilityOwner;
       const relevant = ledgerMoved ? delta.cursor : prior.relevant;
@@ -79006,7 +79183,7 @@ ${parentKey(ref)}`, { ref, origin });
       const tierLedgerForWrite = this.visibilityLedger();
       const landed = [];
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID14()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID15()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -79427,7 +79604,7 @@ ${parentKey(ref)}`, { ref, origin });
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID14()}`;
+        const syncRunId = `connector-relinquish-${randomUUID15()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -79566,7 +79743,7 @@ ${parentKey(ref)}`, { ref, origin });
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID14()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID15()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -80257,7 +80434,7 @@ ${parentKey(ref)}`, { ref, origin });
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID14()}`;
+      const syncRunId = `connector-sync-${randomUUID15()}`;
       const startedAt = nowIso();
       const startWriteAt = performance.now();
       try {
@@ -84184,7 +84361,7 @@ ${parentKey(ref)}`, { ref, origin });
       return row ? syncRunFromRow(row) : undefined;
     }
   };
-  readAncestorPlans = new AsyncLocalStorage14;
+  readAncestorPlans = new AsyncLocalStorage15;
   lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_COPY_ITEM_COLUMNS = [
     "provider",
@@ -87211,7 +87388,7 @@ var init_worker_front_proxy = __esm(() => {
 
 // src/core/native-worker-service.ts
 import { homedir as homedir25 } from "node:os";
-import { randomUUID as randomUUID15 } from "node:crypto";
+import { randomUUID as randomUUID16 } from "node:crypto";
 import { statSync as statSync22 } from "node:fs";
 import { createServer as createNetServer2 } from "node:net";
 import { basename as basename11, delimiter as delimiter4, isAbsolute as isAbsolute21, join as join59 } from "node:path";
@@ -87470,7 +87647,7 @@ function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
   if (!authToken) {
     throw new Error("Olympus worker service requires a configured worker auth token.");
   }
-  const instanceId = randomUUID15();
+  const instanceId = randomUUID16();
   env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
   return {
     runtimePath: resolveBunRuntimePath(service.runtimePath, env),
@@ -89230,7 +89407,7 @@ var init_mac_engine_daemon = __esm(() => {
 // src/workers/archive-import/state.ts
 import { existsSync as existsSync49, mkdirSync as mkdirSync31, readFileSync as readFileSync45 } from "node:fs";
 import { dirname as dirname55 } from "node:path";
-import { randomUUID as randomUUID17 } from "node:crypto";
+import { randomUUID as randomUUID18 } from "node:crypto";
 function defaultArchiveImportStatePath(env = process.env) {
   return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID2, "archive-imports.json", env);
 }
@@ -89297,7 +89474,7 @@ class ArchiveImportStateStore {
     const at = this.now().toISOString();
     const { skipped, ...rest } = input;
     const record = {
-      archive_id: randomUUID17(),
+      archive_id: randomUUID18(),
       ...rest,
       status: "importing",
       created_at: at,
@@ -90609,7 +90786,7 @@ var init_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash42, randomUUID as randomUUID18 } from "node:crypto";
+import { createHash as createHash42, randomUUID as randomUUID19 } from "node:crypto";
 import { chmodSync as chmodSync17, mkdirSync as mkdirSync33 } from "node:fs";
 import { dirname as dirname57 } from "node:path";
 import { Database as Database14 } from "bun:sqlite";
@@ -90669,7 +90846,7 @@ class LocalXBookmarksReconcileStateStore {
     const nowDate = validDate(input.now ?? new Date);
     const now = nowDate.toISOString();
     const leaseExpiresAt = new Date(nowDate.getTime() + FOLDER_FACET_REFRESH_LEASE_MS).toISOString();
-    const runToken = randomUUID18();
+    const runToken = randomUUID19();
     return this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT *
@@ -90894,7 +91071,7 @@ class LocalXBookmarksReconcileStateStore {
           membership_pages, coverage_scope, window_boundary_algorithm_version,
           started_at, updated_at
         ) VALUES (?, ?, ?, ?, 'global', 0, 0, 0, 0, 0, ?, ?, ?, ?)
-      `).run(account, randomUUID18(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
+      `).run(account, randomUUID19(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
     }
     return { progress: this.progress(account), warnings };
   }
@@ -96616,7 +96793,7 @@ var init_manifest3 = __esm(() => {
 // src/workers/archive-import/requests.ts
 import { existsSync as existsSync52, mkdirSync as mkdirSync34, readFileSync as readFileSync46 } from "node:fs";
 import { dirname as dirname58, join as join65 } from "node:path";
-import { randomUUID as randomUUID19 } from "node:crypto";
+import { randomUUID as randomUUID20 } from "node:crypto";
 function archiveImportRequestsPath(statePath) {
   return archiveStateSiblingPath(statePath, "archive-import-requests.json");
 }
@@ -96769,7 +96946,7 @@ class ArchiveImportRequestStore {
   entry(kind, origin, path, status, removal) {
     const at = this.now().toISOString();
     return {
-      request_id: randomUUID19(),
+      request_id: randomUUID20(),
       kind,
       origin,
       path,
@@ -97663,7 +97840,7 @@ var init_data_root_snapshot = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash45, randomUUID as randomUUID20 } from "node:crypto";
+import { createHash as createHash45, randomUUID as randomUUID21 } from "node:crypto";
 import {
   chmodSync as chmodSync19,
   existsSync as existsSync55,
@@ -97766,7 +97943,7 @@ class LocalSourceWatchStore {
     requireOwnerContext(ownerContext);
     assertOnlyFields(input, CREATE_WATCH_FIELDS, "create watch");
     const now = this.now();
-    const watchId = input.watchId === undefined ? randomUUID20() : requireId(input.watchId, "watchId");
+    const watchId = input.watchId === undefined ? randomUUID21() : requireId(input.watchId, "watchId");
     const corpusId = requireId(input.corpusId, "corpusId");
     const queryText = requireQuery(input.queryText);
     const mode = requireMode(input.mode);
@@ -98061,7 +98238,7 @@ class LocalSourceWatchStore {
       `).all(now, limit);
       const leases = [];
       for (const candidate of candidates) {
-        const leaseToken = randomUUID20();
+        const leaseToken = randomUUID21();
         const result = this.db.query(`
           UPDATE source_watch_outbox
           SET status = 'leased', lease_owner = ?, lease_token = ?,
@@ -99087,7 +99264,7 @@ var init_forget = __esm(() => {
 // src/core/this-computer.ts
 import { spawnSync as spawnSync12 } from "node:child_process";
 import { existsSync as existsSync58, readFileSync as readFileSync50 } from "node:fs";
-import { createHash as createHash46, randomUUID as randomUUID21 } from "node:crypto";
+import { createHash as createHash46, randomUUID as randomUUID22 } from "node:crypto";
 import { dirname as dirname63, join as join70 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
   const identity = hostIdentity();
@@ -99167,7 +99344,7 @@ function connectThisComputerSource(handleRegistryPath, sourceId, now = new Date,
   const path = defaultThisComputerStatePath(handleRegistryPath);
   withFileLeaseSync(path, (lease) => {
     const current = readStateForHost(path, hostIdentity) ?? (() => {
-      const machineId = randomUUID21();
+      const machineId = randomUUID22();
       const binding = hostBinding(machineId, hostIdentity);
       return {
         version: 1,
@@ -107558,7 +107735,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { randomUUID as randomUUID22 } from "node:crypto";
+import { randomUUID as randomUUID23 } from "node:crypto";
 function ownerRuleSweepsComplete(set) {
   const classification = set.classification();
   if (!classification || classification.unavailableReason)
@@ -107786,7 +107963,7 @@ async function sweepLabelRuleRaises(options) {
       break;
     const rule = keyed.get(key);
     const resumed = walks.get(key);
-    const walkId = resumed?.id ?? randomUUID22();
+    const walkId = resumed?.id ?? randomUUID23();
     let pageToken = resumed?.pageToken;
     let deferred = resumed?.deferred === true;
     report.rules += 1;
@@ -110806,7 +110983,7 @@ var init_sniffer_decision = __esm(() => {
 // src/workers/source-index/built-in-reasoning/install.ts
 import { isMainThread as isMainThread7 } from "node:worker_threads";
 import { spawn as spawn5 } from "node:child_process";
-import { createHash as createHash54, randomUUID as randomUUID23 } from "node:crypto";
+import { createHash as createHash54, randomUUID as randomUUID24 } from "node:crypto";
 import {
   closeSync as closeSync19,
   createReadStream as createReadStream3,
@@ -111095,7 +111272,7 @@ function runtimeInstalled2(runtimeDir, archive) {
   return marker !== undefined && marker.sha256 === archive.sha256 && existsSync61(join73(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
-  const staging = `${runtimeDir}.staging-${randomUUID23()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID24()}`;
   ensureDirectory2(staging);
   try {
     const archivePath = join73(staging, archive.name);
@@ -111259,7 +111436,7 @@ async function sha256File2(path, stallMs, onProgress) {
 }
 async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
   const deadline = Date.now() + waitMs;
-  const token = randomUUID23();
+  const token = randomUUID24();
   for (;; ) {
     if (tryAcquireLock2(lockPath, token))
       break;
@@ -112329,20 +112506,19 @@ function timedModel(model, report) {
     async complete(request) {
       const stage = calls === 0 ? "main" : "audit";
       calls += 1;
-      const started = performance.now();
+      const trace = startModelCallTrace();
       const promptBytes = utf8.encode(request.system).length + utf8.encode(request.prompt).length;
-      const done = (ok, usage) => {
-        try {
-          report({ stage, ms: Math.round(performance.now() - started), promptBytes, ok, ...usage ?? {} });
-        } catch {}
-      };
+      let completion;
       try {
-        const completion = await model.complete(request);
-        done(true, completion.usage);
+        completion = await withModelCallTrace(trace, () => model.complete(request));
         return completion;
-      } catch (error) {
-        done(false);
-        throw error;
+      } finally {
+        markModelCall("main_end", trace);
+        const ok = completion !== undefined;
+        logModelCallTrace(trace, stage, ok);
+        try {
+          report({ stage, ms: trace.offsets.main_end, promptBytes, ok, ...completion?.usage });
+        } catch {}
       }
     }
   };
@@ -112433,6 +112609,7 @@ function privateEvidencePack(question, evidence) {
 var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 60000, DEFAULT_IDLE_SHUTDOWN_SECONDS = 600, DEFAULT_STARTUP_TIMEOUT_MS = 120000, DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES = 28000, MIN_PRIVATE_PASSAGE_BYTES = 600, PRIVATE_ANSWER_NOT_FOUND = "These private items do not answer this question.", sharedPanelModel, DEFAULT_PRIVATE_ANSWER_CHARS = 1600, GAP_GENERIC_WORDS, utf8;
 var init_analyst_built_in = __esm(() => {
   init_model_stream();
+  init_model_call_trace();
   init_local_analyst_window();
   init_sniffer_decision();
   init_sniffer_lane();
@@ -113764,9 +113941,9 @@ function nonNegativeInteger2(value, fallback) {
 var DEFAULT_SECURE_ANALYST_POOL_SLO_MS = 60000, DEFAULT_SECURE_ANALYST_POOL_RESERVE_MS = 1000, DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_POOL_COOLDOWN_MS = 30000, DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 60000, MIN_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 30000, MAX_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 1800000, SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_ENV = "OLYMPUS_SOURCE_ANSWER_LAST_LEG_TIMEOUT_MS";
 
 // src/workers/source-index/analyst-answer.ts
-import { randomUUID as randomUUID24 } from "node:crypto";
+import { randomUUID as randomUUID25 } from "node:crypto";
 async function readNamesOnlyMatches(detail, read, waitMs) {
-  const questionId = randomUUID24();
+  const questionId = randomUUID25();
   const requests = new Map;
   for (const index of [...new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []])].sort((a, b) => a - b)) {
     if (index >= 3)
@@ -116641,7 +116818,7 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash55, randomUUID as randomUUID25 } from "node:crypto";
+import { createHash as createHash55, randomUUID as randomUUID26 } from "node:crypto";
 import { chmodSync as chmodSync21, existsSync as existsSync62, lstatSync as lstatSync32, mkdirSync as mkdirSync43 } from "node:fs";
 import { dirname as dirname68 } from "node:path";
 import { Database as Database17 } from "bun:sqlite";
@@ -116948,7 +117125,7 @@ class LocalXBookmarksApiUsageStore {
       }
       const maxResources = routine ? Math.min(requestedMaxResources, input.preserveHeadReserve ? backgroundRemainingReads : remainingReads, input.preserveHeadReserve ? backgroundRemainingCostUnits : remainingCostUnits) : requestedMaxResources;
       const reservation = {
-        reservationId: randomUUID25(),
+        reservationId: randomUUID26(),
         account,
         utcDay,
         maxResources,
@@ -118989,7 +119166,7 @@ var init_archive_import = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash57, randomUUID as randomUUID26 } from "node:crypto";
+import { createHash as createHash57, randomUUID as randomUUID27 } from "node:crypto";
 import {
   chmodSync as chmodSync22,
   existsSync as existsSync64,
@@ -119240,7 +119417,7 @@ function writePrivateReport(pathValue, contents) {
     throw new TypeError("X bookmark diagnostic report path is required.");
   const parent = dirname69(reportPath);
   mkdirSync44(parent, { recursive: true, mode: 448 });
-  const temporaryPath = `${reportPath}.tmp-${randomUUID26()}`;
+  const temporaryPath = `${reportPath}.tmp-${randomUUID27()}`;
   try {
     writeFileSync16(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
     chmodSync22(temporaryPath, 384);
@@ -120574,7 +120751,7 @@ var init_tiered_store_sink = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash58, randomUUID as randomUUID27 } from "node:crypto";
+import { createHash as createHash58, randomUUID as randomUUID28 } from "node:crypto";
 import {
   chmodSync as chmodSync23,
   renameSync as renameSync12,
@@ -120932,7 +121109,7 @@ function buildReceipt(status, counts, retryAt) {
 }
 function writeReceipt(pathValue, receipt) {
   const path = resolve20(pathValue);
-  const temporary = `${path}.tmp-${randomUUID27()}`;
+  const temporary = `${path}.tmp-${randomUUID28()}`;
   try {
     writeFileSync17(temporary, `${JSON.stringify(receipt, null, 2)}
 `, {
@@ -122680,7 +122857,7 @@ var init_dropbox = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/command-runner.ts
-import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
 import { Buffer as Buffer4 } from "node:buffer";
 import { execFile as execFile3, spawn as spawn7 } from "node:child_process";
 import { readFile as readFile6, readdir } from "node:fs/promises";
@@ -122950,7 +123127,7 @@ var init_command_runner = __esm(() => {
   init_memory_counters();
   init_descendant_groups();
   init_native_process_service();
-  activeExtraction = new AsyncLocalStorage15;
+  activeExtraction = new AsyncLocalStorage16;
   ExtractionCommandError = class ExtractionCommandError extends Error {
     command;
     exitCode;
@@ -127039,7 +127216,7 @@ var init_size_limit_stops = __esm(() => {
 });
 
 // src/workers/file-extraction/on-demand-read.ts
-import { createHash as createHash69, randomUUID as randomUUID28 } from "node:crypto";
+import { createHash as createHash69, randomUUID as randomUUID29 } from "node:crypto";
 function revokeOnDemandReads(stores, ids = new Set(stores.flatMap((store) => store.onDemandGrantIds())), keep) {
   let revoked = 0;
   for (const id of ids) {
@@ -127065,7 +127242,7 @@ async function requestOnDemandRead(request, context) {
     return { state: "refused", reason: "item_not_found" };
   return context.jobs.enqueueOnDemandRead({
     ...request,
-    questionId: request.questionId?.trim() || randomUUID28(),
+    questionId: request.questionId?.trim() || randomUUID29(),
     itemRef: { corpusId: ref.corpusId, providerItemId: ref.providerItemId }
   }, target.job, target, context.limits);
 }
@@ -131502,7 +131679,7 @@ var init_extraction_factory = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync28, mkdirSync as mkdirSync47 } from "node:fs";
-import { createHash as createHash74, randomUUID as randomUUID29 } from "node:crypto";
+import { createHash as createHash74, randomUUID as randomUUID30 } from "node:crypto";
 import { dirname as dirname75 } from "node:path";
 import { Database as Database22 } from "bun:sqlite";
 function settleUnreadable(candidates, classify) {
@@ -131857,7 +132034,7 @@ class LocalFileExtractionJobStore {
     const leaseSeconds = clampInteger(request.leaseSeconds ?? DEFAULT_EXTRACTION_LEASE_SECONDS, 1, MAX_EXTRACTION_LEASE_SECONDS);
     const now = nowIso4();
     const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const leaseToken = randomUUID29();
+    const leaseToken = randomUUID30();
     const workerHash = hashString6(workerId);
     const claimed = [];
     this.db.transaction(() => {
@@ -132936,7 +133113,7 @@ function fileExtractionJobMigrations() {
       db.query(`
         INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
         VALUES (1, ?, 0)
-      `).run(randomUUID29());
+      `).run(randomUUID30());
     }
   }, {
     version: 4,
@@ -133200,7 +133377,7 @@ function clampInteger(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 function makeJobId() {
-  return `fx_${randomUUID29()}`;
+  return `fx_${randomUUID30()}`;
 }
 function hashString6(value) {
   return createHash74("sha256").update(value).digest("hex");
@@ -149421,7 +149598,7 @@ var init_source_dispositions = __esm(() => {
 
 // src/data-lifecycle.ts
 import { spawnSync as spawnSync13 } from "node:child_process";
-import { createHash as createHash81, randomUUID as randomUUID30 } from "node:crypto";
+import { createHash as createHash81, randomUUID as randomUUID31 } from "node:crypto";
 import {
   chmodSync as chmodSync32,
   closeSync as closeSync29,
@@ -149674,7 +149851,7 @@ function exportReferencedMedia(refs, destination, durabilityBoundary, files, art
       continue;
     }
     const target = join109(mediaRoot, basename17(path));
-    const staging = `${target}.${randomUUID30()}.partial`;
+    const staging = `${target}.${randomUUID31()}.partial`;
     try {
       copyFileSync2(path, staging);
       chmodSync32(staging, 384);
@@ -149932,7 +150109,7 @@ function moveAccountFolderToTrash(folder, env, options) {
     mkdirSync54(trash, { recursive: true, mode: 448 });
     const dataRoot = olympusDataRoot(env);
     if (lstatSync39(trash).isDirectory() && canonicalPath2(trash) === join109(canonicalPath2(dataRoot), relative17(resolve26(dataRoot), resolve26(trash)))) {
-      renameSync14(folder, accountTrashEntry(randomUUID30(), env));
+      renameSync14(folder, accountTrashEntry(randomUUID31(), env));
       moved = true;
     }
   } catch {
@@ -150477,7 +150654,7 @@ function exportSqliteStore(options) {
     return;
   }
   const destination = join109(destinationRoot, basename17(sqlitePath));
-  const staging = `${destination}.${randomUUID30()}.partial`;
+  const staging = `${destination}.${randomUUID31()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
     try {
@@ -154178,7 +154355,7 @@ var init_engine_store_copies = __esm(() => {
 });
 
 // src/core/lifecycle-artifact.ts
-import { createHash as createHash82, randomUUID as randomUUID31 } from "node:crypto";
+import { createHash as createHash82, randomUUID as randomUUID32 } from "node:crypto";
 import { spawnSync as spawnSync14 } from "node:child_process";
 import {
   chmodSync as chmodSync33,
@@ -154490,7 +154667,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let published = false;
   try {
     if (existsSync85(workingDirectory)) {
-      replacedPath = join112(versionsDir, `.olympus-replaced-${basename18(workingDirectory)}-${randomUUID31()}`);
+      replacedPath = join112(versionsDir, `.olympus-replaced-${basename18(workingDirectory)}-${randomUUID32()}`);
       renameSync15(workingDirectory, replacedPath);
       syncDirectory(versionsDir);
     }
@@ -154803,7 +154980,7 @@ var init_update_check = __esm(() => {
 
 // src/core/managed-tools.ts
 import { execFile as execFile4 } from "node:child_process";
-import { createHash as createHash83, randomUUID as randomUUID32 } from "node:crypto";
+import { createHash as createHash83, randomUUID as randomUUID33 } from "node:crypto";
 import {
   accessSync as accessSync9,
   constants as constants16,
@@ -155152,7 +155329,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     return { tool, version: pin.version, outcome: "already_installed", executable: existing };
   const toolDir = join114(root, tool);
   const versionDir = join114(toolDir, pin.version);
-  const id = randomUUID32();
+  const id = randomUUID33();
   const download = join114(toolDir, `.download-${id}`);
   const staging = join114(toolDir, `.staging-${id}`);
   try {
@@ -157398,7 +157575,7 @@ var init_zkapi_confinement_linux = __esm(() => {
 
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn8, execFileSync as execFileSync5 } from "node:child_process";
-import { createHash as createHash85, randomUUID as randomUUID33 } from "node:crypto";
+import { createHash as createHash85, randomUUID as randomUUID34 } from "node:crypto";
 import { accessSync as accessSync10, chmodSync as chmodSync36, closeSync as closeSync31, constants as constants17, existsSync as existsSync86, mkdirSync as mkdirSync56, mkdtempSync as mkdtempSync5, readdirSync as readdirSync27, readFileSync as readFileSync74, readlinkSync as readlinkSync5, realpathSync as realpathSync23, rmSync as rmSync36, statSync as statSync39, writeFileSync as writeFileSync22 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir32, tmpdir as tmpdir13 } from "node:os";
@@ -158760,7 +158937,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
     return refuse("tor_port_busy");
   if (sessionSignal.aborted)
     return refuse(abortCause);
-  const sessionId = randomUUID33();
+  const sessionId = randomUUID34();
   const workDir = mkdtempSync5(join117(tmpdir13(), "olympus-zkapi-"));
   chmodSync36(workDir, 448);
   const watchdog = join117(workDir, "watchdog.cjs");
@@ -161278,7 +161455,7 @@ import { chmodSync as chmodSync37, closeSync as closeSync32, constants as consta
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename20, dirname as dirname93, join as join119, relative as relative19, resolve as resolve28, sep as sep23 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
-import { randomBytes as randomBytes26, createHash as createHash87, randomUUID as randomUUID34 } from "node:crypto";
+import { randomBytes as randomBytes26, createHash as createHash87, randomUUID as randomUUID35 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync16(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -161820,7 +161997,7 @@ function writeSnapshot(backupDir, index, text, mode = 384) {
   return { present: true, backupPath, sha256: hashFile(backupPath), mode };
 }
 function createInstallTransaction(input) {
-  const backupDir = join119(input.layout.stateDir, `.install-backup-${randomUUID34()}`);
+  const backupDir = join119(input.layout.stateDir, `.install-backup-${randomUUID35()}`);
   createLinuxPrivateDirectory(backupDir);
   const root = lstatSync45(backupDir);
   const files = {};
@@ -161837,7 +162014,7 @@ function createInstallTransaction(input) {
     priorUnitLinks,
     action: input.action,
     phase: input.phase,
-    stagingPath: join119(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID34()}`),
+    stagingPath: join119(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID35()}`),
     backupDir,
     backupDevice: root.dev,
     backupInode: root.ino,
@@ -172454,7 +172631,7 @@ var init_tier_cli = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-import-allowance.ts
-import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage17 } from "node:async_hooks";
 function withGmailImportRunOnce(run) {
   const permission = { active: true };
   return operatorImport.run(permission, async () => {
@@ -172540,7 +172717,7 @@ var init_gmail_import_allowance = __esm(() => {
   init_limit_stops();
   registerLimit({ id: "gmail.import_allowance", kind: "requests", scope: "source", label: "Gmail import request allowance reached", unit: "requests", continue: "run_once" });
   GMAIL_IMPORT_LIMIT_SUBJECT = JSON.stringify(["gmail.email", "internal.email", "gmail.import_allowance"]);
-  operatorImport = new AsyncLocalStorage16;
+  operatorImport = new AsyncLocalStorage17;
   GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
   GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
   GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
@@ -173931,7 +174108,7 @@ var init_owner_limits = __esm(() => {
 // src/data-restore.ts
 import { closeSync as closeSync34, copyFileSync as copyFileSync4, existsSync as existsSync99, fsyncSync as fsyncSync10, openSync as openSync33, readFileSync as readFileSync86, renameSync as renameSync20, rmSync as rmSync39, statSync as statSync43, chmodSync as chmodSync39 } from "node:fs";
 import { dirname as dirname100, join as join127, resolve as resolve29 } from "node:path";
-import { randomUUID as randomUUID36 } from "node:crypto";
+import { randomUUID as randomUUID37 } from "node:crypto";
 import { Database as Database29 } from "bun:sqlite";
 function restoreOlympusData(options) {
   const input = resolve29(options.input);
@@ -174193,7 +174370,7 @@ function writeRestoredIdentities(identities, bindingsPath, env) {
 }
 function copyPrivate(from, to, prepare) {
   makeDurableDirectory(dirname100(to), exportDurabilityBoundary(dirname100(to)));
-  const staging = `${to}.${randomUUID36()}.restoring`;
+  const staging = `${to}.${randomUUID37()}.restoring`;
   try {
     copyFileSync4(from, staging);
     chmodSync39(staging, 384);
@@ -174347,7 +174524,7 @@ var init_data_restore = __esm(() => {
 });
 
 // src/data-backup.ts
-import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash94, createHmac as createHmac6, randomBytes as randomBytes27, randomUUID as randomUUID37, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash94, createHmac as createHmac6, randomBytes as randomBytes27, randomUUID as randomUUID38, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { closeSync as closeSync35, existsSync as existsSync100, lstatSync as lstatSync48, mkdirSync as mkdirSync62, openSync as openSync34, readdirSync as readdirSync30, readSync as readSync12, renameSync as renameSync21, rmSync as rmSync40, statSync as statSync44, unlinkSync as unlinkSync6, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync11 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { basename as basename22, dirname as dirname101, join as join128, resolve as resolve30, sep as sep24 } from "node:path";
@@ -174498,7 +174675,7 @@ async function writeBackupFile(options) {
   for (let n = 2;existsSync100(join128(folder, name)); n += 1)
     name = backupFileName(now).replace(BACKUP_FILE_EXTENSION, `-${n}${BACKUP_FILE_EXTENSION}`);
   const target = join128(folder, name);
-  const staging = join128(folder, `.${name}.${randomUUID37()}.partial`);
+  const staging = join128(folder, `.${name}.${randomUUID38()}.partial`);
   const nonce = options.key ? randomBytes27(12) : undefined;
   const header = encodeHeader({
     kind: "olympus_backup",
@@ -174851,7 +175028,7 @@ function backupStagingDir(env) {
   const root = sharedDataPath("backup-staging", env);
   mkdirSync62(root, { recursive: true, mode: 448 });
   chmodSync40(root, 448);
-  return join128(root, randomUUID37());
+  return join128(root, randomUUID38());
 }
 async function backupOlympusData(options) {
   const folder = resolve30(options.folder);
@@ -190522,7 +190699,7 @@ var init_sniffer_tinfoil = __esm(() => {
 });
 
 // src/workers/classification/judge-pacing.ts
-import { AsyncLocalStorage as AsyncLocalStorage17 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage18 } from "node:async_hooks";
 import { createHash as createHash95 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
@@ -190539,7 +190716,7 @@ class JudgeRateLimitPacer {
   lastSeq = 0;
   reportSeq = 0;
   blockedUntil = 0;
-  calls = new AsyncLocalStorage17;
+  calls = new AsyncLocalStorage18;
   constructor(clock = realClock) {
     this.clock = clock;
   }
@@ -190651,7 +190828,7 @@ import {
   rmSync as rmSync42,
   writeFileSync as writeFileSync25
 } from "node:fs";
-import { randomUUID as randomUUID38 } from "node:crypto";
+import { randomUUID as randomUUID39 } from "node:crypto";
 import { homedir as homedir42 } from "node:os";
 import { dirname as dirname104, isAbsolute as isAbsolute38, join as join132 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir42(), type = "text") {
@@ -190861,7 +191038,7 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID38()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID39()}.tmp`;
   try {
     mkdirSync64(dirname104(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
@@ -191979,7 +192156,7 @@ var init_embedding_runtime = __esm(() => {
 });
 
 // src/core/native-embedding-drain-service.ts
-import { randomUUID as randomUUID39 } from "node:crypto";
+import { randomUUID as randomUUID40 } from "node:crypto";
 import { readFileSync as readFileSync95, statSync as statSync46 } from "node:fs";
 import { delimiter as delimiter8, dirname as dirname107, isAbsolute as isAbsolute39, join as join135 } from "node:path";
 import { fileURLToPath as fileURLToPath13 } from "node:url";
@@ -192030,7 +192207,7 @@ async function prepareEmbeddingDrainStart(input, options) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join135(dirname107(reportPath), READINESS_FILE);
-  const instanceId = randomUUID39();
+  const instanceId = randomUUID40();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
   return {
@@ -197539,6 +197716,7 @@ function createBuiltInPrivateAnswerModel(options) {
           };
           return runWithLocalInferenceGuard(guard, async () => {
             await guard();
+            markModelCall("guards_done");
             observe?.modelStarting?.();
             return answering.complete(modelRequest);
           });
@@ -197964,6 +198142,7 @@ var PrivateRouteUnavailableError, PANEL_ANSWER_LIMITS, TITLE_WEIGHT = 0.7, RELEV
 var init_private_answer_model = __esm(() => {
   init_answer_activity();
   init_analyst_built_in();
+  init_model_call_trace();
   init_local_analyst_window();
   init_source_model_policy();
   init_evidence_versions();
@@ -221905,7 +222084,7 @@ var init_cli_operations = __esm(() => {
 });
 
 // src/workers/settings-proposal-holder.ts
-import { randomUUID as randomUUID40 } from "node:crypto";
+import { randomUUID as randomUUID41 } from "node:crypto";
 function modeLabel(id) {
   return PRIVACY_PRESET_LABELS[id] ?? id;
 }
@@ -221984,7 +222163,7 @@ function createSettingsProposalHolder(targets, now = () => new Date) {
   return {
     async propose(input, from) {
       const proposal = {
-        id: randomUUID40(),
+        id: randomUUID41(),
         created_at: now().toISOString(),
         ...from ? { from } : {},
         input,
@@ -233128,7 +233307,7 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash108, randomUUID as randomUUID41 } from "node:crypto";
+import { createHash as createHash108, randomUUID as randomUUID42 } from "node:crypto";
 import { realpathSync as realpathSync28, rmSync as rmSync47, readdirSync as readdirSync36 } from "node:fs";
 import { join as join151, posix as posix4 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
@@ -233520,7 +233699,7 @@ function createLocalFilesSourceConnector(options) {
           const deletedSeen = new Set;
           const priorGen = cursor?.startsWith(LOCAL_FILES_CURSOR_PREFIX) ? cursor.slice(LOCAL_FILES_CURSOR_PREFIX.length) : undefined;
           const replay = priorGen !== undefined && priorGen !== "poll";
-          const nextGen = randomUUID41();
+          const nextGen = randomUUID42();
           let wroteSnapshot = false;
           if (options.watch) {
             try {
@@ -248769,9 +248948,9 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/engine/runtime/source-answer-lanes.ts
-import { AsyncLocalStorage as AsyncLocalStorage18 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage19 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay, now = Date.now) {
-  const context = new AsyncLocalStorage18;
+  const context = new AsyncLocalStorage19;
   let inFlight = 0;
   let startedAt;
   let lastEndedAt;
@@ -254339,7 +254518,7 @@ var init_tier_over_private = __esm(() => {
 });
 
 // src/workers/engine-split/client.ts
-import { randomUUID as randomUUID42 } from "node:crypto";
+import { randomUUID as randomUUID43 } from "node:crypto";
 
 class EngineCommandClient {
   options;
@@ -254499,7 +254678,7 @@ class OwnerBusyRelay {
   constructor(client, log = () => {}, options = {}) {
     this.client = client;
     this.log = log;
-    this.front = options.front ?? randomUUID42();
+    this.front = options.front ?? randomUUID43();
     this.renewEveryMs = options.renewEveryMs ?? 3 * 60000;
     this.setTimer = options.setInterval ?? ((callback, ms) => {
       const timer = setInterval(callback, ms);
@@ -254586,11 +254765,11 @@ var init_client5 = __esm(() => {
 });
 
 // src/workers/engine-split/snapshot.ts
-import { randomUUID as randomUUID43 } from "node:crypto";
+import { randomUUID as randomUUID44 } from "node:crypto";
 import { closeSync as closeSync37, fstatSync as fstatSync10, openSync as openSync36, readFileSync as readFileSync111, renameSync as renameSync27, rmSync as rmSync49, writeFileSync as writeFileSync29 } from "node:fs";
 import { open as open9 } from "node:fs/promises";
 function writeEngineStatusSnapshot(path, snapshot) {
-  const partial = `${path}.${randomUUID43()}.tmp`;
+  const partial = `${path}.${randomUUID44()}.tmp`;
   try {
     writeFileSync29(partial, `${JSON.stringify(snapshot)}
 `, { flag: "wx", mode: 384 });
@@ -254757,6 +254936,8 @@ function startEngineControlPlane(input) {
   let stopping = false;
   const followed = new Set;
   const modelCalls = new Map;
+  if (input.modelComplete)
+    controlPathHeadroom.startModelLagSampling();
   const submit = (envelope) => {
     let receipt;
     try {
@@ -254775,7 +254956,9 @@ function startEngineControlPlane(input) {
         send({ type: "receipts", receipts: [settled] });
     });
   };
-  const runModel = (id, request, priority) => {
+  const runModel = ({ id, request, priority, caller, trace }) => {
+    if (trace)
+      markModelCall("bg_received", trace);
     const modelComplete = input.modelComplete;
     if (!modelComplete) {
       send({ type: "model_result", id, message: "This background serves no model." });
@@ -254791,13 +254974,21 @@ function startEngineControlPlane(input) {
       lastProgressMs = now;
       send({ type: "model_progress", id, model });
     };
-    withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...request, signal: controller.signal }))).then((completion) => {
-      send({ type: "model_result", id, completion });
-    }, (error) => {
-      if (error instanceof OperationError)
-        send({ type: "model_result", id, operationError: error.toJSON() });
+    const result = (value) => {
+      if (trace) {
+        trace.bgLoopLagMaxMs = controlPathHeadroom.modelLoopLagSince(trace.startedAt);
+        markModelCall("bg_result_posted", trace);
+      }
+      send({ type: "model_result", id, ...value, ...trace ? { trace } : {} });
+    };
+    const complete = () => runAtLocalInferencePriority(priority, () => modelComplete({ ...request, signal: controller.signal }));
+    withModelProgress(progress, () => withModelCallTrace(trace, () => runWithLocalInferenceCaller(caller, complete))).then((completion) => result({ completion }), (error) => {
+      if (error instanceof LocalModelPreempted)
+        result({ preempted: true });
+      else if (error instanceof OperationError)
+        result({ operationError: error.toJSON() });
       else
-        send({ type: "model_result", id, message: error instanceof Error ? error.message : "unknown error" });
+        result({ message: error instanceof Error ? error.message : "unknown error" });
     }).finally(() => {
       modelCalls.delete(id);
     });
@@ -254822,7 +255013,7 @@ function startEngineControlPlane(input) {
         return;
       }
       case "model":
-        runModel(message.id, message.request, message.priority);
+        runModel(message);
         return;
       case "model_stop":
         modelCalls.get(message.id)?.abort();
@@ -254878,13 +255069,15 @@ var init_control_plane = __esm(() => {
   init_operation_error();
   init_answer_activity();
   init_model_stream();
+  init_model_call_trace();
+  init_control_path_headroom();
   init_snapshot();
   NEVER2 = new Promise(() => {});
 });
 
 // src/workers/engine-split/runtime.ts
-import { AsyncLocalStorage as AsyncLocalStorage19 } from "node:async_hooks";
-import { randomUUID as randomUUID44 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage20 } from "node:async_hooks";
+import { randomUUID as randomUUID45 } from "node:crypto";
 import { lstatSync as lstatSync56 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
   const path = env[ENGINE_BACKGROUND_SOCKET_ENV]?.trim();
@@ -254896,7 +255089,7 @@ function engineStatusSnapshotPath(env) {
   return sharedDataPath("engine-status", env);
 }
 function startEngineBackgroundServer(input) {
-  const instanceId = input.instanceId ?? randomUUID44();
+  const instanceId = input.instanceId ?? randomUUID45();
   prepareEngineBackgroundSocketDirectory(input.socketPath);
   let present = false;
   try {
@@ -254915,6 +255108,8 @@ function startEngineBackgroundServer(input) {
   const ledger = new EngineCommandLedger({ instanceId, handlers: input.handlers });
   let loopServer;
   const serveFromLoop = () => {
+    if (input.modelComplete)
+      controlPathHeadroom.startModelLagSampling();
     const handler = createEngineCommandHandler({ authToken: input.authToken, ledger, ready: () => ready, ...input.modelComplete ? { modelComplete: input.modelComplete } : {} });
     loopServer = bindWorkerSocket(input.socketPath, () => Bun.serve(workerSocketServe({
       unix: input.socketPath,
@@ -255103,7 +255298,7 @@ function restartingResponse(request) {
 function createFrontGate() {
   let open = true;
   let generation = 0;
-  const current = new AsyncLocalStorage19;
+  const current = new AsyncLocalStorage20;
   return {
     isOpen: () => open,
     close() {
@@ -255338,12 +255533,22 @@ function restartAfterFront(input) {
 }
 async function completeModelInBackground(fetchBackground, authToken, request, onServingPid) {
   const { signal, ...body } = request;
+  const trace = currentModelCallTrace();
+  const caller = currentLocalInferenceCaller();
+  const payloadBody = JSON.stringify({
+    ...body,
+    priority: currentLocalInferencePriority(),
+    caller,
+    ...trace ? { trace: { id: trace.id, startedAt: trace.startedAt } } : {}
+  });
   let response;
   try {
+    if (trace)
+      markModelCall("forward_sent", trace);
     response = await fetchBackground(`${ENGINE_BACKGROUND_ORIGIN}${ENGINE_MODEL_COMPLETE_PATH}`, {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: `Bearer ${authToken}` },
-      body: JSON.stringify({ ...body, priority: currentLocalInferencePriority() }),
+      body: payloadBody,
       ...signal ? { signal } : {}
     });
   } catch (error) {
@@ -255351,13 +255556,16 @@ async function completeModelInBackground(fetchBackground, authToken, request, on
       throw error;
     throw new OperationError("argus_unreachable", "The built-in private model is not answering: the background engine is not reachable.", "Try again in a moment.");
   }
-  const payload = response.ok && response.headers.get("content-type")?.startsWith(ENGINE_MODEL_STREAM_CONTENT_TYPE) ? await readModelStream(response).catch((error) => {
+  const streamed = response.ok && response.headers.get("content-type")?.startsWith(ENGINE_MODEL_STREAM_CONTENT_TYPE);
+  const payload = streamed ? await readModelStream(response, trace).catch((error) => {
     if (signal?.aborted)
       throw error;
     return;
   }) : await response.json().catch(() => {
     return;
   });
+  if (trace && !streamed)
+    markModelCall("front_result", trace);
   if (response.ok && payload && typeof payload.text === "string" && typeof payload.modelId === "string") {
     const { built_in_serving_pid: pid, ...completion } = payload;
     if (typeof pid === "number")
@@ -255365,12 +255573,14 @@ async function completeModelInBackground(fetchBackground, authToken, request, on
     return completion;
   }
   const typed = payload?.operation_error;
+  if (payload?.preempted === true)
+    throw new LocalModelPreempted;
   if (typed && typeof typed.error === "string" && typeof typed.message === "string") {
     throw new OperationError(typed.error, typed.message, typeof typed.suggestion === "string" ? typed.suggestion : undefined);
   }
   throw new OperationError("argus_unreachable", `The built-in private model did not answer (HTTP ${response.status}).`, "Try again in a moment.");
 }
-async function readModelStream(response) {
+async function readModelStream(response, trace) {
   if (!response.body)
     return;
   const reader = response.body.getReader();
@@ -255383,10 +255593,16 @@ async function readModelStream(response) {
     const value = JSON.parse(text);
     if (typeof value?.progress === "string")
       noteModelProgress(value.progress);
-    else if (value && typeof value.completion === "object" && value.completion !== null)
-      result = value.completion;
-    else if (value && (("operation_error" in value) || ("error" in value)))
-      result = value;
+    else if (value) {
+      if (typeof value.completion === "object" && value.completion !== null)
+        result = value.completion;
+      else if ("operation_error" in value || "error" in value || value.preempted === true)
+        result = value;
+      if (result && trace) {
+        mergeBackgroundModelTrace(trace, value.trace);
+        markModelCall("front_result", trace);
+      }
+    }
   };
   for (;; ) {
     const next = await reader.read();
@@ -255418,6 +255634,8 @@ var init_runtime4 = __esm(() => {
   init_control_plane();
   init_answer_activity();
   init_model_stream();
+  init_model_call_trace();
+  init_control_path_headroom();
   init_commands();
   init_snapshot();
   init_tier_owner_items();
@@ -287541,7 +287759,7 @@ init_worker_auth();
 init_worker_shutdown();
 init_worker_front_proxy();
 init_worker_transport();
-import { randomUUID as randomUUID16 } from "node:crypto";
+import { randomUUID as randomUUID17 } from "node:crypto";
 var STOP_GRACE_MS = WORKER_SHUTDOWN_DEADLINE_MS + 5000;
 var STARTUP_TIMEOUT_MS = 180000;
 var STABLE_UPTIME_MS = 30000;
@@ -287586,7 +287804,7 @@ async function superviseWorkerServiceSplit(input) {
     label: "background engine",
     descendantGroupsPath: descendantGroupsPath(ENGINE_BACKGROUND_SERVICE_ID, input.env),
     prepareStart: async () => {
-      const instanceId = randomUUID16();
+      const instanceId = randomUUID17();
       const env = launchEnv();
       return engineBackgroundLaunch({
         env: { ...env, [ENGINE_BACKGROUND_INSTANCE_ENV]: instanceId },
@@ -288000,7 +288218,7 @@ import { dirname as dirname96, isAbsolute as isAbsolute36, join as join125 } fro
 init_atomic_file();
 init_file_lease();
 init_operation_error();
-import { randomUUID as randomUUID35 } from "node:crypto";
+import { randomUUID as randomUUID36 } from "node:crypto";
 import { existsSync as existsSync93, linkSync as linkSync5, lstatSync as lstatSync46, readFileSync as readFileSync81 } from "node:fs";
 import { join as join124 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
@@ -288016,7 +288234,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       schema_version: 1,
       pid: process.pid,
       process_instance: ownerProcessInstance,
-      nonce: randomUUID35(),
+      nonce: randomUUID36(),
       action,
       started_at: now().toISOString()
     };

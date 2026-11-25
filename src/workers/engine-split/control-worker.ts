@@ -16,8 +16,9 @@ import { rename, utimes, writeFile } from 'node:fs/promises';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { workerSocketServe } from '../../core/worker-transport.ts';
-import { currentLocalInferencePriority } from '../answer-activity.ts';
+import { LocalModelPreempted, currentLocalInferenceCaller, currentLocalInferencePriority } from '../answer-activity.ts';
 import { currentModelProgress } from '../../core/model-stream.ts';
+import { currentModelCallTrace, mergeBackgroundModelTrace, type ModelCallTrace } from '../../core/model-call-trace.ts';
 import { createEngineCommandHandler } from './commands.ts';
 import { EngineCommandMirror } from './control-mirror.ts';
 import {
@@ -61,7 +62,7 @@ function start(init: ControlInit): void {
   // A model completion runs on the loop, which holds the model: asked for by
   // message, answered by message, and stopped when the request closes.
   let nextModelId = 1;
-  const models = new Map<number, { resolve: (completion: AnalystModelCompletion) => void; reject: (error: Error) => void; progress?: (model: string) => void }>();
+  const models = new Map<number, { resolve: (completion: AnalystModelCompletion) => void; reject: (error: Error) => void; progress?: (model: string) => void; trace?: ModelCallTrace }>();
   const modelComplete = (request: AnalystModelRequest): Promise<AnalystModelCompletion> => {
     const { signal, ...body } = request;
     const id = nextModelId++;
@@ -76,12 +77,15 @@ function start(init: ControlInit): void {
       // The loop's progress arrives by message, outside this call's async
       // context: keep the call's own clocks to tell.
       const progress = currentModelProgress();
+      const trace = currentModelCallTrace();
+      const caller = currentLocalInferenceCaller();
       models.set(id, {
         ...(progress ? { progress } : {}),
+        ...(trace ? { trace } : {}),
         resolve: (completion) => { signal?.removeEventListener('abort', stop); resolve(completion); },
         reject: (error) => { signal?.removeEventListener('abort', stop); reject(error); },
       });
-      post({ type: 'model', id, request: body, priority: currentLocalInferencePriority() });
+      post({ type: 'model', id, request: body, priority: currentLocalInferencePriority(), ...(caller ? { caller } : {}), ...(trace ? { trace } : {}) });
     });
   };
 
@@ -89,6 +93,7 @@ function start(init: ControlInit): void {
     authToken: init.authToken,
     ledger: mirror,
     ready: () => ready,
+    modelOnControlThread: true,
     ...(init.model ? { modelComplete } : {}),
   });
 
@@ -201,7 +206,9 @@ function start(init: ControlInit): void {
         const waiting = models.get(data.id);
         if (!waiting) return;
         models.delete(data.id);
+        if (waiting.trace) mergeBackgroundModelTrace(waiting.trace, data.trace);
         if (data.completion) waiting.resolve(data.completion);
+        else if (data.preempted) waiting.reject(new LocalModelPreempted());
         else if (data.operationError) waiting.reject(new OperationError(data.operationError.error as OperationErrorCode, data.operationError.message, data.operationError.suggestion));
         else waiting.reject(new Error(data.message ?? 'The model call failed.'));
         return;
