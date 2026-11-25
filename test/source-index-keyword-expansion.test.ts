@@ -51,7 +51,7 @@ test('a running opportunistic translation yields the shared slot to an owner ans
   expect(translations).toBe(2);
 });
 
-test('a fully awaited translation keeps owner priority and is cancelled when its search returns early', async () => {
+test('a fully awaited translation yields to owner answers and is cancelled when its search returns early', async () => {
   const started = Promise.withResolvers<{ signal?: AbortSignal; priority: string }>();
   const drain = Promise.withResolvers<void>();
   let calls = 0;
@@ -73,7 +73,7 @@ test('a fully awaited translation keeps owner priority and is cancelled when its
     return started.promise;
   });
   try {
-    expect(running.priority).toBe('owner');
+    expect(running.priority).toBe('background');
     expect(running.signal?.aborted).toBe(true);
   } finally {
     drain.resolve();

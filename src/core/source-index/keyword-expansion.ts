@@ -95,7 +95,12 @@ export async function expandSourceIndexKeywords(
   if (pinned) return pinned;
   const builtIn = await expansionModel();
   if (options.waitMs === undefined) {
-    const alternatives = await expandCachedSourceIndexKeywords(query, profile, builtIn, cachedKeywordExpansion());
+    // Even a search that waits for its translation never holds the model
+    // against the owner's answer: preempted, it keeps its static terms (not
+    // cached, so a later search retries), and the answer goes first (1.5
+    // test-mac canary afe8bbf9: answers queued 25-86 s behind an owner-priority
+    // translation).
+    const alternatives = await runBackgroundInference(() => expandCachedSourceIndexKeywords(query, profile, builtIn, cachedKeywordExpansion()));
     pinKeywordAlternatives(owner, query, alternatives);
     return alternatives;
   }
