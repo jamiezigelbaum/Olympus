@@ -17,6 +17,15 @@ export function noteModelProgress(model: string): void {
   progress.getStore()?.(model);
 }
 
+/**
+ * Runs `work` with exactly `listener` as its clocks, whatever context started
+ * it: a queue that starts a call from another call's continuation restores
+ * the call's own clocks this way.
+ */
+export function runWithModelProgress<T>(listener: ((model: string) => void) | undefined, work: () => T): T {
+  return listener ? progress.run(listener, work) : progress.exit(work);
+}
+
 /** The current clocks' listener, for work that reports back later from outside this async context (a worker thread). */
 export function currentModelProgress(): ((model: string) => void) | undefined {
   return progress.getStore();

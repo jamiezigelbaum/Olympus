@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { currentModelProgress, runWithModelProgress } from '../core/model-stream.ts';
 
 let localInferencePriority: AsyncLocalStorage<AnswerLeaseKind | 'maintenance'> | undefined;
 let privacyReleaseInference: AsyncLocalStorage<boolean> | undefined;
@@ -201,7 +202,7 @@ export function localModelResourceKey(profile: { baseUrl?: string; model?: strin
 }
 
 export function createLocalModelActivity() {
-  const queues = new Map<string, { running: number[]; tasks: Array<{ priority: number; limit: number; queuedAt: number; run: () => Promise<void> }> }>();
+  const queues = new Map<string, { running: number[]; tasks: Array<{ priority: number; limit: number; queuedAt: number; progress?: (model: string) => void; run: () => Promise<void> }> }>();
   // `limit` is how many calls on this resource may run alongside this one. The
   // next task in owner-first order starts only while fewer run than its own
   // limit and the limit of every call already running, so an owner call
@@ -231,8 +232,23 @@ export function createLocalModelActivity() {
     // cancels it (llama-server stops a cancelled prompt within a 64-token
     // batch) and no new one starts ahead of this call (owner-first order).
     if (kind === 'owner' && pending.running.length > 0) notifyBusy(key);
-    pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 1 : localInferencePriority?.getStore() === 'maintenance' ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
-      try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => lease(key, work)) : lease(key, work))); } catch (error) { reject(error); }
+    // A queued call starts from whatever call freed the slot, so it carries
+    // its own model clocks with it (otherwise its output refreshed the clocks
+    // of the call before it). And a call waiting for the slot is waiting on
+    // work that is moving: the running call's output also counts as progress
+    // for every call queued behind it, so a waiter's no-progress clock stops
+    // only when the model itself stalls (1.5 test-mac canary, 24 Nov 2026:
+    // private answers queued behind judge calls were stopped at 60 s with
+    // nothing wrong). A running call that stalls has its own idle limit,
+    // which frees the slot.
+    const progress = currentModelProgress();
+    const shared = (model: string): void => {
+      progress?.(model);
+      for (const task of pending.tasks) task.progress?.(model);
+    };
+    pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 1 : localInferencePriority?.getStore() === 'maintenance' ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), ...(progress ? { progress } : {}), run: async () => {
+      const leased = () => runWithModelProgress(shared, () => lease(key, work));
+      try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, leased) : leased())); } catch (error) { reject(error); }
     } });
     // Gather simultaneous dispatches before choosing owner-first.
     queueMicrotask(pump);

@@ -320,35 +320,14 @@ function workerSocketServe(options) {
 }
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage } from "async_hooks";
-var localInferencePriority;
-var privacyReleaseInference;
-function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage;
-  return localInferencePriority.run("background", work);
-}
-function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage;
-  return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
-}
-function currentLocalInferencePriority() {
-  return localInferencePriority?.getStore() ?? "owner";
-}
-function runAtLocalInferencePriority(priority, work) {
-  if (priority === "background")
-    return runBackgroundInference(work);
-  if (priority === "maintenance")
-    return runClassificationInference(work);
-  return work();
-}
-var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "async_hooks";
 
 // src/core/memory-counters.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "async_hooks";
-var payloadScope = new AsyncLocalStorage2;
+import { AsyncLocalStorage } from "async_hooks";
+var payloadScope = new AsyncLocalStorage;
 
 // src/core/model-stream.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "async_hooks";
 
 // src/core/zkapi-consult-settings.ts
 var ZKAPI_DAEMON_DEFAULT_PORT = 8787;
@@ -387,7 +366,7 @@ var SETTINGS_KEYS = new Set([
 var zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
 
 // src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "async_hooks";
 
 // src/core/secret-patterns.ts
 var PROSE_WORDS = new Set([
@@ -584,20 +563,20 @@ var RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|back
 var LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
 
 // src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "async_hooks";
 var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
 var chunkProvenance = new WeakMap;
-var storage = new AsyncLocalStorage3;
+var storage = new AsyncLocalStorage2;
 var withheldAnswers = new WeakSet;
 
 // src/core/source-answer-jobs.ts
 var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
 var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
 var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
-var progressSink = new AsyncLocalStorage4;
+var progressSink = new AsyncLocalStorage3;
 
 // src/core/model-stream.ts
-var progress = new AsyncLocalStorage5;
+var progress = new AsyncLocalStorage4;
 function withModelProgress(listener, work) {
   const parent = progress.getStore();
   return progress.run((model) => {
@@ -608,6 +587,29 @@ function withModelProgress(listener, work) {
 function currentModelProgress() {
   return progress.getStore();
 }
+
+// src/workers/answer-activity.ts
+var localInferencePriority;
+var privacyReleaseInference;
+function runBackgroundInference(work) {
+  localInferencePriority ??= new AsyncLocalStorage5;
+  return localInferencePriority.run("background", work);
+}
+function runClassificationInference(work) {
+  localInferencePriority ??= new AsyncLocalStorage5;
+  return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
+}
+function currentLocalInferencePriority() {
+  return localInferencePriority?.getStore() ?? "owner";
+}
+function runAtLocalInferencePriority(priority, work) {
+  if (priority === "background")
+    return runBackgroundInference(work);
+  if (priority === "maintenance")
+    return runClassificationInference(work);
+  return work();
+}
+var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 
 // src/core/olympus-layout.ts
 import { homedir as homedir3 } from "os";
