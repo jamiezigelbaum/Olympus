@@ -126,6 +126,7 @@ import {
 } from '../source-index/built-in-reasoning/transcription-model.ts';
 import { runningBuiltInTranscriber, sharedBuiltInTranscriber, wireBuiltInTranscriptionAtBoot } from '../file-extraction/extractors/built-in-transcriber.ts';
 import {
+  BUILT_IN_ANALYST_NAME,
   answerPrivately,
   builtInPrivateModelStatus,
   withBuiltInFallback,
@@ -866,7 +867,9 @@ export async function main(): Promise<void> {
   // sniffer, the Private answer pool's fallback and ChatGPT's private answer
   // panel, so at most one local model server runs. Registered for the
   // sniffer before its runtime is resolved below.
-  const localModelActivity = createLocalModelActivity();
+  const localModelActivity = createLocalModelActivity({
+    singleSlotResources: engineFront ? [] : [BUILT_IN_ANALYST_NAME],
+  });
   // The owner's built-in size from Privacy rules; an operator's env pin wins.
   applyBuiltInModelChoice(sovereigntyEngine, process.env);
   // With the engine split, only the background holds the built-in model (one
@@ -876,8 +879,11 @@ export async function main(): Promise<void> {
     servingPid: () => engineFront!.servingModelPid(),
     prepare: () => { void engineFront!.client.post({ kind: 'model_prepare' }).catch(() => undefined); },
   } : undefined);
-  const answerBuiltInModel = workerBuiltInModel
-    ? localModelActivity.track('built_in', workerBuiltInModel.model) : undefined;
+  const builtInProvider = workerBuiltInModel?.model;
+  // The front checks live evidence before forwarding. Admission and
+  // preemption belong to the worker that owns the physical llama slot.
+  const answerBuiltInModel = builtInProvider
+    ? localModelActivity.track(BUILT_IN_ANALYST_NAME, builtInProvider, { serialize: !engineFront }) : undefined;
   // The owner's Private answer route as the ChatGPT private panel uses it:
   // set where the answer analysts are built, below.
   let localPrivateRoute: ReturnType<typeof createLocalPrivateRoute> | undefined;
@@ -887,11 +893,13 @@ export async function main(): Promise<void> {
     if (!route) return undefined;
     return 'unavailable' in route ? 'unavailable' : route.model;
   });
-  const servingModelPid = workerBuiltInModel?.model.servingPid;
-  registerBuiltInPrivateModel(workerBuiltInModel
+  const servingModelPid = builtInProvider?.servingPid;
+  const builtInSpec = builtInProvider?.spec;
+  registerBuiltInPrivateModel(workerBuiltInModel && answerBuiltInModel && builtInSpec
     ? {
       ...workerBuiltInModel,
-      cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`,
+      model: answerBuiltInModel,
+      cacheModelId: `${builtInSpec.modelId}:${builtInSpec.revision}:${builtInSpec.file.sha256}`,
       serverReady: () => servingModelPid?.() !== undefined,
     }
     : undefined);
@@ -6226,9 +6234,11 @@ export async function main(): Promise<void> {
         lane: snifferLane.kind, profileId: snifferLane.profileId, modelId: snifferLane.modelId,
         promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
       }, { builtInDefault: snifferRuntime.source === 'built_in' });
+      const model = snifferResource ? localModelActivity.track(snifferResource, snifferModel, {
+        serialize: !engineFront || snifferResource !== BUILT_IN_ANALYST_NAME,
+      }) : snifferModel;
       return { lane: snifferLane, approved, model: {
-        complete: request => runClassificationInference(() => (snifferResource
-          ? localModelActivity.track(snifferResource, snifferModel) : snifferModel).complete(request)),
+        complete: request => runClassificationInference(() => model.complete(request)),
       } };
     } }),
     pendingClassificationCount,
@@ -6842,13 +6852,15 @@ export async function main(): Promise<void> {
   const rawSnifferModel: SnifferModel | undefined = !snifferEnv.enabled || snifferRuntime.source === 'off'
     ? undefined
     : snifferRuntime.source === 'built_in'
-      ? snifferRuntime.builtIn.model
+      // The judge wraps the provider itself so its tag and slot timer cover
+      // the same admission as answers, including completions from the front.
+      ? builtInProvider
       : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeWrapFetch: fetch => judgeSpending.fetch(fetch, undefined, 'tinfoil'), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } });
   snifferModelBuilt = rawSnifferModel !== undefined;
   // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
   const snifferModel: SnifferModel | undefined = rawSnifferModel && snifferLane?.kind === 'local' ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
-  const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
+  const snifferResource = snifferRuntime.source === 'built_in' ? BUILT_IN_ANALYST_NAME
     : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
   // This computer, then Venice double-checks (#891): the local judge sorts everything, and
   // Venice re-reads only what it held Private, on the same lane, consent and spending limit.
@@ -6957,8 +6969,9 @@ export async function main(): Promise<void> {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
   }
-  if (engineFront && snifferResource) {
-    // The judge runs in the background: carry the owner's own call to it.
+  if (engineFront && snifferResource && snifferResource !== BUILT_IN_ANALYST_NAME) {
+    // Configured local endpoints are used from both processes, so the
+    // background judge needs a mark. Built-in completions queue there directly.
     const relay = engineFront.ownerBusy;
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));

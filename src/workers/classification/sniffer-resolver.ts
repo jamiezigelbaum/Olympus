@@ -31,7 +31,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
-import { runWithLocalInferenceGuard } from '../answer-activity.ts';
+import { LocalModelPreempted, runWithLocalInferenceGuard } from '../answer-activity.ts';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import {
   JudgeCloudStopped,
@@ -379,6 +379,7 @@ export async function prepareSnifferModel(options: {
       if (stopped()) throw new Error('Privacy sniffer preparation yielded.');
     }, async () => { await (options.model as SnifferModel).prepareSniffer?.(options.signal); });
   } catch (error) {
+    if (error instanceof LocalModelPreempted) return 'aborted';
     const reason = stopped();
     if (reason) return reason;
     throw error;
@@ -862,7 +863,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
           report.stoppedBy = 'cloud_stopped';
           return;
         }
-        if (options.signal?.aborted) {
+        if (options.signal?.aborted || error instanceof LocalModelPreempted) {
           // Preempted by an answer that needs the private pool: not a failure
           // of anything, so nothing is counted against the items or the lane.
           report.stoppedBy = 'preempted';
