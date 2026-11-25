@@ -574,7 +574,7 @@ export async function answerPrivately(
   // Whether the model called its own answer complete ("sufficient"): the
   // AnalystResult does not carry it, and the panel shows no gaps then.
   const verdict: { sufficient: boolean | undefined } = { sufficient: undefined };
-  const analyst = createAnalyst(withVerdict(timedModel(model, options.onModelCall), verdict), {
+  const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
     auditSuspiciousDrafts: options.audit ?? true,
     boundedResponseSchema: true,
     ...(options.evidenceFormat ? { evidenceFormat: options.evidenceFormat } : {}),
@@ -715,15 +715,15 @@ const GAP_GENERIC_WORDS = new Set([
   'citations', 'citation', 'unanswered', 'sufficient', 'insufficient', 'claim', 'claims',
 ]);
 
-/** The model, reporting each call's stage (the first is the answer, any later one the audit) and cost. */
-function timedModel(model: AnalystModel, report?: (call: PrivateModelCallTiming) => void): AnalystModel {
+/** The model, reporting each call's stage (the first is the answer, any later one the audit) and cost; only an observed answer (the engine's private-answer jobs) traces its calls, so a CLI's stdout stays its own. */
+function timedModel(model: AnalystModel, report: (call: PrivateModelCallTiming) => void): AnalystModel {
   let calls = 0;
   return {
     async complete(request) {
       const stage = calls === 0 ? 'main' : 'audit';
       calls += 1;
       const trace = startModelCallTrace();
-      const promptBytes = report ? utf8.encode(request.system).length + utf8.encode(request.prompt).length : 0;
+      const promptBytes = utf8.encode(request.system).length + utf8.encode(request.prompt).length;
       let completion: AnalystModelCompletion | undefined;
       try {
         completion = await withModelCallTrace(trace, () => model.complete(request));
@@ -733,7 +733,7 @@ function timedModel(model: AnalystModel, report?: (call: PrivateModelCallTiming)
         const ok = completion !== undefined;
         logModelCallTrace(trace, stage, ok);
         try {
-          report?.({ stage, ms: trace.offsets.main_end!, promptBytes, ok, ...completion?.usage });
+          report({ stage, ms: trace.offsets.main_end!, promptBytes, ok, ...completion?.usage });
         } catch {
           // A reporting hook never fails the answer.
         }

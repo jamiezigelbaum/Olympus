@@ -112408,7 +112408,7 @@ async function answerPrivately(question, evidence, options = {}) {
   const pack = withPromptBudget(fitPrivatePack(privateEvidencePack(question, evidence), maxPromptBytes, options.evidenceFormat ?? "full", options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS), maxPromptBytes);
   options.onEvidence?.(pack.candidates.filter((item) => item.chunks.some((text) => text.trim())).map((item) => item.provenance.sourceItem.providerItemId));
   const verdict = { sufficient: undefined };
-  const analyst = createAnalyst(withVerdict(timedModel(model, options.onModelCall), verdict), {
+  const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
     auditSuspiciousDrafts: options.audit ?? true,
     boundedResponseSchema: true,
     ...options.evidenceFormat ? { evidenceFormat: options.evidenceFormat } : {}
@@ -112507,7 +112507,7 @@ function timedModel(model, report) {
       const stage = calls === 0 ? "main" : "audit";
       calls += 1;
       const trace = startModelCallTrace();
-      const promptBytes = report ? utf8.encode(request.system).length + utf8.encode(request.prompt).length : 0;
+      const promptBytes = utf8.encode(request.system).length + utf8.encode(request.prompt).length;
       let completion;
       try {
         completion = await withModelCallTrace(trace, () => model.complete(request));
@@ -112517,7 +112517,7 @@ function timedModel(model, report) {
         const ok = completion !== undefined;
         logModelCallTrace(trace, stage, ok);
         try {
-          report?.({ stage, ms: trace.offsets.main_end, promptBytes, ok, ...completion?.usage });
+          report({ stage, ms: trace.offsets.main_end, promptBytes, ok, ...completion?.usage });
         } catch {}
       }
     }

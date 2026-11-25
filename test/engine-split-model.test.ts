@@ -218,7 +218,7 @@ test('each main and audit call logs all split timings and queue occupants withou
     await panel.answerPrivately('What did my June blood work show?', [
       { title: 'Private lab results', trust_domain: 'secure_local', provider_item_id: 'private-item-id', chunks: ['Hemoglobin 13.9 g/dL, collected 12 June 2026.'] },
       { title: 'Private clinic note', trust_domain: 'secure_local', chunks: ['Follow-up booked for July.'] },
-    ]);
+    ], undefined, { modelCall: () => {} });
     expect(await occupying).toBeInstanceOf(LocalModelPreempted);
 
     const prefix = '[private-model-call] ';
