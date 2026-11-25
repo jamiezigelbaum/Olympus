@@ -109156,8 +109156,16 @@ class TieredStoreSet {
     for (const intent of this.ledger.writeIntents()) {
       const identity = { ...intent.identity, ...intent.version !== undefined ? { sourceVersion: intent.version } : {} };
       if (intent.kind === "content" || intent.kind === "names") {
-        if (this.intentSuperseded(intent) || this.intentLanded(intent))
+        if (this.intentSuperseded(intent)) {
           this.ledger.clearWriteIntent(intent.identity);
+          continue;
+        }
+        if (this.intentLanded(intent)) {
+          if (intent.version !== undefined)
+            for (const domain of TIER_DOMAIN_ORDER)
+              this.store(domain)?.advanceItemVersion(identity);
+          this.ledger.clearWriteIntent(intent.identity);
+        }
         continue;
       }
       if (intent.kind === "advance") {

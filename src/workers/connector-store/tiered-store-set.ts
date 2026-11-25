@@ -1194,7 +1194,13 @@ export class TieredStoreSet {
         // Owed until its own record is read again, or until the stored state supersedes it. A write every serving
         // leg already holds was cut off only before its intent was cleared: a source that never sends the record
         // again (an unchanged email) would otherwise keep the item out of every lowering for good (Sparta, 25 Nov).
-        if (this.intentSuperseded(intent) || this.intentLanded(intent)) this.ledger.clearWriteIntent(intent.identity);
+        if (this.intentSuperseded(intent)) { this.ledger.clearWriteIntent(intent.identity); continue; }
+        if (this.intentLanded(intent)) {
+          // The version the write accepted stays the item's boundary, as an `advance` keeps it: an older record
+          // can never overwrite the item because its owed body was given up.
+          if (intent.version !== undefined) for (const domain of TIER_DOMAIN_ORDER) this.store(domain)?.advanceItemVersion(identity);
+          this.ledger.clearWriteIntent(intent.identity);
+        }
         continue;
       }
       if (intent.kind === 'advance') {

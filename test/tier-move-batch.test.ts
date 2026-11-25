@@ -333,6 +333,8 @@ test('a content write left open by a replaced connection stops blocking its lowe
   Date.now = () => real() + 8 * 24 * 60 * 60_000;
   try { f.f.set.finishPendingIntents(); } finally { Date.now = real; }
   expect(f.f.ledger.writeIntent(identity)).toBeUndefined();
+  // The version the write accepted stays the item's boundary.
+  expect(f.f.stores.secure_local!.storedItemState(identity)?.version).toBe('never-replayed');
   const { service } = serviceFor(f.f, {}, []);
   await service.runOnce();
   expect(f.f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'private' });
