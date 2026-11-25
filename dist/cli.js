@@ -57068,7 +57068,7 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
     return pinned;
   const builtIn = await expansionModel();
   if (options.waitMs === undefined) {
-    const alternatives = await expandCachedSourceIndexKeywords(query, profile, builtIn, cachedKeywordExpansion());
+    const alternatives = await runBackgroundInference(() => expandCachedSourceIndexKeywords(query, profile, builtIn, cachedKeywordExpansion()));
     pinKeywordAlternatives(owner, query, alternatives);
     return alternatives;
   }
