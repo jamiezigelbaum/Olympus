@@ -1167,7 +1167,7 @@ export class TieredStoreSet {
 
   /**
    * A `content` or `names` write whose version every current copy's store already holds. A `content` write also
-   * needs the body there (chunks), and a body owed from an older record (`bodyVersion`) is never taken as landed.
+   * needs the body (chunks) in each copy that serves content, and a body owed from an older record (`bodyVersion`) is never taken as landed.
    */
   private intentLanded(intent: TierWriteIntent): boolean {
     const copies = this.ledger.copies(intent.identity).filter((copy) => copy.state === 'current');
@@ -1182,7 +1182,7 @@ export class TieredStoreSet {
       const domain = this.domainForCorpus(copy.corpusId);
       const row = domain ? this.store(domain)?.storedItemState(identity) : undefined;
       return row !== undefined && !row.tombstoned && (abandoned || row.version === intent.version)
-        && (intent.kind !== 'content' || row.chunkCount > 0);
+        && (intent.kind !== 'content' || copy.layers === 'metadata' || row.chunkCount > 0);
     });
   }
 

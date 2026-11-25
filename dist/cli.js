@@ -109148,7 +109148,7 @@ class TieredStoreSet {
     return copies.every((copy) => {
       const domain = this.domainForCorpus(copy.corpusId);
       const row = domain ? this.store(domain)?.storedItemState(identity) : undefined;
-      return row !== undefined && !row.tombstoned && (abandoned || row.version === intent.version) && (intent.kind !== "content" || row.chunkCount > 0);
+      return row !== undefined && !row.tombstoned && (abandoned || row.version === intent.version) && (intent.kind !== "content" || copy.layers === "metadata" || row.chunkCount > 0);
     });
   }
   finishPendingIntents() {
