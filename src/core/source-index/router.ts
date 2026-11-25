@@ -545,7 +545,7 @@ function routeHit(hit: SourceIndexSearchHit, corpus: SourceIndexCorpusDefinition
 }
 
 export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOptions): Promise<SourceIndexRoutedSearchResponse> {
-  return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
+  return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options), true);
 }
 
 async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOptions): Promise<SourceIndexRoutedSearchResponse> {

@@ -1420,6 +1420,7 @@ var CONTROL_PATH_SLICE_MS = 20;
 var CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
 var CONTROL_PATH_REST_MS = 25;
 var HEARTBEAT_MS = 50;
+var MODEL_LAG_SAMPLES = 24000;
 var CONTROL_PATH_LAG_COUNTED_MS = 250;
 var CONTROL_PATH_FREEZE_LOG_MS = 2000;
 function controlPathFreezeSubject(role, mainThread = true) {
@@ -1452,6 +1453,8 @@ class ControlPathHeadroom {
   overBudget = 0;
   heartbeat;
   expectedBeatAt = 0;
+  modelLagHistory;
+  modelLagSamples = 0;
   turns = 0;
   rests = 0;
   freezes = 0;
@@ -1529,6 +1532,25 @@ class ControlPathHeadroom {
       overBudget: this.overBudget
     };
   }
+  startModelLagSampling() {
+    this.modelLagHistory ??= new Float64Array(2 * MODEL_LAG_SAMPLES);
+    this.ensureHeartbeat();
+  }
+  modelLoopLagSince(startedAt) {
+    this.startModelLagSampling();
+    const since = startedAt - performance.timeOrigin;
+    let max = Math.max(0, this.now() - Math.max(since, this.expectedBeatAt));
+    const history = this.modelLagHistory;
+    const oldest = Math.max(0, this.modelLagSamples - MODEL_LAG_SAMPLES);
+    for (let sample = this.modelLagSamples - 1;sample >= oldest; sample -= 1) {
+      const index = 2 * (sample % MODEL_LAG_SAMPLES);
+      const elapsed = history[index] - since;
+      if (elapsed <= max)
+        break;
+      max = Math.max(max, Math.min(elapsed, history[index + 1]));
+    }
+    return Math.round(max);
+  }
   stop() {
     if (this.heartbeat)
       clearInterval(this.heartbeat);
@@ -1542,6 +1564,11 @@ class ControlPathHeadroom {
       const now = this.now();
       this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
       this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.modelLagHistory) {
+        const index = 2 * (this.modelLagSamples++ % MODEL_LAG_SAMPLES);
+        this.modelLagHistory[index] = now;
+        this.modelLagHistory[index + 1] = this.lastLagMs;
+      }
       if (this.lastLagMs > this.maxLagMs)
         this.maxLagMs = this.lastLagMs;
       if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS)

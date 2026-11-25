@@ -21,8 +21,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import { runAtLocalInferencePriority, type LocalInferencePriority } from '../answer-activity.ts';
+import { LocalModelPreempted, runAtLocalInferencePriority, runWithLocalInferenceCaller, type LocalInferencePriority } from '../answer-activity.ts';
 import { withModelProgress } from '../../core/model-stream.ts';
+import { markModelCall, withModelCallTrace, type ModelCallTrace } from '../../core/model-call-trace.ts';
+import { controlPathHeadroom } from '../control-path-headroom.ts';
 import { type EngineCommandEnvelope, type EngineCommandLedger, type EngineCommandReceipt } from './commands.ts';
 import { ENGINE_STATUS_PUBLISH_INTERVAL_MS } from './snapshot.ts';
 
@@ -67,13 +69,13 @@ export type ControlToThread =
   | { type: 'state_failed'; at: number; attempts: number; error: string; path: string }
   /** The model is still producing output for call `id` (at most once a second). */
   | { type: 'model_progress'; id: number; model: string }
-  | { type: 'model_result'; id: number; completion?: AnalystModelCompletion; operationError?: { error: string; message: string; suggestion?: string }; message?: string }
+  | { type: 'model_result'; id: number; completion?: AnalystModelCompletion; operationError?: { error: string; message: string; suggestion?: string }; message?: string; preempted?: true; trace?: ModelCallTrace }
   | { type: 'stop' };
 
 export type ControlToLoop =
   | { type: 'submit'; envelope: EngineCommandEnvelope }
   | { type: 'sync'; ids: string[] }
-  | { type: 'model'; id: number; request: Omit<AnalystModelRequest, 'signal'>; priority: LocalInferencePriority }
+  | { type: 'model'; id: number; request: Omit<AnalystModelRequest, 'signal'>; priority: LocalInferencePriority; caller?: 'keyword_translation'; trace?: ModelCallTrace }
   | { type: 'model_stop'; id: number }
   | { type: 'log'; line: string };
 
@@ -170,6 +172,7 @@ export function startEngineControlPlane(input: EngineControlPlaneInput): EngineC
   let stopping = false;
   const followed = new Set<string>();
   const modelCalls = new Map<number, AbortController>();
+  if (input.modelComplete) controlPathHeadroom.startModelLagSampling();
 
   const submit = (envelope: EngineCommandEnvelope): void => {
     let receipt: EngineCommandReceipt;
@@ -189,7 +192,8 @@ export function startEngineControlPlane(input: EngineControlPlaneInput): EngineC
     });
   };
 
-  const runModel = (id: number, request: Omit<AnalystModelRequest, 'signal'>, priority: LocalInferencePriority): void => {
+  const runModel = ({ id, request, priority, caller, trace }: Extract<ControlToLoop, { type: 'model' }>): void => {
+    if (trace) markModelCall('bg_received', trace);
     const modelComplete = input.modelComplete;
     if (!modelComplete) { send({ type: 'model_result', id, message: 'This background serves no model.' }); return; }
     const controller = new AbortController();
@@ -201,11 +205,20 @@ export function startEngineControlPlane(input: EngineControlPlaneInput): EngineC
       lastProgressMs = now;
       send({ type: 'model_progress', id, model });
     };
-    void withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...request, signal: controller.signal }))).then(
-      (completion) => { send({ type: 'model_result', id, completion }); },
+    const result = (value: Omit<Extract<ControlToThread, { type: 'model_result' }>, 'type' | 'id' | 'trace'>): void => {
+      if (trace) {
+        trace.bgLoopLagMaxMs = controlPathHeadroom.modelLoopLagSince(trace.startedAt);
+        markModelCall('bg_result_posted', trace);
+      }
+      send({ type: 'model_result', id, ...value, ...(trace ? { trace } : {}) });
+    };
+    const complete = () => runAtLocalInferencePriority(priority, () => modelComplete({ ...request, signal: controller.signal }));
+    void withModelProgress(progress, () => withModelCallTrace(trace, () => runWithLocalInferenceCaller(caller, complete))).then(
+      (completion) => result({ completion }),
       (error: unknown) => {
-        if (error instanceof OperationError) send({ type: 'model_result', id, operationError: error.toJSON() as { error: string; message: string; suggestion?: string } });
-        else send({ type: 'model_result', id, message: error instanceof Error ? error.message : 'unknown error' });
+        if (error instanceof LocalModelPreempted) result({ preempted: true });
+        else if (error instanceof OperationError) result({ operationError: error.toJSON() as { error: string; message: string; suggestion?: string } });
+        else result({ message: error instanceof Error ? error.message : 'unknown error' });
       },
     ).finally(() => { modelCalls.delete(id); });
   };
@@ -228,7 +241,7 @@ export function startEngineControlPlane(input: EngineControlPlaneInput): EngineC
         return;
       }
       case 'model':
-        runModel(message.id, message.request, message.priority);
+        runModel(message);
         return;
       case 'model_stop':
         modelCalls.get(message.id)?.abort();

@@ -33,6 +33,9 @@ export const CONTROL_PATH_SLICE_MS = 20;
 export const CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
 export const CONTROL_PATH_REST_MS = 25;
 const HEARTBEAT_MS = 50;
+// Twenty minutes of samples, enough to include front-side work before the
+// background sees a model call. The existing heartbeat supplies the samples.
+const MODEL_LAG_SAMPLES = 24_000;
 /** Not a limit, a measure: a turn later than this is counted in health (loop_lag.over_budget). */
 export const CONTROL_PATH_LAG_COUNTED_MS = 250;
 /** A freeze this long is logged, with what was running, so the next one is named. */
@@ -80,6 +83,8 @@ export class ControlPathHeadroom {
   private overBudget = 0;
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private expectedBeatAt = 0;
+  private modelLagHistory: Float64Array | undefined;
+  private modelLagSamples = 0;
   private turns = 0;
   private rests = 0;
   private freezes = 0;
@@ -171,6 +176,27 @@ export class ControlPathHeadroom {
     };
   }
 
+  startModelLagSampling(): void {
+    this.modelLagHistory ??= new Float64Array(2 * MODEL_LAG_SAMPLES);
+    this.ensureHeartbeat();
+  }
+
+  /** Largest sampled delay overlapping this call, including a beat still overdue. */
+  modelLoopLagSince(startedAt: number): number {
+    this.startModelLagSampling();
+    const since = startedAt - performance.timeOrigin;
+    let max = Math.max(0, this.now() - Math.max(since, this.expectedBeatAt));
+    const history = this.modelLagHistory!;
+    const oldest = Math.max(0, this.modelLagSamples - MODEL_LAG_SAMPLES);
+    for (let sample = this.modelLagSamples - 1; sample >= oldest; sample -= 1) {
+      const index = 2 * (sample % MODEL_LAG_SAMPLES);
+      const elapsed = history[index]! - since;
+      if (elapsed <= max) break;
+      max = Math.max(max, Math.min(elapsed, history[index + 1]!));
+    }
+    return Math.round(max);
+  }
+
   stop(): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
@@ -188,6 +214,11 @@ export class ControlPathHeadroom {
       const now = this.now();
       this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
       this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.modelLagHistory) {
+        const index = 2 * (this.modelLagSamples++ % MODEL_LAG_SAMPLES);
+        this.modelLagHistory[index] = now;
+        this.modelLagHistory[index + 1] = this.lastLagMs;
+      }
       if (this.lastLagMs > this.maxLagMs) this.maxLagMs = this.lastLagMs;
       if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS) this.overBudget += 1;
       if (this.lastLagMs >= this.freezeLogMs) {

@@ -1,8 +1,18 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { currentModelProgress, runWithModelProgress } from '../core/model-stream.ts';
+import { currentModelCallTrace, markModelCall, withModelCallTrace, type ModelQueueOccupant } from '../core/model-call-trace.ts';
 
 let localInferencePriority: AsyncLocalStorage<AnswerLeaseKind | 'maintenance'> | undefined;
+const localInferenceCaller = new AsyncLocalStorage<'keyword_translation' | undefined>();
 let privacyReleaseInference: AsyncLocalStorage<boolean> | undefined;
+
+export function currentLocalInferenceCaller(): 'keyword_translation' | undefined {
+  return localInferenceCaller.getStore();
+}
+
+export function runWithLocalInferenceCaller<T>(caller: ReturnType<typeof currentLocalInferenceCaller>, work: () => T): T {
+  return localInferenceCaller.run(caller, work);
+}
 
 /** Chunk release is owner work even through the shared classification model wrapper. */
 export function runPrivacyReleaseInference<T>(work: () => Promise<T>): Promise<T> {
@@ -208,6 +218,7 @@ export class LocalModelPreempted extends DOMException {
 
 interface LocalModelTask {
   priority: number;
+  occupant: ModelQueueOccupant;
   limit: number;
   queuedAt: number;
   preemption?: AbortController;
@@ -222,7 +233,7 @@ export function createLocalModelActivity({ singleSlotResources = [] }: { singleS
   // next task in owner-first order starts only while fewer run than its own
   // limit and the limit of every call already running, so an owner call
   // (limit 1) always runs alone.
-  const dispatch = <T>(key: string, work: (preempted?: AbortSignal) => Promise<T>, limit: number): Promise<T> => new Promise((resolve, reject) => {
+  const dispatch = <T>(key: string, work: (preempted?: AbortSignal) => Promise<T>, limit: number, tag?: string): Promise<T> => new Promise((resolve, reject) => {
     let queue = queues.get(key);
     if (!queue) { queue = { running: [], tasks: [] }; queues.set(key, queue); }
     const pending = queue;
@@ -241,6 +252,12 @@ export function createLocalModelActivity({ singleSlotResources = [] }: { singleS
       }
     };
     const kind = currentLocalInferencePriority();
+    const trace = currentModelCallTrace();
+    const caller = currentLocalInferenceCaller();
+    if (trace) {
+      markModelCall('queue_enter', trace);
+      trace.queuedBehind = pending.running.map(task => task.occupant);
+    }
     const singleSlot = singleSlotResources.includes(key);
     const preemption = singleSlot && kind !== 'owner' ? new AbortController() : undefined;
     // A queued call starts from whatever call freed the slot, so it carries
@@ -259,14 +276,18 @@ export function createLocalModelActivity({ singleSlotResources = [] }: { singleS
     };
     pending.tasks.push({
       priority: kind === 'owner' ? 0 : kind === 'background' ? 1 : 2,
+      occupant: { priority: kind, caller: caller ?? (tag === 'tier_sniffer' ? tag : trace ? 'private_answer' : 'untagged') },
       limit: singleSlot ? 1 : Math.max(1, Math.floor(limit)),
       queuedAt: Date.now(),
       ...(preemption ? { preemption } : {}),
       ...(progress ? { progress } : {}),
       run: async () => {
+        if (trace) markModelCall('queue_admit', trace);
         const leased = () => runWithModelProgress(shared, () => lease(key, () => work(preemption?.signal)));
         try {
-          resolve(await runAtLocalInferencePriority(kind, leased));
+          const result = await withModelCallTrace(trace, () => runWithLocalInferenceCaller(caller, () => runAtLocalInferencePriority(kind, leased)));
+          preemption?.signal.throwIfAborted();
+          resolve(result);
         } catch (error) {
           reject(preemption?.signal.aborted ? preemption.signal.reason : error);
         }
@@ -346,13 +367,14 @@ export function createLocalModelActivity({ singleSlotResources = [] }: { singleS
                 throw error;
               }
             }
+            if (guards.length > 0) markModelCall('guards_done');
             active?.throwIfAborted();
             return await work(active);
           } finally {
             if (tagKey !== undefined) taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1);
           }
         };
-        return options.serialize === false ? lease(key, checked) : dispatch(key, checked, limit);
+        return options.serialize === false ? lease(key, checked) : dispatch(key, checked, limit, options.tag);
       };
       return { ...model,
         // Probes and priming use the same slot as completions, exclusively.

@@ -2,6 +2,7 @@ import { addMemoryPayloadBytes, addMemoryPayloadText } from './memory-counters.t
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchModelEndpoint, type ModelTransportFetch } from './model-transport.ts';
 import { noteSourceAnswerProgress } from './source-answer-jobs.ts';
+import { currentModelCallTrace, markModelCall } from './model-call-trace.ts';
 
 export const MODEL_IDLE_TIMEOUT_MS = 60_000;
 const progress = new AsyncLocalStorage<(model: string) => void>();
@@ -65,6 +66,7 @@ export async function fetchStreamingModel(
   arm();
   progress.getStore()?.(model);
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const trace = currentModelCallTrace();
   let lastNote = -Infinity;
   const token = () => {
     if (Date.now() - lastNote >= 1000) {
@@ -74,6 +76,7 @@ export async function fetchStreamingModel(
   };
   try {
     if (typeof init.body === 'string') addMemoryPayloadText(init.body);
+    if (trace) markModelCall('http_sent', trace);
     const response = await Promise.race([fetchModelEndpoint(fetchImpl, url, { ...init, signal: controller.signal }), stopped]);
     if (!response.body) return response;
     reader = response.body.getReader();
@@ -91,6 +94,10 @@ export async function fetchStreamingModel(
     const event = (block: string) => {
       const data = block.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
       if (!data) return;
+      if (trace) {
+        markModelCall('last_sse', trace);
+        trace.offsets.first_sse ??= trace.offsets.last_sse!;
+      }
       if (data.trim() === '[DONE]') { done = true; return; }
       const parsed = JSON.parse(data);
       if (parsed.error || parsed.type === 'error') throw new Error('Model stream reported an error.');

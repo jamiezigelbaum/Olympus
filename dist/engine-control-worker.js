@@ -320,14 +320,14 @@ function workerSocketServe(options) {
 }
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "async_hooks";
 
 // src/core/memory-counters.ts
 import { AsyncLocalStorage } from "async_hooks";
 var payloadScope = new AsyncLocalStorage;
 
 // src/core/model-stream.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "async_hooks";
 
 // src/core/zkapi-consult-settings.ts
 var ZKAPI_DAEMON_DEFAULT_PORT = 8787;
@@ -575,8 +575,84 @@ var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
 var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
 var progressSink = new AsyncLocalStorage3;
 
+// src/core/model-call-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "async_hooks";
+
+// src/core/log-redaction.ts
+function redactLogLine(line) {
+  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
+function boundedLogErrorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const oneLine = message.replace(/\s+/g, " ").trim();
+  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+function logErrorOrigin(error) {
+  if (!(error instanceof Error))
+    return JSON.stringify(typeof error);
+  const frame = errorFirstFrame(error);
+  return JSON.stringify(redactLogLine(frame ? `${error.name} at ${frame}` : error.name).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+function errorFirstFrame(error) {
+  const line = error.stack?.split(`
+`).map((entry) => entry.trim()).find((entry) => entry.startsWith("at "));
+  if (!line)
+    return;
+  return line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+(?::\d+)?)/g, "$1").slice(0, 160);
+}
+
+// src/core/model-call-trace.ts
+var BACKGROUND_POINTS = [
+  "bg_socket_received",
+  "bg_received",
+  "queue_enter",
+  "queue_admit",
+  "http_sent",
+  "first_sse",
+  "last_sse",
+  "bg_result_posted"
+];
+var POINTS = ["guards_done", "forward_sent", ...BACKGROUND_POINTS, "front_result", "main_end"];
+var CALLERS = ["keyword_translation", "tier_sniffer", "private_answer", "untagged"];
+var PRIORITIES = ["owner", "background", "maintenance"];
+var active = new AsyncLocalStorage4;
+var currentModelCallTrace = () => active.getStore();
+var withModelCallTrace = (trace, run) => active.run(trace, run);
+var modelTraceClock = () => performance.timeOrigin + performance.now();
+function readModelCallTraceStart(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const { id, startedAt } = value;
+  if (typeof id !== "string" || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id) || typeof startedAt !== "number" || !Number.isFinite(startedAt) || startedAt <= 0)
+    return;
+  return { id, startedAt, offsets: {} };
+}
+function markModelCall(point, trace = currentModelCallTrace(), at) {
+  if (trace)
+    trace.offsets[point] = Math.max(0, Math.round((at ?? modelTraceClock()) - trace.startedAt));
+}
+function mergeBackgroundModelTrace(trace, value) {
+  if (!value || typeof value !== "object")
+    return;
+  const background = value;
+  if (background.id !== trace.id)
+    return;
+  for (const point of BACKGROUND_POINTS) {
+    const ms = background.offsets?.[point];
+    if (typeof ms === "number" && Number.isFinite(ms) && ms >= 0)
+      trace.offsets[point] = ms;
+  }
+  const lag = background.bgLoopLagMaxMs;
+  if (typeof lag === "number" && Number.isFinite(lag) && lag >= 0)
+    trace.bgLoopLagMaxMs = lag;
+  if (Array.isArray(background.queuedBehind)) {
+    trace.queuedBehind = background.queuedBehind.flatMap((entry) => PRIORITIES.includes(entry?.priority) && CALLERS.includes(entry?.caller) ? [{ priority: entry.priority, caller: entry.caller }] : []);
+  }
+}
+
 // src/core/model-stream.ts
-var progress = new AsyncLocalStorage4;
+var progress = new AsyncLocalStorage5;
 function withModelProgress(listener, work) {
   const parent = progress.getStore();
   return progress.run((model) => {
@@ -590,14 +666,26 @@ function currentModelProgress() {
 
 // src/workers/answer-activity.ts
 var localInferencePriority;
+var localInferenceCaller = new AsyncLocalStorage6;
+function currentLocalInferenceCaller() {
+  return localInferenceCaller.getStore();
+}
+function runWithLocalInferenceCaller(caller, work) {
+  return localInferenceCaller.run(caller, work);
+}
 function currentLocalInferencePriority() {
   return localInferencePriority?.getStore() ?? "owner";
 }
 function runAtLocalInferencePriority(priority, work) {
-  localInferencePriority ??= new AsyncLocalStorage5;
+  localInferencePriority ??= new AsyncLocalStorage6;
   return localInferencePriority.run(priority, work);
 }
 var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
+class LocalModelPreempted extends DOMException {
+  constructor() {
+    super("The local model yielded to an owner call.", "AbortError");
+  }
+}
 
 // src/core/olympus-layout.ts
 import { homedir as homedir3 } from "os";
@@ -697,6 +785,15 @@ function whatsappStateDirs() {
 }
 
 // src/core/engine-split.ts
+var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE";
+function engineRoleFromEnv(env = process.env) {
+  const value = env[ENGINE_ROLE_ENV]?.trim();
+  if (!value)
+    return "single";
+  if (value === "background" || value === "front")
+    return value;
+  throw new Error(`${ENGINE_ROLE_ENV} must be background or front.`);
+}
 var ENGINE_READY_PATH = "/engine/ready";
 var ENGINE_PRIVACY_READY_QUERY = "privacy_raises_settled";
 var ENGINE_COMMANDS_PATH = "/engine/commands";
@@ -976,29 +1073,175 @@ function constantTimeStringEqual(actual, expected) {
   return timingSafeEqual(actualPadded, expectedPadded) && actualBytes.byteLength === expectedBytes.byteLength;
 }
 
-// src/core/log-redaction.ts
-function redactLogLine(line) {
-  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+// src/workers/control-path-headroom.ts
+import { isMainThread } from "worker_threads";
+var CONTROL_PATH_SLICE_MS = 20;
+var CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
+var CONTROL_PATH_REST_MS = 25;
+var HEARTBEAT_MS = 50;
+var MODEL_LAG_SAMPLES = 24000;
+var CONTROL_PATH_LAG_COUNTED_MS = 250;
+var CONTROL_PATH_FREEZE_LOG_MS = 2000;
+function controlPathFreezeSubject(role, mainThread = true) {
+  if (!mainThread)
+    return "a background thread was blocked";
+  if (role === "front")
+    return "the front process could not answer requests";
+  if (role === "background")
+    return "the background process was blocked";
+  return "the worker could not answer requests";
 }
-var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
-function boundedLogErrorMessage(error) {
-  const message = error instanceof Error ? error.message : String(error);
-  const oneLine = message.replace(/\s+/g, " ").trim();
-  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+function roleFromEnv() {
+  try {
+    return engineRoleFromEnv();
+  } catch {
+    return "single";
+  }
 }
-function logErrorOrigin(error) {
-  if (!(error instanceof Error))
-    return JSON.stringify(typeof error);
-  const frame = errorFirstFrame(error);
-  return JSON.stringify(redactLogLine(frame ? `${error.name} at ${frame}` : error.name).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+
+class ControlPathHeadroom {
+  sliceMs;
+  lagRestThresholdMs;
+  restMs;
+  now;
+  turn;
+  lastTurnAt;
+  pendingTurn;
+  lastLagMs = 0;
+  maxLagMs = 0;
+  overBudget = 0;
+  heartbeat;
+  expectedBeatAt = 0;
+  modelLagHistory;
+  modelLagSamples = 0;
+  turns = 0;
+  rests = 0;
+  freezes = 0;
+  active = new Map;
+  log;
+  freezeLogMs;
+  freezeSubject;
+  roomGate;
+  constructor(options = {}) {
+    this.sliceMs = options.sliceMs ?? CONTROL_PATH_SLICE_MS;
+    this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
+    this.restMs = options.restMs ?? CONTROL_PATH_REST_MS;
+    this.now = options.now ?? (() => performance.now());
+    this.turn = options.turn ?? ((ms) => new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    }));
+    this.log = options.log ?? ((line) => console.error(line));
+    this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
+    this.freezeSubject = controlPathFreezeSubject(options.role ?? roleFromEnv(), isMainThread);
+    this.lastTurnAt = this.now();
+  }
+  enter(label) {
+    this.ensureHeartbeat();
+    this.active.set(label, (this.active.get(label) ?? 0) + 1);
+    let left = false;
+    return () => {
+      if (left)
+        return;
+      left = true;
+      const count = (this.active.get(label) ?? 1) - 1;
+      if (count <= 0)
+        this.active.delete(label);
+      else
+        this.active.set(label, count);
+    };
+  }
+  ingestionTurn() {
+    this.ensureHeartbeat();
+    if (this.pendingTurn)
+      return this.pendingTurn;
+    const room = this.roomGate?.();
+    if (room) {
+      this.turns += 1;
+      const waiting = room.then(() => this.turn(0)).then(() => {
+        this.pendingTurn = undefined;
+        this.lastTurnAt = this.now();
+      });
+      this.pendingTurn = waiting;
+      return waiting;
+    }
+    const now = this.now();
+    if (now - this.lastTurnAt < this.sliceMs)
+      return;
+    const rest = this.lastLagMs >= this.lagRestThresholdMs;
+    if (rest)
+      this.rests += 1;
+    this.turns += 1;
+    const pending = this.turn(rest ? this.restMs : 0).then(() => {
+      this.pendingTurn = undefined;
+      this.lastTurnAt = this.now();
+    });
+    this.pendingTurn = pending;
+    return pending;
+  }
+  setRoomGate(gate) {
+    this.roomGate = gate;
+  }
+  snapshot() {
+    return {
+      turns: this.turns,
+      rests: this.rests,
+      freezes: this.freezes,
+      lagMs: Math.round(this.lastLagMs),
+      maxLagMs: Math.round(this.maxLagMs),
+      overBudget: this.overBudget
+    };
+  }
+  startModelLagSampling() {
+    this.modelLagHistory ??= new Float64Array(2 * MODEL_LAG_SAMPLES);
+    this.ensureHeartbeat();
+  }
+  modelLoopLagSince(startedAt) {
+    this.startModelLagSampling();
+    const since = startedAt - performance.timeOrigin;
+    let max = Math.max(0, this.now() - Math.max(since, this.expectedBeatAt));
+    const history = this.modelLagHistory;
+    const oldest = Math.max(0, this.modelLagSamples - MODEL_LAG_SAMPLES);
+    for (let sample = this.modelLagSamples - 1;sample >= oldest; sample -= 1) {
+      const index = 2 * (sample % MODEL_LAG_SAMPLES);
+      const elapsed = history[index] - since;
+      if (elapsed <= max)
+        break;
+      max = Math.max(max, Math.min(elapsed, history[index + 1]));
+    }
+    return Math.round(max);
+  }
+  stop() {
+    if (this.heartbeat)
+      clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
+  }
+  ensureHeartbeat() {
+    if (this.heartbeat)
+      return;
+    this.expectedBeatAt = this.now() + HEARTBEAT_MS;
+    this.heartbeat = setInterval(() => {
+      const now = this.now();
+      this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
+      this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.modelLagHistory) {
+        const index = 2 * (this.modelLagSamples++ % MODEL_LAG_SAMPLES);
+        this.modelLagHistory[index] = now;
+        this.modelLagHistory[index + 1] = this.lastLagMs;
+      }
+      if (this.lastLagMs > this.maxLagMs)
+        this.maxLagMs = this.lastLagMs;
+      if (this.lastLagMs >= CONTROL_PATH_LAG_COUNTED_MS)
+        this.overBudget += 1;
+      if (this.lastLagMs >= this.freezeLogMs) {
+        this.freezes += 1;
+        const running = [...this.active.keys()].sort().join(",") || "none";
+        this.log(`${new Date().toISOString()} [olympus:control-path] ${this.freezeSubject} for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
+      }
+    }, HEARTBEAT_MS);
+    this.heartbeat.unref?.();
+  }
 }
-function errorFirstFrame(error) {
-  const line = error.stack?.split(`
-`).map((entry) => entry.trim()).find((entry) => entry.startsWith("at "));
-  if (!line)
-    return;
-  return line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+(?::\d+)?)/g, "$1").slice(0, 160);
-}
+var controlPathHeadroom = new ControlPathHeadroom;
 
 // src/workers/engine-split/commands.ts
 var ENGINE_RELOAD_KINDS = ["sources", "scope", "exclusions", "embedding", "models", "archive", "extraction", "pacing"];
@@ -1309,15 +1552,26 @@ function createEngineCommandHandler(options) {
     if (url.pathname === ENGINE_MODEL_COMPLETE_PATH && request.method === "POST") {
       if (!options.ready() || !options.modelComplete)
         return Response.json({ error: "model_unavailable" }, { status: 503 });
+      const received = modelTraceClock();
       const body = await request.json().catch(() => {
         return;
       });
       const parsed = parseModelRequest(body);
-      const priority = parseModelPriority(asRecord2(body)?.priority);
+      const metadata = asRecord2(body);
+      const priority = parseModelPriority(metadata?.priority);
       if (!parsed || !priority)
         return Response.json({ error: "invalid_model_request" }, { status: 400 });
+      const trace = readModelCallTraceStart(metadata?.trace);
+      const caller = metadata?.caller === "keyword_translation" ? metadata.caller : undefined;
+      if (trace) {
+        markModelCall("bg_socket_received", trace, received);
+        if (!options.modelOnControlThread)
+          markModelCall("bg_received", trace);
+      }
       const modelComplete = options.modelComplete;
       const encoder = new TextEncoder;
+      const cancelled = new AbortController;
+      const signal = AbortSignal.any([request.signal, cancelled.signal]);
       let closed = false;
       let lastProgressMs = -Infinity;
       const stream = new ReadableStream({
@@ -1339,11 +1593,23 @@ function createEngineCommandHandler(options) {
             lastProgressMs = now;
             send({ progress: model });
           };
-          withModelProgress(progress, () => runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }))).then((completion) => send({ completion }), (error) => {
+          const result = (value) => {
+            if (trace && !options.modelOnControlThread) {
+              trace.bgLoopLagMaxMs = controlPathHeadroom.modelLoopLagSince(trace.startedAt);
+              markModelCall("bg_result_posted", trace);
+            }
+            send({ ...value, ...trace ? { trace } : {} });
+          };
+          const complete = () => runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal }));
+          withModelProgress(progress, () => withModelCallTrace(trace, () => runWithLocalInferenceCaller(caller, complete))).then((completion) => result({ completion }), (error) => {
+            if (signal.aborted)
+              return;
+            if (error instanceof LocalModelPreempted)
+              return result({ preempted: true });
             if (error instanceof OperationError)
-              return send({ operation_error: error.toJSON() });
+              return result({ operation_error: error.toJSON() });
             console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
-            send({ error: "model_failed", message: error instanceof Error ? error.message : "unknown error" });
+            result({ error: "model_failed", message: error instanceof Error ? error.message : "unknown error" });
           }).finally(() => {
             if (closed)
               return;
@@ -1355,6 +1621,7 @@ function createEngineCommandHandler(options) {
         },
         cancel() {
           closed = true;
+          cancelled.abort();
         }
       });
       return new Response(stream, { status: 200, headers: { "content-type": ENGINE_MODEL_STREAM_CONTENT_TYPE } });
@@ -1583,8 +1850,11 @@ function start(init) {
       }
       signal?.addEventListener("abort", stop, { once: true });
       const progress = currentModelProgress();
+      const trace = currentModelCallTrace();
+      const caller = currentLocalInferenceCaller();
       models.set(id, {
         ...progress ? { progress } : {},
+        ...trace ? { trace } : {},
         resolve: (completion) => {
           signal?.removeEventListener("abort", stop);
           resolve(completion);
@@ -1594,13 +1864,14 @@ function start(init) {
           reject(error);
         }
       });
-      post({ type: "model", id, request: body, priority: currentLocalInferencePriority() });
+      post({ type: "model", id, request: body, priority: currentLocalInferencePriority(), ...caller ? { caller } : {}, ...trace ? { trace } : {} });
     });
   };
   const handler = createEngineCommandHandler({
     authToken: init.authToken,
     ledger: mirror,
     ready: () => ready,
+    modelOnControlThread: true,
     ...init.model ? { modelComplete } : {}
   });
   let state;
@@ -1716,8 +1987,12 @@ function start(init) {
         if (!waiting)
           return;
         models.delete(data.id);
+        if (waiting.trace)
+          mergeBackgroundModelTrace(waiting.trace, data.trace);
         if (data.completion)
           waiting.resolve(data.completion);
+        else if (data.preempted)
+          waiting.reject(new LocalModelPreempted);
         else if (data.operationError)
           waiting.reject(new OperationError(data.operationError.error, data.operationError.message, data.operationError.suggestion));
         else

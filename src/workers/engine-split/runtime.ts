@@ -20,8 +20,10 @@ import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSy
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
 import { clickTraces, PRIVACY_ITEM_SET_PATH, type ClickTrace } from './click-trace.ts';
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
-import { currentLocalInferencePriority } from '../answer-activity.ts';
+import { LocalModelPreempted, currentLocalInferenceCaller, currentLocalInferencePriority } from '../answer-activity.ts';
 import { noteModelProgress } from '../../core/model-stream.ts';
+import { currentModelCallTrace, markModelCall, mergeBackgroundModelTrace, type ModelCallTrace } from '../../core/model-call-trace.ts';
+import { controlPathHeadroom } from '../control-path-headroom.ts';
 import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, ENGINE_MODEL_STREAM_CONTENT_TYPE, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineCommandReceipt, type EngineForwardedKind, type EngineForwardedRequest, type EngineForwardedResponse } from './commands.ts';
 import { engineStatusAge, readEngineStatusSnapshotAsync, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
 import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
@@ -79,6 +81,7 @@ export function startEngineBackgroundServer(input: {
   const ledger = new EngineCommandLedger({ instanceId, handlers: input.handlers });
   let loopServer: { stop(closeActiveConnections?: boolean): unknown } | undefined;
   const serveFromLoop = (): void => {
+    if (input.modelComplete) controlPathHeadroom.startModelLagSampling();
     const handler = createEngineCommandHandler({ authToken: input.authToken, ledger, ready: () => ready, ...(input.modelComplete ? { modelComplete: input.modelComplete } : {}) });
     loopServer = bindWorkerSocket(input.socketPath, () => Bun.serve(workerSocketServe({
       unix: input.socketPath,
@@ -656,27 +659,36 @@ export async function completeModelInBackground(
   onServingPid?: (pid: number) => void,
 ): Promise<AnalystModelCompletion> {
   const { signal, ...body } = request;
+  const trace = currentModelCallTrace();
+  const caller = currentLocalInferenceCaller();
+  const payloadBody = JSON.stringify({ ...body, priority: currentLocalInferencePriority(), caller,
+    ...(trace ? { trace: { id: trace.id, startedAt: trace.startedAt } } : {}),
+  });
   let response: Response;
   try {
+    if (trace) markModelCall('forward_sent', trace);
     response = await fetchBackground(`${ENGINE_BACKGROUND_ORIGIN}${ENGINE_MODEL_COMPLETE_PATH}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${authToken}` },
-      body: JSON.stringify({ ...body, priority: currentLocalInferencePriority() }),
+      body: payloadBody,
       ...(signal ? { signal } : {}),
     });
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new OperationError('argus_unreachable', 'The built-in private model is not answering: the background engine is not reachable.', 'Try again in a moment.');
   }
-  const payload = response.ok && response.headers.get('content-type')?.startsWith(ENGINE_MODEL_STREAM_CONTENT_TYPE)
-    ? await readModelStream(response).catch((error: unknown) => { if (signal?.aborted) throw error; return undefined; })
+  const streamed = response.ok && response.headers.get('content-type')?.startsWith(ENGINE_MODEL_STREAM_CONTENT_TYPE);
+  const payload = streamed
+    ? await readModelStream(response, trace).catch((error: unknown) => { if (signal?.aborted) throw error; return undefined; })
     : await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+  if (trace && !streamed) markModelCall('front_result', trace);
   if (response.ok && payload && typeof payload.text === 'string' && typeof payload.modelId === 'string') {
     const { built_in_serving_pid: pid, ...completion } = payload;
     if (typeof pid === 'number') onServingPid?.(pid);
     return completion as unknown as AnalystModelCompletion;
   }
   const typed = payload?.operation_error as { error?: unknown; message?: unknown; suggestion?: unknown } | undefined;
+  if (payload?.preempted === true) throw new LocalModelPreempted();
   if (typed && typeof typed.error === 'string' && typeof typed.message === 'string') {
     throw new OperationError(typed.error as OperationErrorCode, typed.message, typeof typed.suggestion === 'string' ? typed.suggestion : undefined);
   }
@@ -688,7 +700,7 @@ export async function completeModelInBackground(
  * process's idle clocks the model is still producing output; the last line is
  * the completion or the model's refusal, returned in the one-process shape.
  */
-async function readModelStream(response: Response): Promise<Record<string, unknown> | undefined> {
+async function readModelStream(response: Response, trace: ModelCallTrace | undefined): Promise<Record<string, unknown> | undefined> {
   if (!response.body) return undefined;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -698,8 +710,14 @@ async function readModelStream(response: Response): Promise<Record<string, unkno
     if (!text.trim()) return;
     const value = JSON.parse(text) as Record<string, unknown> | undefined;
     if (typeof value?.progress === 'string') noteModelProgress(value.progress);
-    else if (value && typeof value.completion === 'object' && value.completion !== null) result = value.completion as Record<string, unknown>;
-    else if (value && ('operation_error' in value || 'error' in value)) result = value;
+    else if (value) {
+      if (typeof value.completion === 'object' && value.completion !== null) result = value.completion as Record<string, unknown>;
+      else if ('operation_error' in value || 'error' in value || value.preempted === true) result = value;
+      if (result && trace) {
+        mergeBackgroundModelTrace(trace, value.trace);
+        markModelCall('front_result', trace);
+      }
+    }
   };
   for (;;) {
     const next = await reader.read();

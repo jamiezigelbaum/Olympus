@@ -1,4 +1,5 @@
 import { fetchStreamingModel } from './model-stream.ts';
+import { logModelCallTrace, markModelCall, startModelCallTrace, withModelCallTrace } from './model-call-trace.ts';
 import { registerLocalAnalystFallback } from '../workers/source-index/local-analyst-window.ts';
 // The built-in private analyst (`built_in`): a small local LLM that ships
 // inside Olympus with zero setup. It answers Private-tier questions from
@@ -573,7 +574,7 @@ export async function answerPrivately(
   // Whether the model called its own answer complete ("sufficient"): the
   // AnalystResult does not carry it, and the panel shows no gaps then.
   const verdict: { sufficient: boolean | undefined } = { sufficient: undefined };
-  const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
+  const analyst = createAnalyst(withVerdict(timedModel(model, options.onModelCall), verdict), {
     auditSuspiciousDrafts: options.audit ?? true,
     boundedResponseSchema: true,
     ...(options.evidenceFormat ? { evidenceFormat: options.evidenceFormat } : {}),
@@ -715,28 +716,27 @@ const GAP_GENERIC_WORDS = new Set([
 ]);
 
 /** The model, reporting each call's stage (the first is the answer, any later one the audit) and cost. */
-function timedModel(model: AnalystModel, report: (call: PrivateModelCallTiming) => void): AnalystModel {
+function timedModel(model: AnalystModel, report?: (call: PrivateModelCallTiming) => void): AnalystModel {
   let calls = 0;
   return {
     async complete(request) {
       const stage = calls === 0 ? 'main' : 'audit';
       calls += 1;
-      const started = performance.now();
-      const promptBytes = utf8.encode(request.system).length + utf8.encode(request.prompt).length;
-      const done = (ok: boolean, usage?: AnalystModelUsage) => {
+      const trace = startModelCallTrace();
+      const promptBytes = report ? utf8.encode(request.system).length + utf8.encode(request.prompt).length : 0;
+      let completion: AnalystModelCompletion | undefined;
+      try {
+        completion = await withModelCallTrace(trace, () => model.complete(request));
+        return completion;
+      } finally {
+        markModelCall('main_end', trace);
+        const ok = completion !== undefined;
+        logModelCallTrace(trace, stage, ok);
         try {
-          report({ stage, ms: Math.round(performance.now() - started), promptBytes, ok, ...(usage ?? {}) });
+          report?.({ stage, ms: trace.offsets.main_end!, promptBytes, ok, ...completion?.usage });
         } catch {
           // A reporting hook never fails the answer.
         }
-      };
-      try {
-        const completion = await model.complete(request);
-        done(true, completion.usage);
-        return completion;
-      } catch (error) {
-        done(false);
-        throw error;
       }
     },
   };

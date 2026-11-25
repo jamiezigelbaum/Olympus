@@ -5,6 +5,7 @@ import { sourceIndexChunkQueryTerms } from '../src/core/source-index/chunk-selec
 import { withKeywordAlternatives, withKeywordRequestScope } from '../src/core/source-index/keyword-context.ts';
 import { expandSourceIndexKeywords, parseKeywordExpansion, withExpandedSourceIndexKeywords, type KeywordPreparation } from '../src/core/source-index/keyword-expansion.ts';
 import { registerBuiltInPrivateModel } from '../src/workers/classification/built-in-sniffer.ts';
+import { createLocalModelActivity, currentLocalInferencePriority } from '../src/workers/answer-activity.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { Database } from 'bun:sqlite';
 import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith, type KeywordLanguageRead } from '../src/core/source-index/keyword-languages.ts';
@@ -12,6 +13,76 @@ import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith,
 afterEach(() => registerBuiltInPrivateModel(undefined));
 
 const reply = (alternatives: string[]) => JSON.stringify({spa: {'0': alternatives}});
+
+test('a running opportunistic translation yields the shared slot to an owner answer and is retried', async () => {
+  const started = Promise.withResolvers<AbortSignal | undefined>();
+  const drain = Promise.withResolvers<void>();
+  const activity = createLocalModelActivity({ singleSlotResources: ['built_in'] });
+  let translations = 0;
+  const model = activity.track('built_in', {
+    async complete(request: AnalystModelRequest) {
+      if (request.prompt === 'owner') return { text: 'answer', modelId: 'fixture' };
+      if (++translations === 1) {
+        started.resolve(request.signal);
+        await drain.promise;
+        request.signal?.throwIfAborted();
+      }
+      return { text: reply(['asteroide']), modelId: 'fixture' };
+    },
+  });
+  let ready = false;
+  registerBuiltInPrivateModel({ model, available: () => true, serverReady: () => ready });
+  const status = { incomplete: false };
+  const prepared = await withKeywordRequestScope(() => expandSourceIndexKeywords('asteroid', ['spa'], {}, { waitMs: 4_000, status }));
+  expect(prepared.has('asteroid')).toBe(false);
+  expect(status.incomplete).toBe(true);
+  const signal = await started.promise;
+  const owner = model.complete({ prompt: 'owner', system: 's', localOnly: true });
+  try {
+    expect(signal?.aborted).toBe(true);
+  } finally {
+    drain.resolve();
+    await owner;
+  }
+  await new Promise<void>(resolve => setImmediate(resolve));
+  ready = true;
+  const retried = await withKeywordRequestScope(() => expandSourceIndexKeywords('asteroid', ['spa'], {}, { waitMs: 4_000 }));
+  expect(retried.get('asteroid')).toContain('asteroide');
+  expect(translations).toBe(2);
+});
+
+test('a fully awaited translation keeps owner priority and is cancelled when its search returns early', async () => {
+  const started = Promise.withResolvers<{ signal?: AbortSignal; priority: string }>();
+  const drain = Promise.withResolvers<void>();
+  let calls = 0;
+  const model = {
+    async complete(request: AnalystModelRequest) {
+      if (++calls === 1) {
+        started.resolve({ ...request, priority: currentLocalInferencePriority() });
+        await drain.promise;
+        request.signal?.throwIfAborted();
+      }
+      return { text: reply(['asteroide']), modelId: 'fixture' };
+    },
+  };
+  registerBuiltInPrivateModel({ model, available: () => true });
+  let lane: Promise<unknown> | undefined;
+  const running = await withKeywordRequestScope(() => {
+    // The lane awaits translation, but the router returns without the lane.
+    lane = expandSourceIndexKeywords('asteroid', ['spa'], {});
+    return started.promise;
+  });
+  try {
+    expect(running.priority).toBe('owner');
+    expect(running.signal?.aborted).toBe(true);
+  } finally {
+    drain.resolve();
+    await lane;
+  }
+  const retried = await withKeywordRequestScope(() => expandSourceIndexKeywords('asteroid', ['spa'], {}));
+  expect(retried.get('asteroid')).toContain('asteroide');
+  expect(calls).toBe(2);
+});
 
 test('translations preserve the concept count and are shared by passage selection', () => {
   const query = 'Letter of Intent notary';
