@@ -46084,6 +46084,10 @@ class TierLedger {
   isUnseenDeletion(identity) {
     return this.db.query("SELECT 1 FROM tier_unseen_deletions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?").get(...idParams(identity)) !== null;
   }
+  writeIntentRecordedBefore(identity, cutoffIso) {
+    return this.db.query(`SELECT 1 FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND written_at < ?`).get(...idParams(identity), cutoffIso) !== null;
+  }
   writeIntents() {
     return this.db.query("SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id").all().map(writeIntentFromRow);
   }
@@ -109133,13 +109137,38 @@ class TieredStoreSet {
       return row?.tombstoned === true && row.version === intent.version;
     });
   }
+  intentLanded(intent) {
+    const copies = this.ledger.copies(intent.identity).filter((copy) => copy.state === "current");
+    if (copies.length === 0)
+      return false;
+    const abandoned = this.ledger.writeIntentRecordedBefore(intent.identity, new Date(Date.now() - ABANDONED_WRITE_INTENT_MS).toISOString());
+    if (!abandoned)
+      return false;
+    const identity = { ...intent.identity, ...intent.version !== undefined ? { sourceVersion: intent.version } : {} };
+    return copies.every((copy) => {
+      const domain = this.domainForCorpus(copy.corpusId);
+      const row = domain ? this.store(domain)?.storedItemState(identity) : undefined;
+      return row !== undefined && !row.tombstoned && (intent.kind !== "content" || copy.layers === "metadata" || row.chunkCount > 0);
+    });
+  }
   finishPendingIntents() {
     let removed = false;
     for (const intent of this.ledger.writeIntents()) {
       const identity = { ...intent.identity, ...intent.version !== undefined ? { sourceVersion: intent.version } : {} };
       if (intent.kind === "content" || intent.kind === "names") {
-        if (this.intentSuperseded(intent))
+        if (this.intentSuperseded(intent)) {
           this.ledger.clearWriteIntent(intent.identity);
+          continue;
+        }
+        if (this.intentLanded(intent)) {
+          if (intent.version !== undefined) {
+            for (const domain of TIER_DOMAIN_ORDER)
+              this.store(domain)?.advanceItemVersion(identity);
+            for (const domain of TIER_DOMAIN_ORDER)
+              this.store(domain)?.durabilityBarrier();
+          }
+          this.ledger.clearWriteIntent(intent.identity);
+        }
         continue;
       }
       if (intent.kind === "advance") {
@@ -110130,7 +110159,7 @@ async function parentsNoStoreHolds(stores, parents) {
   }
   return parents.filter((parent) => !held.has(parentKey(parent)));
 }
-var LOWER_CONTENT_REPAIR_INTERVAL_MS, SUPERSEDED_SWEEP_SLICE_MS = 100, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local";
+var ABANDONED_WRITE_INTENT_MS, LOWER_CONTENT_REPAIR_INTERVAL_MS, SUPERSEDED_SWEEP_SLICE_MS = 100, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local";
 var init_tiered_store_set = __esm(() => {
   init_tier_label_observations();
   init_source_connector_labels();
@@ -110158,6 +110187,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
   init_tier_secrets_floor_sweep();
+  ABANDONED_WRITE_INTENT_MS = 7 * 24 * 60 * 60000;
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
   TIER_DOMAIN_ORDER = ["public_safe", "internal", "secure_local"];
   TIER_KEY_TRUST_DOMAIN = {

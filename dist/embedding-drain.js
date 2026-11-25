@@ -21227,6 +21227,10 @@ class TierLedger {
   isUnseenDeletion(identity) {
     return this.db.query("SELECT 1 FROM tier_unseen_deletions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?").get(...idParams(identity)) !== null;
   }
+  writeIntentRecordedBefore(identity, cutoffIso) {
+    return this.db.query(`SELECT 1 FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND written_at < ?`).get(...idParams(identity), cutoffIso) !== null;
+  }
   writeIntents() {
     return this.db.query("SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id").all().map(writeIntentFromRow);
   }
@@ -40138,6 +40142,7 @@ var clearedChecks = new WeakMap;
 var running = new WeakMap;
 
 // src/workers/connector-store/tiered-store-set.ts
+var ABANDONED_WRITE_INTENT_MS = 7 * 24 * 60 * 60000;
 var LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 
 // src/workers/google-connectors/gmail-live-sync.ts

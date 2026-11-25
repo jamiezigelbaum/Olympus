@@ -134,6 +134,9 @@ import { sweepAutomaticSupersededCopiesInTurns } from './tier-auto-prune-sweep.t
 import { flushTierMoveNotes, moveTieredItem, type TierMoveOptions } from './tier-move.ts';
 import { automaticTierMoveOptions, automaticTierMovesAllowed } from './tier-auto-move.ts';
 
+/** A `content` or `names` write still open after this long is not coming back from its source. */
+const ABANDONED_WRITE_INTENT_MS = 7 * 24 * 60 * 60_000;
+
 export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
 /** Time the one-time superseded-copy sweep may take on each maintenance call. */
 export const SUPERSEDED_SWEEP_SLICE_MS = 100;
@@ -1162,13 +1165,48 @@ export class TieredStoreSet {
     });
   }
 
+  /**
+   * A `content` or `names` write open past the replay window while every current copy's store holds the item (a
+   * `content` write also needs the body in each copy that serves content): its record is not coming back.
+   */
+  private intentLanded(intent: TierWriteIntent): boolean {
+    const copies = this.ledger.copies(intent.identity).filter((copy) => copy.state === 'current');
+    if (copies.length === 0) return false;
+    // Past the replay window the source is not sending this record again (an unchanged email from a replaced
+    // connection): what every leg holds is the item, and a later move still checks the text it was judged on.
+    const abandoned = this.ledger.writeIntentRecordedBefore(intent.identity,
+      new Date(Date.now() - ABANDONED_WRITE_INTENT_MS).toISOString());
+    // Inside the window the record's own replay finishes the write: a leg cut off before its copy row exists is
+    // invisible here, so nothing short of the window clears it.
+    if (!abandoned) return false;
+    const identity = { ...intent.identity, ...(intent.version !== undefined ? { sourceVersion: intent.version } : {}) } as SourceItemIdentity;
+    return copies.every((copy) => {
+      const domain = this.domainForCorpus(copy.corpusId);
+      const row = domain ? this.store(domain)?.storedItemState(identity) : undefined;
+      return row !== undefined && !row.tombstoned
+        && (intent.kind !== 'content' || copy.layers === 'metadata' || row.chunkCount > 0);
+    });
+  }
+
   finishPendingIntents(): boolean {
     let removed = false;
     for (const intent of this.ledger.writeIntents()) {
       const identity = { ...intent.identity, ...(intent.version !== undefined ? { sourceVersion: intent.version } : {}) } as SourceItemIdentity;
       if (intent.kind === 'content' || intent.kind === 'names') {
-        // Owed until its own record is read again, or until the stored state supersedes it.
-        if (this.intentSuperseded(intent)) this.ledger.clearWriteIntent(intent.identity);
+        // Owed until its own record is read again, or until the stored state supersedes it. Past the replay window a
+        // source that never sends the record again (an unchanged email from a replaced connection) would otherwise
+        // keep the item out of every lowering for good (Sparta, 25 Nov).
+        if (this.intentSuperseded(intent)) { this.ledger.clearWriteIntent(intent.identity); continue; }
+        if (this.intentLanded(intent)) {
+          // The version the write accepted stays the item's boundary, as an `advance` keeps it: an older record
+          // can never overwrite the item because its owed body was given up.
+          if (intent.version !== undefined) {
+            for (const domain of TIER_DOMAIN_ORDER) this.store(domain)?.advanceItemVersion(identity);
+            // The stores (NORMAL) hold the moved version durably before the ledger (FULL) forgets the intent.
+            for (const domain of TIER_DOMAIN_ORDER) this.store(domain)?.durabilityBarrier();
+          }
+          this.ledger.clearWriteIntent(intent.identity);
+        }
         continue;
       }
       if (intent.kind === 'advance') {

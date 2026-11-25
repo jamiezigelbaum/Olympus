@@ -4689,6 +4689,13 @@ export class TierLedger {
       .get(...idParams(identity)) !== null;
   }
 
+  /** Whether an item's open write was recorded before `cutoffIso` (an ISO time). */
+  writeIntentRecordedBefore(identity: TierLedgerIdentity, cutoffIso: string): boolean {
+    return this.db.query(`SELECT 1 FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND written_at < ?`)
+      .get(...idParams(identity), cutoffIso) !== null;
+  }
+
   /** Every write not yet cleared, oldest first. */
   writeIntents(): TierWriteIntent[] {
     return (this.db.query('SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id').all() as TierWriteIntentRow[]).map(writeIntentFromRow);
