@@ -1166,8 +1166,8 @@ export class TieredStoreSet {
   }
 
   /**
-   * A `content` or `names` write whose version every current copy's store already holds. A `content` write also
-   * needs the body (chunks) in each copy that serves content, and a body owed from an older record (`bodyVersion`) is never taken as landed.
+   * A `content` or `names` write open past the replay window while every current copy's store holds the item (a
+   * `content` write also needs the body in each copy that serves content): its record is not coming back.
    */
   private intentLanded(intent: TierWriteIntent): boolean {
     const copies = this.ledger.copies(intent.identity).filter((copy) => copy.state === 'current');
@@ -1176,12 +1176,14 @@ export class TieredStoreSet {
     // connection): what every leg holds is the item, and a later move still checks the text it was judged on.
     const abandoned = this.ledger.writeIntentRecordedBefore(intent.identity,
       new Date(Date.now() - ABANDONED_WRITE_INTENT_MS).toISOString());
-    if (!abandoned && (intent.version === undefined || intent.bodyVersion !== undefined)) return false;
+    // Inside the window the record's own replay finishes the write: a leg cut off before its copy row exists is
+    // invisible here, so nothing short of the window clears it.
+    if (!abandoned) return false;
     const identity = { ...intent.identity, ...(intent.version !== undefined ? { sourceVersion: intent.version } : {}) } as SourceItemIdentity;
     return copies.every((copy) => {
       const domain = this.domainForCorpus(copy.corpusId);
       const row = domain ? this.store(domain)?.storedItemState(identity) : undefined;
-      return row !== undefined && !row.tombstoned && (abandoned || row.version === intent.version)
+      return row !== undefined && !row.tombstoned
         && (intent.kind !== 'content' || copy.layers === 'metadata' || row.chunkCount > 0);
     });
   }
@@ -1191,14 +1193,18 @@ export class TieredStoreSet {
     for (const intent of this.ledger.writeIntents()) {
       const identity = { ...intent.identity, ...(intent.version !== undefined ? { sourceVersion: intent.version } : {}) } as SourceItemIdentity;
       if (intent.kind === 'content' || intent.kind === 'names') {
-        // Owed until its own record is read again, or until the stored state supersedes it. A write every serving
-        // leg already holds was cut off only before its intent was cleared: a source that never sends the record
-        // again (an unchanged email) would otherwise keep the item out of every lowering for good (Sparta, 25 Nov).
+        // Owed until its own record is read again, or until the stored state supersedes it. Past the replay window a
+        // source that never sends the record again (an unchanged email from a replaced connection) would otherwise
+        // keep the item out of every lowering for good (Sparta, 25 Nov).
         if (this.intentSuperseded(intent)) { this.ledger.clearWriteIntent(intent.identity); continue; }
         if (this.intentLanded(intent)) {
           // The version the write accepted stays the item's boundary, as an `advance` keeps it: an older record
           // can never overwrite the item because its owed body was given up.
-          if (intent.version !== undefined) for (const domain of TIER_DOMAIN_ORDER) this.store(domain)?.advanceItemVersion(identity);
+          if (intent.version !== undefined) {
+            for (const domain of TIER_DOMAIN_ORDER) this.store(domain)?.advanceItemVersion(identity);
+            // The stores (NORMAL) hold the moved version durably before the ledger (FULL) forgets the intent.
+            for (const domain of TIER_DOMAIN_ORDER) this.store(domain)?.durabilityBarrier();
+          }
           this.ledger.clearWriteIntent(intent.identity);
         }
         continue;

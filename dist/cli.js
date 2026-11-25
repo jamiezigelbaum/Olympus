@@ -109142,13 +109142,13 @@ class TieredStoreSet {
     if (copies.length === 0)
       return false;
     const abandoned = this.ledger.writeIntentRecordedBefore(intent.identity, new Date(Date.now() - ABANDONED_WRITE_INTENT_MS).toISOString());
-    if (!abandoned && (intent.version === undefined || intent.bodyVersion !== undefined))
+    if (!abandoned)
       return false;
     const identity = { ...intent.identity, ...intent.version !== undefined ? { sourceVersion: intent.version } : {} };
     return copies.every((copy) => {
       const domain = this.domainForCorpus(copy.corpusId);
       const row = domain ? this.store(domain)?.storedItemState(identity) : undefined;
-      return row !== undefined && !row.tombstoned && (abandoned || row.version === intent.version) && (intent.kind !== "content" || copy.layers === "metadata" || row.chunkCount > 0);
+      return row !== undefined && !row.tombstoned && (intent.kind !== "content" || copy.layers === "metadata" || row.chunkCount > 0);
     });
   }
   finishPendingIntents() {
@@ -109161,9 +109161,12 @@ class TieredStoreSet {
           continue;
         }
         if (this.intentLanded(intent)) {
-          if (intent.version !== undefined)
+          if (intent.version !== undefined) {
             for (const domain of TIER_DOMAIN_ORDER)
               this.store(domain)?.advanceItemVersion(identity);
+            for (const domain of TIER_DOMAIN_ORDER)
+              this.store(domain)?.durabilityBarrier();
+          }
           this.ledger.clearWriteIntent(intent.identity);
         }
         continue;
