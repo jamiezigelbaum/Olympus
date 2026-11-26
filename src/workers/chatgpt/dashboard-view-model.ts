@@ -411,7 +411,7 @@ export function buildChatGptDashboardViewModel(
     });
   }
 
-  const unavailable = options.privacy?.labelsUnavailable ?? 0;
+  const unavailable = (options.privacy?.ruleCount ?? 0) > 0 ? (options.privacy?.labelsUnavailable ?? 0) : 0;
   if (unavailable > 0) {
     needsYou.push({
       id: 'privacy:labels_unavailable',

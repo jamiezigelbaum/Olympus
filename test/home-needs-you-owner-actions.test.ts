@@ -73,9 +73,10 @@ describe('Needs you is only what the owner can do', () => {
   });
 
   test('missing label evidence has a counted owner action until the items are listed again', () => {
-    const notice = (labelsUnavailable: number) => home([], { privacy: { ...privacy, labelsUnavailable } })
+    const notice = (labelsUnavailable: number, ruleCount = privacy.ruleCount) => home([], { privacy: { ...privacy, ruleCount, labelsUnavailable } })
       .needsYou.find(item => item.id === 'privacy:labels_unavailable');
     expect(notice(0)).toBeUndefined();
+    expect(notice(12, 0)).toBeUndefined();
     expect(notice(1)?.sentence).toBe("1 item can't be checked against your label rules. It would need to be listed again.");
     expect(notice(12)?.sentence).toBe("12 items can't be checked against your label rules. They would need to be listed again.");
     expect(ownerAction(notice(12)?.fix)).toBe(true);

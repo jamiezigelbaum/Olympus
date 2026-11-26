@@ -260215,7 +260215,7 @@ function buildChatGptDashboardViewModel(view, options = {}) {
       fix: { label: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} }
     });
   }
-  const unavailable = options.privacy?.labelsUnavailable ?? 0;
+  const unavailable = (options.privacy?.ruleCount ?? 0) > 0 ? options.privacy?.labelsUnavailable ?? 0 : 0;
   if (unavailable > 0) {
     needsYou.push({
       id: "privacy:labels_unavailable",
@@ -286268,7 +286268,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         configured: settings.configured,
         pendingCount: settings.pendingCount,
         ruleCount: settings.rules.length,
-        labelsUnavailable: backlog?.labelsUnavailable ?? 0,
+        labelsUnavailable: settings.rules.some((rule) => rule.kind === "label") ? backlog?.labelsUnavailable ?? 0 : 0,
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
         ...missing ? { judgeMissing: missing } : {},
         ...backlog?.waiting && DASHBOARD_JUDGE_STOP_REASONS.has(backlog.waiting.reason) ? { judgeStopped: backlog.waiting.reason } : {},
