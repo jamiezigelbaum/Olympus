@@ -175,7 +175,7 @@ describe('dashboard view-model producer', () => {
       ],
     });
     expect(vm.sources[0]!.status).toBe('Working');
-    expect(vm.sources[0]!.progress).toEqual({ stage: 'listing', unit: 'files', done: 200, total: 0, stalled: false });
+    expect(vm.sources[0]!.progress).toEqual({ stage: 'listing', phase: 'initial', unit: 'files', done: 200, total: 0, stalled: false });
   });
 
   test('per-source progress names the first unfinished stage; reading counts the in-scope population only', () => {
@@ -191,7 +191,7 @@ describe('dashboard view-model producer', () => {
     })]), { now: NOW });
     const dropbox = vm.sources[0]!;
     // Names-only items are done once listed: the reading total is 200, not 300.
-    expect(dropbox.progress).toEqual({ stage: 'reading', unit: 'files', done: 150, total: 200, percent: 75, stalled: false });
+    expect(dropbox.progress).toEqual({ stage: 'reading', phase: 'refresh', unit: 'files', done: 150, total: 200, percent: 75, stalled: false });
     // Honesty rule: never Fresh, never "synced …", while a stage is unfinished.
     expect(dropbox.status).toBe('Working');
     expect(dropbox.detail).toBe('Reading');

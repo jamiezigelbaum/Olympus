@@ -19,7 +19,7 @@ describe('progress while the first walk is counting', () => {
   test('publishes how many were found and no percentage', () => {
     const { row } = rowFor('local-files-finding');
     expect(row.status).toBe('Working');
-    expect(row.progress).toEqual({ stage: 'listing', unit: 'files', done: 12_400, total: 0, stalled: false });
+    expect(row.progress).toEqual({ stage: 'listing', phase: 'initial', unit: 'files', done: 12_400, total: 0, stalled: false });
     expect('percent' in row.progress!).toBe(false);
     // The copy the panel receives keeps it that way.
     const copied = copyDashboardViewModel(rowFor('local-files-finding').model);
