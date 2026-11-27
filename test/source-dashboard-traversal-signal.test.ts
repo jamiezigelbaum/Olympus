@@ -17,7 +17,8 @@ import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard
 import { buildSourceDashboardViewModel, type DashboardSourceCard, type SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import type { ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
-import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
+import { createGoogleDriveConnectorStoreSchedulerSource, type SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
+import { defaultConfig } from '../src/core/config.ts';
 
 const NOW = new Date('2026-07-28T12:00:00.000Z');
 
@@ -280,5 +281,101 @@ describe('sources that do report the walk keep their verdict', () => {
 
   test('a completed provider walk is not undone by a sibling task that has never reported', () => {
     expect(build({ corpus: gmail(), sourceId: 'gmail.email', handles: GMAIL_HANDLES, tasks: [counted('gmail.pull', 1), { id: 'gmail.reconcile' }] }).card.last_run?.traversal_complete).toBe(true);
+  });
+
+  test('Google Drive declares pull as primary and reconcile as maintenance so a capped reconcile cannot reopen Finding items', () => {
+    const driveSource = createGoogleDriveConnectorStoreSchedulerSource({
+      config: defaultConfig(),
+      liveSync: {
+        pull: async () => ({ receipt: { status: 'idle', counts: { traversal_complete: 1 } } }),
+        reconcile: async () => ({ receipt: { status: 'progress', counts: { traversal_complete: 0 } } }),
+      } as never,
+    });
+    expect(driveSource?.tasks.find((task) => task.id === 'google_drive.docs_store_pull')?.metadataWalkRole).toBe('primary');
+    expect(driveSource?.tasks.find((task) => task.id === 'google_drive.docs_store_reconcile')?.metadataWalkRole).toBe('maintenance');
+
+    const driveHandles: ConnectedHandleRegistry = {
+      version: 1,
+      handles: [{
+        handle: 'drive.personal', provider: 'google_drive', accountRole: 'personal', trustDomain: 'internal',
+        allowedCapabilities: ['google_drive.docs.sync'], scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+        connectedAt: '2026-07-01T00:00:00.000Z',
+      }],
+    };
+    const drive = corpus({ id: 'internal.drive.docs', family: 'file', provider: 'google_drive', items: 302 });
+    const { card } = build({
+      corpus: drive,
+      sourceId: 'google_drive.docs',
+      handles: driveHandles,
+      tasks: [
+        { ...counted('google_drive.docs_store_pull:scope:test', 1), role: 'primary', at: '2026-07-28T10:30:00.000Z' },
+        { ...counted('google_drive.docs_store_reconcile:scope:test', 0), role: 'maintenance', at: '2026-07-28T11:30:00.000Z' },
+      ],
+    });
+    expect(card.last_run?.traversal_complete).toBe(true);
+    expect(dashboardSourceProgress(card, { now: NOW }).phases[0]!.state).toBe('done');
+  });
+
+  test('extraction_caught_up is set only when every extract task finished idle with no open checkpoint, failure, or queued work', () => {
+    const driveHandles: ConnectedHandleRegistry = {
+      version: 1,
+      handles: [{
+        handle: 'drive.personal', provider: 'google_drive', accountRole: 'personal', trustDomain: 'internal',
+        allowedCapabilities: ['google_drive.docs.sync'], scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+        connectedAt: '2026-07-01T00:00:00.000Z',
+      }],
+    };
+    const driveWith = (extractTask: Record<string, unknown>, queued = 0) => {
+      const c = corpus({ id: 'internal.drive.docs', family: 'file', provider: 'google_drive', items: 302 });
+      c.counts = { ...c.counts, items_with_text: 58, items_embedded: 58, extraction_jobs_queued: queued, extraction_jobs_queued_actionable: queued };
+      const status: SourceIndexStatusResult = {
+        kind: 'source_index_status',
+        generated_at: NOW.toISOString(),
+        corpora: [c],
+        policy: { read_only: true, raw_source_exposed: false, source_packets_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true },
+      };
+      const scheduler: SourceSchedulerStatus = {
+        kind: 'source_scheduler_status',
+        enabled: true,
+        running: true,
+        generated_at: NOW.toISOString(),
+        sources: [{
+          source_id: 'google_drive.docs',
+          corpus_id: 'internal.drive.docs',
+          sync_cadence: 'continuous',
+          sync_interval_seconds: 300,
+          freshness_threshold_hours: 26,
+          freshness_hours: 1,
+          stale_sync_anomaly: false,
+          tasks: [
+            { id: 'google_drive.docs_store_pull', kind: 'sync', metadata_walk_role: 'primary', running: false, consecutive_failures: 0, last_success_at: '2026-07-28T11:05:00.000Z', last_attempt_at: '2026-07-28T11:05:00.000Z', last_result: { status: 'idle', counts: { traversal_complete: 1 } } },
+            { id: 'google_drive.docs_extract', kind: 'extract', running: false, consecutive_failures: 0, last_success_at: '2026-07-28T11:05:00.000Z', last_attempt_at: '2026-07-28T11:05:00.000Z', ...extractTask },
+          ],
+        }],
+        policy: { raw_source_exposed: false, source_text_returned: false, source_scope_keys_exposed: false, counts_only: true },
+      } as unknown as SourceSchedulerStatus;
+      const view = buildSourceDashboardViewModel({
+        sourceIndexStatus: status,
+        schedulerStatus: scheduler,
+        sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+        connectedHandleRegistry: driveHandles,
+        now: NOW,
+      });
+      return view.sources.find((s) => s.source_id === 'google_drive.docs')!;
+    };
+
+    const idle = driveWith({ last_result: { status: 'idle', counts: { jobs_queued: 0 } } });
+    expect(idle.extraction_caught_up).toBe(true);
+    expect(dashboardSourceProgress(idle, { now: NOW }).settled).toBe(true);
+
+    const midScan = driveWith({ checkpoint_active: true, last_result: { status: 'idle', counts: { jobs_queued: 0 } } });
+    expect(midScan.extraction_caught_up).toBeUndefined();
+    expect(dashboardSourceProgress(midScan, { now: NOW }).settled).toBe(false);
+
+    const inProgress = driveWith({ last_result: { status: 'progress', counts: { jobs_queued: 2 } } });
+    expect(inProgress.extraction_caught_up).toBeUndefined();
+
+    const queuedWork = driveWith({ last_result: { status: 'idle', counts: { jobs_queued: 0 } } }, 3);
+    expect(queuedWork.extraction_caught_up).toBeUndefined();
   });
 });

@@ -1237,6 +1237,15 @@ export interface DashboardSourceCard {
    * declaration and hidden work is the one outcome this must not produce.
    */
   content_arrives_extracted?: boolean;
+  /**
+   * True when this source has extraction tasks, every extraction task has
+   * finished its pass idle with no active checkpoint, failure, or degradation,
+   * and the extraction queue has no waiting, active, stuck, or attention work.
+   * Any remaining in-scope items without text chunks are non-extractable by
+   * the configured lanes (for example textless chat messages or file types no
+   * extractor accepts), not pending reading work.
+   */
+  extraction_caught_up?: true;
   /** The Sync now copy's own name for this source; see DashboardSyncName. */
   sync_name?: DashboardSyncName;
   /**
@@ -1447,6 +1456,10 @@ export interface SourceDashboardHistorySample {
    * these is complete, so the baseline is taken there too.
    */
   unreadable_items?: number;
+  /** Unsupported kinds and pictures not read here: settled without text, like unreadable_items. */
+  settled_unextracted_items?: number;
+  /** True when all extraction tasks finished idle and the extraction queue is caught up. */
+  extraction_caught_up?: boolean;
   /**
    * Whether this card had finished at least one full pass when the sample was
    * taken. A phase reaching parity mid-crawl is not a settled corpus, so the
@@ -2236,14 +2249,17 @@ function phaseAtParity(sample: SourceDashboardHistorySample, counter: string, va
   if (sample.settled_pass !== true) return false;
   const inScope = sample.in_scope_items;
   if (inScope === undefined || !Number.isFinite(inScope) || inScope <= 0) return false;
-  // Unreadable files never become text or vectors, so they count as settled.
-  const unreadable = Math.max(0, sample.unreadable_items ?? 0);
-  if (counter === 'content_ready_items') return value + unreadable >= inScope;
+  // Unreadable, unsupported-kind, and non-extractable items never become text or vectors, so they count as settled.
+  const settledUnextracted = Math.max(0, sample.unreadable_items ?? 0) + Math.max(0, sample.settled_unextracted_items ?? 0);
+  if (counter === 'content_ready_items') {
+    return sample.extraction_caught_up === true || value + settledUnextracted >= inScope;
+  }
   // Embedding is complete only where extraction is: the bar clamps its
   // numerator to what has been read, so a store that has run ahead of
   // extraction is not at parity however many files it reports.
   if (counter === 'embedded_files') {
-    return value + unreadable >= inScope && sample.content_ready_items + unreadable >= inScope;
+    if (sample.extraction_caught_up === true) return value >= sample.content_ready_items;
+    return value + settledUnextracted >= inScope && sample.content_ready_items + settledUnextracted >= inScope;
   }
   return false;
 }
@@ -2717,6 +2733,10 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       card.coverage.answer_ready_eligible_items,
     ),
     ...(card.coverage.unreadable_items === undefined ? {} : { unreadable_items: card.coverage.unreadable_items }),
+    ...(((card.coverage.unsupported_kind_items ?? 0) + (card.coverage.pictures_not_read_here_items ?? 0)) > 0
+      ? { settled_unextracted_items: (card.coverage.unsupported_kind_items ?? 0) + (card.coverage.pictures_not_read_here_items ?? 0) }
+      : {}),
+    ...(card.extraction_caught_up === true ? { extraction_caught_up: true } : {}),
     settled_pass: dashboardHasSettledPass(card),
   }));
   options.history?.record(samples);
@@ -3127,6 +3147,9 @@ function sourceCardFromDefinition(
     ...(mediaStorage ? { media_storage: mediaStorage } : {}),
     ...(metadataSync ? { metadata_sync: metadataSync } : {}),
     ...(definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {}),
+    ...(extractionCaughtUpFromSchedulers(schedulers, queue, ingestionHealth, answerReadiness)
+      ? { extraction_caught_up: true as const }
+      : {}),
     ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
   };
   card.setup = dashboardSourceSetupStatus(card);
@@ -5336,6 +5359,32 @@ function metadataTraversalCompleteFromSchedulers(
     if (signal !== undefined) walks.push(signal === 1);
   }
   return walks.length === 0 ? (unreported ? false : undefined) : walks.every(Boolean);
+}
+
+/**
+ * True when every extraction task on this source completed its pass idle with
+ * no open checkpoint, failure, or degradation, and the extraction queue has no
+ * waiting, active, stuck, or attention items. Fail-closed: a source with no
+ * extract tasks or any uncompleted/failing extract task returns false.
+ */
+function extractionCaughtUpFromSchedulers(
+  schedulers: readonly SourceSchedulerSourceStatus[],
+  queue: DashboardSourceCard['queue_health'],
+  ingestionHealth: DashboardSourceCard['ingestion_health'],
+  answerReadiness: DashboardSourceCard['answer_readiness'],
+): boolean {
+  if (queue.waiting > 0 || queue.active > 0 || queue.needs_attention > 0) return false;
+  if (ingestionHealth.stuck_count > 0 || ingestionHealth.drain_state === 'disabled' || ingestionHealth.drain_state === 'held') return false;
+  if (answerReadiness.label === 'Content extraction is stalled') return false;
+  const extractTasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === 'extract'));
+  if (extractTasks.length === 0) return false;
+  return extractTasks.every((task) => (
+    !task.running
+    && task.consecutive_failures === 0
+    && !task.degraded_reason
+    && task.checkpoint_active !== true
+    && task.last_result?.status === 'idle'
+  ));
 }
 
 /**

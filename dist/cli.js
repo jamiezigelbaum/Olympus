@@ -102450,7 +102450,7 @@ function dashboardFirstSyncClock(source, now) {
 function dashboardPhaseComplete(phase) {
   const measure = phase.measure;
   if (measure.kind === "ratio")
-    return measure.done + (phase.unreadable ?? 0) >= measure.total;
+    return measure.done + (phase.unreadable ?? 0) + (phase.settled_other ?? 0) >= measure.total;
   if (measure.kind === "remaining")
     return measure.remaining <= 0;
   return false;
@@ -102482,7 +102482,10 @@ function extractionPhase(source, settledPass, metadata) {
   if (source.content_arrives_extracted === true && !behind) {
     return { ...ratioPhase("extraction", noun, summary.in_scope_items, summary.in_scope_items, false), tracks_sync: true };
   }
-  return ratioPhase("extraction", noun, summary.read_items, summary.in_scope_items, settledPass, source.movement?.extraction_settled_value, summary.unreadable_items);
+  const unreadable = summary.unreadable_items ?? 0;
+  const capabilityUnextracted = (summary.unsupported_kind_items ?? 0) + (summary.pictures_not_read_here_items ?? 0);
+  const settledOther = settledPass && source.extraction_caught_up === true ? Math.max(capabilityUnextracted, summary.in_scope_items - summary.read_items - unreadable) : capabilityUnextracted;
+  return ratioPhase("extraction", noun, summary.read_items, summary.in_scope_items, settledPass, source.movement?.extraction_settled_value, summary.unreadable_items, settledOther);
 }
 function embeddingPhase(source, settledPass, extraction, summary) {
   const noun = dashboardItemNoun(source);
@@ -102497,7 +102500,10 @@ function embeddingPhase(source, settledPass, extraction, summary) {
   }
   const measured = source.coverage.embedded_files;
   if (measured !== undefined) {
-    return ratioPhase("embedding", noun, Math.min(measured, read), total, settledPass, source.movement?.embedding_settled_value, source.coverage.embedding_unreadable_items ?? summary?.unreadable_items);
+    const unreadable = source.coverage.embedding_unreadable_items ?? summary?.unreadable_items ?? 0;
+    const capabilityUnextracted = (summary?.unsupported_kind_items ?? 0) + (summary?.pictures_not_read_here_items ?? 0);
+    const settledOther = settledPass && source.extraction_caught_up === true ? Math.max(capabilityUnextracted, total - read - unreadable) : capabilityUnextracted;
+    return ratioPhase("embedding", noun, Math.min(measured, read), total, settledPass, source.movement?.embedding_settled_value, source.coverage.embedding_unreadable_items ?? summary?.unreadable_items, settledOther);
   }
   if (total === 0)
     return ratioPhase("embedding", noun, 0, 0, false);
@@ -102615,13 +102621,14 @@ function stillnessWords(source, id) {
     return "the first sync has not run yet";
   return "no movement seen";
 }
-function ratioPhase(id, unit, rawDone, rawTotal, settledPass, settledBaseline, rawUnreadable) {
+function ratioPhase(id, unit, rawDone, rawTotal, settledPass, settledBaseline, rawUnreadable, rawSettledOther) {
   const total = Math.max(0, Math.round(rawTotal));
   const done = Math.max(0, Math.min(total, Math.round(rawDone)));
   const unreadable = Math.max(0, Math.min(total - done, Math.round(rawUnreadable ?? 0)));
-  const remaining = total - done - unreadable;
+  const settledOther = Math.max(0, Math.min(total - done - unreadable, Math.round(rawSettledOther ?? 0)));
+  const remaining = total - done - unreadable - settledOther;
   if (settledPass && remaining > 0) {
-    const batch = deltaMeasure(done, total - unreadable, settledBaseline);
+    const batch = deltaMeasure(done, total - unreadable - settledOther, settledBaseline);
     if (batch) {
       return {
         id,
@@ -102650,7 +102657,8 @@ function ratioPhase(id, unit, rawDone, rawTotal, settledPass, settledBaseline, r
     measure: { kind: "ratio", done, total, percent: percentOf(done, total) },
     scope: "corpus",
     denominator_unavailable: false,
-    ...unreadable > 0 ? { unreadable } : {}
+    ...unreadable > 0 ? { unreadable } : {},
+    ...settledOther > 0 ? { settled_other: settledOther } : {}
   };
 }
 function deltaMeasure(done, total, settledBaseline) {
@@ -145029,11 +145037,14 @@ function phaseAtParity(sample, counter, value) {
   const inScope = sample.in_scope_items;
   if (inScope === undefined || !Number.isFinite(inScope) || inScope <= 0)
     return false;
-  const unreadable = Math.max(0, sample.unreadable_items ?? 0);
-  if (counter === "content_ready_items")
-    return value + unreadable >= inScope;
+  const settledUnextracted = Math.max(0, sample.unreadable_items ?? 0) + Math.max(0, sample.settled_unextracted_items ?? 0);
+  if (counter === "content_ready_items") {
+    return sample.extraction_caught_up === true || value + settledUnextracted >= inScope;
+  }
   if (counter === "embedded_files") {
-    return value + unreadable >= inScope && sample.content_ready_items + unreadable >= inScope;
+    if (sample.extraction_caught_up === true)
+      return value >= sample.content_ready_items;
+    return value + settledUnextracted >= inScope && sample.content_ready_items + settledUnextracted >= inScope;
   }
   return false;
 }
@@ -145337,6 +145348,8 @@ function buildSourceDashboardViewModel(options) {
     queue_attention: card.queue_health.needs_attention,
     in_scope_items: answerReadyEligibleItems(card.coverage.indexed_items, card.coverage.not_read_by_policy_items, card.coverage.answer_ready_eligible_items),
     ...card.coverage.unreadable_items === undefined ? {} : { unreadable_items: card.coverage.unreadable_items },
+    ...(card.coverage.unsupported_kind_items ?? 0) + (card.coverage.pictures_not_read_here_items ?? 0) > 0 ? { settled_unextracted_items: (card.coverage.unsupported_kind_items ?? 0) + (card.coverage.pictures_not_read_here_items ?? 0) } : {},
+    ...card.extraction_caught_up === true ? { extraction_caught_up: true } : {},
     settled_pass: dashboardHasSettledPass(card)
   }));
   options.history?.record(samples);
@@ -145572,6 +145585,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     ...mediaStorage ? { media_storage: mediaStorage } : {},
     ...metadataSync ? { metadata_sync: metadataSync } : {},
     ...definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {},
+    ...extractionCaughtUpFromSchedulers(schedulers, queue, ingestionHealth, answerReadiness) ? { extraction_caught_up: true } : {},
     ...definition.sync_name ? { sync_name: definition.sync_name } : {}
   };
   card.setup = dashboardSourceSetupStatus(card);
@@ -146833,6 +146847,18 @@ function metadataTraversalCompleteFromSchedulers(schedulers) {
       walks.push(signal === 1);
   }
   return walks.length === 0 ? unreported ? false : undefined : walks.every(Boolean);
+}
+function extractionCaughtUpFromSchedulers(schedulers, queue, ingestionHealth, answerReadiness) {
+  if (queue.waiting > 0 || queue.active > 0 || queue.needs_attention > 0)
+    return false;
+  if (ingestionHealth.stuck_count > 0 || ingestionHealth.drain_state === "disabled" || ingestionHealth.drain_state === "held")
+    return false;
+  if (answerReadiness.label === "Content extraction is stalled")
+    return false;
+  const extractTasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "extract"));
+  if (extractTasks.length === 0)
+    return false;
+  return extractTasks.every((task) => !task.running && task.consecutive_failures === 0 && !task.degraded_reason && task.checkpoint_active !== true && task.last_result?.status === "idle");
 }
 function changeWatchNote(scheduler) {
   const watch = scheduler?.change_watch;
@@ -235459,6 +235485,7 @@ ${request.taskId}`);
       ...state.lastErrorHash ? { last_error_hash: state.lastErrorHash } : {},
       ...state.lastErrorKind ? { last_error_kind: state.lastErrorKind } : {},
       ...reportedDegradedReason(state.degradedReason, state.lastCompletedAt, now) ? { degraded_reason: state.degradedReason } : {},
+      ...state.checkpoint ? { checkpoint_active: true } : {},
       ...state.lastResult ? { last_result: state.lastResult } : {},
       ...state.embeddingSweep ? { embedding_sweep: state.embeddingSweep } : {}
     };
@@ -236299,6 +236326,7 @@ function createGoogleDriveConnectorStoreSchedulerSource(input) {
       {
         id: "google_drive.docs_store_pull",
         kind: "sync",
+        metadataWalkRole: "primary",
         writer: true,
         intervalMs: liveConfig.storePullIntervalMs,
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
@@ -236319,6 +236347,7 @@ function createGoogleDriveConnectorStoreSchedulerSource(input) {
       {
         id: "google_drive.docs_store_reconcile",
         kind: "sync",
+        metadataWalkRole: "maintenance",
         writer: true,
         intervalMs: liveConfig.storeReconcileIntervalMs,
         freshnessThresholdMs: liveConfig.storeReconcileFreshnessThresholdMs,
@@ -260993,6 +261022,7 @@ function scrubCard(definition, card) {
     ...isoOrUndefined(card.last_sync_at) ? { last_sync_at: isoOrUndefined(card.last_sync_at) } : {},
     ...card.unreadable_files ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } } : {},
     ...definition.sync_name ? { sync_name: definition.sync_name } : {},
+    ...card.extraction_caught_up === true ? { extraction_caught_up: true } : {},
     ...card.media_storage?.state === "disk_low" ? { media_storage: { state: "disk_low" } } : {},
     ...card.live_pass ? { live_pass: scrubLivePass(card.live_pass) } : {},
     ...card.last_manual_sync && isoOrUndefined(card.last_manual_sync.at) && MANUAL_SYNC_OUTCOMES.has(card.last_manual_sync.outcome) ? {

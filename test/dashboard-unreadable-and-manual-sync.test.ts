@@ -190,6 +190,72 @@ describe('reading finishes when every in-scope file is read or unreadable', () =
     expect(dropbox.detail).toContain("2 files can't be read");
     expect(dropbox.detail).not.toContain('paused');
   });
+
+  test('unsupported kinds and pictures not read here settle extraction and embedding without inflating unreadable counts', () => {
+    const source = card({
+      coverage: {
+        indexed_items: 51,
+        content_ready_items: 50,
+        embedded_items: 551,
+        embedded_files: 50,
+        needs_review_items: 0,
+        answer_ready_eligible_items: 51,
+        unreadable_items: 0,
+        unsupported_kind_items: 1,
+      },
+    });
+    const progress = dashboardSourceProgress(source, { now: NOW });
+    const extraction = progress.phases.find((phase) => phase.id === 'extraction')!;
+    const embedding = progress.phases.find((phase) => phase.id === 'embedding')!;
+    expect(extraction.state).toBe('done');
+    expect(extraction.state_words).toBe('Done');
+    expect(embedding.state).toBe('done');
+    expect(progress.settled).toBe(true);
+    const v1 = buildChatGptDashboardViewModel(viewOf(source), { now: NOW });
+    const dropbox = v1.sources.find((entry) => entry.id === 'dropbox.files')!;
+    expect(dropbox.status).toBe('Fresh');
+    expect(dropbox.progress?.stage).toBe('done');
+  });
+
+  test('when all extraction lanes finished idle (extraction_caught_up), extraction settles while unembedded read items still hold embedding open', () => {
+    const stillEmbedding = card({
+      coverage: {
+        indexed_items: 302,
+        content_ready_items: 58,
+        embedded_items: 230,
+        embedded_files: 57,
+        needs_review_items: 0,
+        answer_ready_eligible_items: 302,
+        unreadable_items: 0,
+      },
+      extraction_caught_up: true,
+    });
+    const mid = dashboardSourceProgress(stillEmbedding, { now: NOW });
+    expect(mid.phases.find((phase) => phase.id === 'extraction')!.state).toBe('done');
+    expect(mid.phases.find((phase) => phase.id === 'embedding')!.state).not.toBe('done');
+    expect(mid.settled).toBe(false);
+
+    const allEmbedded = card({
+      coverage: {
+        indexed_items: 302,
+        content_ready_items: 58,
+        embedded_items: 236,
+        embedded_files: 58,
+        needs_review_items: 0,
+        answer_ready_eligible_items: 302,
+        unreadable_items: 0,
+      },
+      extraction_caught_up: true,
+    });
+    const done = dashboardSourceProgress(allEmbedded, { now: NOW });
+    expect(done.phases.find((phase) => phase.id === 'extraction')!.state).toBe('done');
+    expect(done.phases.find((phase) => phase.id === 'embedding')!.state).toBe('done');
+    expect(done.settled).toBe(true);
+    const v1 = buildChatGptDashboardViewModel(viewOf(allEmbedded), { now: NOW });
+    const dropbox = v1.sources.find((entry) => entry.id === 'dropbox.files')!;
+    expect(dropbox.status).toBe('Fresh');
+    expect(dropbox.progress?.stage).toBe('done');
+  });
 });
 
 describe('Sync now says what it found', () => {

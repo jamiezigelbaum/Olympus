@@ -525,6 +525,8 @@ export interface SourceSchedulerTaskStatus {
   last_error_hash?: string;
   last_error_kind?: string;
   degraded_reason?: string;
+  /** True while a multi-page task still holds a resume checkpoint (never exposes the cursor). */
+  checkpoint_active?: true;
   embedding_sweep?: SourceSchedulerTaskRunResult['embeddingSweep'];
   last_result?: {
     status: 'progress' | 'idle' | 'failed';
@@ -1744,6 +1746,7 @@ export class SourceScheduler {
       ...(reportedDegradedReason(state.degradedReason, state.lastCompletedAt, now)
         ? { degraded_reason: state.degradedReason }
         : {}),
+      ...(state.checkpoint ? { checkpoint_active: true as const } : {}),
       ...(state.lastResult ? { last_result: state.lastResult } : {}),
       ...(state.embeddingSweep ? { embedding_sweep: state.embeddingSweep } : {}),
     };
@@ -2841,6 +2844,7 @@ export function createGoogleDriveConnectorStoreSchedulerSource(input: {
       {
         id: 'google_drive.docs_store_pull',
         kind: 'sync',
+        metadataWalkRole: 'primary',
         writer: true,
         intervalMs: liveConfig.storePullIntervalMs,
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
@@ -2865,6 +2869,7 @@ export function createGoogleDriveConnectorStoreSchedulerSource(input: {
       {
         id: 'google_drive.docs_store_reconcile',
         kind: 'sync',
+        metadataWalkRole: 'maintenance',
         writer: true,
         intervalMs: liveConfig.storeReconcileIntervalMs,
         freshnessThresholdMs: liveConfig.storeReconcileFreshnessThresholdMs,

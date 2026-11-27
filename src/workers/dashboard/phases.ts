@@ -152,6 +152,13 @@ export interface DashboardPhase {
    * done + unreadable covers the total.
    */
   unreadable?: number;
+  /**
+   * In-scope items settled without extracted text (unsupported file kinds,
+   * pictures not read here, or non-extractable items once every extraction lane
+   * finished idle). Kept separate from `unreadable` so "can't be read" counts
+   * stay exact while settled non-extractable items never stall the bar.
+   */
+  settled_other?: number;
 }
 
 export interface DashboardProgress {
@@ -334,9 +341,9 @@ export function dashboardFirstSyncClock(source: DashboardSourceCard, now: Date):
 }
 
 /** A phase with nothing left to do. An indeterminate phase never qualifies. */
-export function dashboardPhaseComplete(phase: Pick<DashboardPhase, 'measure' | 'unreadable'>): boolean {
+export function dashboardPhaseComplete(phase: Pick<DashboardPhase, 'measure' | 'unreadable' | 'settled_other'>): boolean {
   const measure = phase.measure;
-  if (measure.kind === 'ratio') return measure.done + (phase.unreadable ?? 0) >= measure.total;
+  if (measure.kind === 'ratio') return measure.done + (phase.unreadable ?? 0) + (phase.settled_other ?? 0) >= measure.total;
   if (measure.kind === 'remaining') return measure.remaining <= 0;
   return false;
 }
@@ -415,6 +422,11 @@ function extractionPhase(
     // too and would put extraction at 100/100 above an embedding row at 80/100.
     return { ...ratioPhase('extraction', noun, summary.in_scope_items, summary.in_scope_items, false), tracks_sync: true };
   }
+  const unreadable = summary.unreadable_items ?? 0;
+  const capabilityUnextracted = (summary.unsupported_kind_items ?? 0) + (summary.pictures_not_read_here_items ?? 0);
+  const settledOther = settledPass && source.extraction_caught_up === true
+    ? Math.max(capabilityUnextracted, summary.in_scope_items - summary.read_items - unreadable)
+    : capabilityUnextracted;
   return ratioPhase(
     'extraction',
     noun,
@@ -423,6 +435,7 @@ function extractionPhase(
     settledPass,
     source.movement?.extraction_settled_value,
     summary.unreadable_items,
+    settledOther,
   );
 }
 
@@ -463,8 +476,13 @@ function embeddingPhase(
   }
   const measured = source.coverage.embedded_files;
   if (measured !== undefined) {
-    // Files extraction gave up on have no text to embed, so they are not
-    // waited on here either.
+    // Files extraction gave up on or settled without text have no text to embed,
+    // so they are not waited on here either; every read item still must embed.
+    const unreadable = source.coverage.embedding_unreadable_items ?? summary?.unreadable_items ?? 0;
+    const capabilityUnextracted = (summary?.unsupported_kind_items ?? 0) + (summary?.pictures_not_read_here_items ?? 0);
+    const settledOther = settledPass && source.extraction_caught_up === true
+      ? Math.max(capabilityUnextracted, total - read - unreadable)
+      : capabilityUnextracted;
     return ratioPhase(
       'embedding',
       noun,
@@ -473,6 +491,7 @@ function embeddingPhase(
       settledPass,
       source.movement?.embedding_settled_value,
       source.coverage.embedding_unreadable_items ?? summary?.unreadable_items,
+      settledOther,
     );
   }
   if (total === 0) return ratioPhase('embedding', noun, 0, 0, false);
@@ -658,15 +677,17 @@ function ratioPhase(
   settledPass: boolean,
   settledBaseline?: number,
   rawUnreadable?: number,
+  rawSettledOther?: number,
 ): BarePhase {
   const total = Math.max(0, Math.round(rawTotal));
   const done = Math.max(0, Math.min(total, Math.round(rawDone)));
-  // Unreadable files are settled, not remaining: they never turn a finished
+  // Unreadable and non-extractable files are settled, not remaining: they never turn a finished
   // corpus into a perpetual delta. The ratio itself keeps them in the total.
   const unreadable = Math.max(0, Math.min(total - done, Math.round(rawUnreadable ?? 0)));
-  const remaining = total - done - unreadable;
+  const settledOther = Math.max(0, Math.min(total - done - unreadable, Math.round(rawSettledOther ?? 0)));
+  const remaining = total - done - unreadable - settledOther;
   if (settledPass && remaining > 0) {
-    const batch = deltaMeasure(done, total - unreadable, settledBaseline);
+    const batch = deltaMeasure(done, total - unreadable - settledOther, settledBaseline);
     if (batch) {
       return {
         id,
@@ -696,6 +717,7 @@ function ratioPhase(
     scope: 'corpus',
     denominator_unavailable: false,
     ...(unreadable > 0 ? { unreadable } : {}),
+    ...(settledOther > 0 ? { settled_other: settledOther } : {}),
   };
 }
 

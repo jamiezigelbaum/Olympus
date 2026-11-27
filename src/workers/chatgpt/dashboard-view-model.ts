@@ -1654,6 +1654,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       ? { unreadable_files: { names: unreadableNames(card.unreadable_files.names).slice(0, UNREADABLE_NAMES_IN_RESULT), corpus_ids: [] } }
       : {}),
     ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
+    ...(card.extraction_caught_up === true ? { extraction_caught_up: true as const } : {}),
     // A state only: the words are vocabulary.ts's.
     ...(card.media_storage?.state === 'disk_low' ? { media_storage: { state: 'disk_low' as const } } : {}),
     // Counts and a closed kind: the words are vocabulary.ts's.
