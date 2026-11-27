@@ -1594,11 +1594,54 @@ export async function main(): Promise<void> {
   // The judge runs in the background in the split: raise its boosts there.
   const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities: Parameters<typeof judgeBoosts.raise>[0]) => judgeBoosts.raise(identities);
   let chunkJudgmentsInFlight = 0;
+  const pendingReleaseWindows = new Map<string, import('../engine-split/commands.ts').EngineJudgeNowItem>();
+  let releaseWindowWarming = false;
+  let releaseWindowWarmTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleReleaseWindowWarm = (delayMs: number): void => {
+    if (releaseWindowWarmTimer || shuttingDown || pendingReleaseWindows.size === 0) return;
+    releaseWindowWarmTimer = setTimeout(() => {
+      releaseWindowWarmTimer = undefined;
+      void drainReleaseWindowWarm();
+    }, delayMs);
+    releaseWindowWarmTimer.unref?.();
+  };
+  const drainReleaseWindowWarm = async (): Promise<void> => {
+    if (releaseWindowWarming || shuttingDown || pendingReleaseWindows.size === 0) return;
+    if (chunkJudgmentsInFlight > 0) { scheduleReleaseWindowWarm(1_000); return; }
+    releaseWindowWarming = true;
+    try {
+      const first = pendingReleaseWindows.entries().next().value as [string, import('../engine-split/commands.ts').EngineJudgeNowItem] | undefined;
+      if (!first) return;
+      pendingReleaseWindows.delete(first[0]);
+      try {
+        await judgeNow([first[1]], tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? 'allow'), { budgetMs: 30_000 });
+      } catch {
+        // Best-effort background window warming; foreground release stays fail-closed.
+      }
+    } finally {
+      releaseWindowWarming = false;
+      if (pendingReleaseWindows.size > 0 && !shuttingDown) scheduleReleaseWindowWarm(500);
+    }
+  };
   const runChunkJudgment: NonNullable<import('../classification/chunk-release.ts').ChunkReleaseOptions['judgeNow']> = async (items, budgetMs) => {
     chunkJudgmentsInFlight++;
     tierSniffer?.preempt();
-    try { return await judgeNow(items, tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? 'allow'), { budgetMs }); }
-    finally { chunkJudgmentsInFlight--; tierSniffer?.wake(); }
+    try {
+      const result = await judgeNow(items, tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? 'allow'), { budgetMs });
+      // Any passages that missed the foreground budget warm asynchronously in
+      // the background so "Ask again in a minute" genuinely completes them.
+      if (result.withheldPassages > 0) {
+        items.forEach((item, index) => {
+          const allowed = new Set(result.allowed[index] ?? []);
+          const remaining = item.chunkHashes.filter(hash => !allowed.has(hash));
+          if (remaining.length === 0 || pendingReleaseWindows.size >= 64) return;
+          const key = `${item.corpusId}\u0000${item.provider}\u0000${item.accountScope}\u0000${item.providerConversationId ?? ''}\u0000${item.providerItemId}`;
+          pendingReleaseWindows.set(key, { ...item, chunkHashes: remaining });
+        });
+        scheduleReleaseWindowWarm(1_000);
+      }
+      return result;
+    } finally { chunkJudgmentsInFlight--; tierSniffer?.wake(); }
   };
   const chunkReleaseOptions = {
     judgeNow: engineFront ? frontJudgeNow(engineFront.client) : runChunkJudgment,

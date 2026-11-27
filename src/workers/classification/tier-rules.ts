@@ -40,7 +40,7 @@ import { TIER_KEYS, type OwnerTierRule, type TierKey } from './tier-classifier.t
 export const TIER_RULES_SCHEMA_VERSION = 1;
 export const OLYMPUS_TIER_RULES_ENV = 'OLYMPUS_TIER_RULES_PATH';
 
-export const OWNER_TIER_RULE_MATCH_KINDS = ['pathPrefix', 'folderKey', 'label', 'sender', 'chat'] as const;
+export const OWNER_TIER_RULE_MATCH_KINDS = ['pathPrefix', 'folderKey', 'label', 'sender', 'chat', 'source'] as const;
 export type OwnerTierRuleMatchKind = (typeof OWNER_TIER_RULE_MATCH_KINDS)[number];
 
 const MAX_RULES = 500;
@@ -205,6 +205,12 @@ function parseMatch(raw: unknown, label: string): OwnerTierRule['match'] {
     throw new OperationError(
       'config_error',
       `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`,
+    );
+  }
+  if (kind === 'source' && !SOURCE_PATTERN.test(value.trim())) {
+    throw new OperationError(
+      'config_error',
+      `${label}.source must be a valid provider identifier (e.g. x, readwise).`,
     );
   }
   return { kind, value: value.trim() };

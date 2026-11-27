@@ -65,6 +65,7 @@ import {
   RETIRED_SOURCE_PRIOR_REASON,
   restsOnRetiredSourcePrior,
   TIER_CLASSIFIER_VERSION,
+  tierRank,
   type OwnerTierRule,
   type TierDecision,
   type TierSniffer,
@@ -414,7 +415,7 @@ export function rejudgeStoredContent(
       metadataTier: metadata.metadataTier,
       metadataForced: metadata.metadataForced,
       metadataFlagged: metadata.metadataFlagged,
-      metadataOwnerDecided: namesDecidedByOwner(record.reasons),
+      metadataOwnerDecided: namesDecidedByOwner(metadata.reasons),
       ...(title ? { title } : {}),
       ...(path ? { path } : {}),
       ...(sender ? { sender } : {}),
@@ -538,21 +539,31 @@ function rejudgeMetadata(
   // A re-check the owner asked for judges any model verdict on the names again, the current judge's too.
   const judgedAgain = (reason: string) => reason.startsWith('metadata:sniffer:')
     && (recheck !== undefined || !reason.startsWith(`metadata:sniffer:${sniffer?.id}:`));
-  if (!sniffer || record.state !== 'current' || record.metadataForced || namesDecidedByOwner(record.reasons)
-    || (!retiredPrior && !recheck?.namesChanged && !record.reasons.some(judgedAgain))) return previous;
   const signals = {
     ...(names.title ? { title: names.title } : {}),
     ...(names.path ? { path: names.path } : {}),
     ...(names.sender ? { sender: names.sender } : {}),
     folderKeys: names.folderKeys,
   };
-  const fresh = classifyItemTiers({ signals, namesOnly: true, ...(parentContext ? { parentContext } : {}) });
-  // An owner rule that matches the names now decides them, not this re-check:
-  // the owner-rule sweep (tier-rules-sweep.ts) applies it.
-  if (recheck && recheck.rules.length > 0) {
+  // An owner force-Personal/Public rule on a recheck lowers names immediately
+  // (Secrets still win in the content pass). Raising owner rules stay with the
+  // raising owner-rule sweep (tier-rules-sweep.ts).
+  if (recheck && recheck.rules.length > 0 && record.state === 'current' && !record.metadataForced && !namesDecidedByOwner(record.reasons)) {
     const ruled = classifyItemTiers({ signals, namesOnly: true, provider: subject.provider }, { rules: recheck.rules });
+    if (ruled.metadataForced && tierRank(ruled.metadataTier) < tierRank('secure')) {
+      return {
+        metadataTier: ruled.metadataTier,
+        metadataForced: true,
+        metadataFlagged: false,
+        metadataPending: false,
+        reasons: ruled.reasons,
+      };
+    }
     if (ruled.metadataForced || namesDecidedByOwner(ruled.reasons)) return previous;
   }
+  if (!sniffer || record.state !== 'current' || record.metadataForced || namesDecidedByOwner(record.reasons)
+    || (!retiredPrior && !recheck?.namesChanged && !record.reasons.some(judgedAgain))) return previous;
+  const fresh = classifyItemTiers({ signals, namesOnly: true, ...(parentContext ? { parentContext } : {}) });
   // The store retains scope folder keys but not labels (nor all provider
   // facts). An old model verdict may have relied on those missing signals.
   // Re-judging may raise it; lowering needs proof that no names were lost.

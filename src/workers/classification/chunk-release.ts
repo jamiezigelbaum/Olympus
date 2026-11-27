@@ -1,6 +1,6 @@
 /** The single chunk gate: windows prove reading, and only item tiers decide privacy. */
 import { isUnprovedPassageMarker, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ChunkReleaseResult, type ReleaseCheck, type ReleaseInput } from '../../core/release-manifest.ts';
-import { classifyContentTier, contentDigestReason, personalOverrideAllowsText, SNIFFER_EXCERPT_MAX_CHARS, TIER_CLASSIFIER_VERSION, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
+import { classifyContentTier, contentDigestReason, contentSecretReasons, ownerRuleMatches, personalOverrideAllowsText, SNIFFER_EXCERPT_MAX_CHARS, TIER_CLASSIFIER_VERSION, tierRank, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 import { DEFAULT_EXCERPT_LIMIT } from './delphi-scorer.ts';
 import { registeredInstalledTierClassification } from './installed-tier-classification-registry.ts';
 import { tierLedgerIdentityKey } from './tier-ledger.ts';
@@ -114,8 +114,18 @@ async function inspectChunks(
     const override = scope.ledger.getOverride(input, { withHistory: true });
     const overrideKey = JSON.stringify(override);
     const fullText = snapshot.chunks.map(chunk => chunk.text).join('');
+    const activeRules = !classification?.unavailableReason ? (classification?.rules ?? []) : [];
+    const forcedPersonalRule = activeRules.some(rule =>
+      rule.strength === 'force'
+      && tierRank(rule.tier) < tierRank('secure')
+      && ownerRuleMatches(rule, {
+        ...(snapshot.title ? { title: snapshot.title } : {}),
+        ...(snapshot.path ? { path: snapshot.path } : {}),
+        ...(snapshot.sender ? { sender: snapshot.sender } : {}),
+      }, input.provider));
     const ownerRead = personalOverrideAllowsText(override, fullText)
-      || (record.decidedBy === 'owner_rule' && record.reasons.some(reason => reason.startsWith('metadata:owner_rule:')));
+      || (record.decidedBy === 'owner_rule' && record.reasons.some(reason => reason.startsWith('metadata:owner_rule:')))
+      || (forcedPersonalRule && contentSecretReasons(fullText).length === 0);
     const names = JSON.stringify([snapshot.title, snapshot.path, snapshot.sender]);
     const parentContext = set ? parentNamesContext(set, input) : undefined;
     snapshots.set(index, () => {

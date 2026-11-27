@@ -641,3 +641,24 @@ test('a ledger removed during the last tier read holds passages that needed no n
   expect(result.allowed).toEqual([[]]);
   expect(result.withheldPassages).toBe(1);
 });
+
+test('an owner force-Personal source rule clears chunks without model calls, while still blocking Secrets', async () => {
+  const w = await world('violet turnips garden.');
+  w.promptChange();
+  w.unavailable();
+  // Without an owner force-Personal rule, the prompt change + unavailable judge withholds the chunk.
+  expect((await w.check.chunks!([w.input()])).withheldPassages).toBe(1);
+  // Adding an owner force-Personal source rule clears clean items immediately without calling the judge.
+  registerInstalledTierClassification({
+    forLedger: () => ({
+      rules: [{ id: 'fixture-personal', match: { kind: 'source', value: 'fixture' }, tier: 'private', strength: 'force' }],
+    }),
+  });
+  expect((await w.check.chunks!([w.input()])).withheldPassages).toBe(0);
+  expect(w.materials).toHaveLength(0);
+  // A secret inside the text still beats the force-Personal source rule (tombstoned as Secret and never released).
+  const prior = w.input();
+  await w.edit('sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+  expect(w.snapshot()).toBeUndefined();
+  expect((await w.check.chunks!([prior])).withheldPassages).toBe(1);
+});

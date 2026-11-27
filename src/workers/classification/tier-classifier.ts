@@ -127,7 +127,8 @@ export interface OwnerTierRule {
     | { kind: 'folderKey'; value: string }
     | { kind: 'label'; value: string }
     | { kind: 'sender'; value: string }
-    | { kind: 'chat'; value: string };
+    | { kind: 'chat'; value: string }
+    | { kind: 'source'; value: string };
   tier: TierKey;
   strength: 'prior' | 'force';
 }
@@ -1468,7 +1469,7 @@ function contentPass(args: {
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
 }
 
-function contentSecretReasons(text: string): string[] {
+export function contentSecretReasons(text: string): string[] {
   const kinds = detectSecretFindingKinds(text);
   if (hasCredentialUrl(text) && !kinds.includes('credential_assignment')) kinds.push('credential_assignment');
   return kinds.map(kind => `content:secret:${kind}`);
@@ -1621,6 +1622,8 @@ export function ownerRuleMatches(
       // rules on the sender's own address with a label boundary; a bare
       // fragment by substring only when the rule raises the tier.
       return ownerSenderRuleMatches(signals.sender, value, tierRank(rule.tier) > tierRank('private'));
+    case 'source':
+      return provider !== undefined && provider.trim().toLowerCase() === value;
   }
 }
 

@@ -248,9 +248,16 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     try {
       const added = await runTierCommand(['rules', 'add', '--id', 'clinic', '--match', 'sender=@clinic.example', '--tier', 'Private', '--strength', 'force'], { env });
       expect(added).toMatchObject({ added: { id: 'clinic', tier: 'Private', strength: 'force' }, rules: 1 });
+      const sourceAdded = await runTierCommand(['rules', 'add', '--id', 'x-personal', '--match', 'source=x', '--tier', 'Personal', '--strength', 'force'], { env });
+      expect(sourceAdded).toMatchObject({ added: { id: 'x-personal', match: { source: 'x' }, tier: 'Personal', strength: 'force' }, rules: 2 });
       const listed = await runTierCommand(['rules', 'list'], { env });
-      expect(listed).toMatchObject({ ok: true, rules: [{ id: 'clinic', match: { sender: '@clinic.example' }, tier: 'Private' }] });
+      expect(listed).toMatchObject({ ok: true, rules: [
+        { id: 'clinic', match: { sender: '@clinic.example' }, tier: 'Private' },
+        { id: 'x-personal', match: { source: 'x' }, tier: 'Personal', strength: 'force' },
+      ] });
       await expect(runTierCommand(['rules', 'add', '--id', 'bad', '--match', 'sender=clinic', '--tier', 'Private'], { env })).rejects.toThrow();
+      await expect(runTierCommand(['rules', 'add', '--id', 'bad-src', '--match', 'source=bad source!', '--tier', 'Personal'], { env })).rejects.toThrow();
+      expect(await runTierCommand(['rules', 'remove', 'x-personal'], { env })).toMatchObject({ removed: 'x-personal', rules: 1 });
       expect(await runTierCommand(['rules', 'remove', 'clinic'], { env })).toMatchObject({ removed: 'clinic', rules: 0 });
       await expect(runTierCommand(['set', 'fixture://nothing', 'public'], { storePaths: [dbPath], env })).rejects.toThrow('No stored item');
       await expect(runTierCommand(['set', 'x', 'internal'], { storePaths: [dbPath], env })).rejects.toThrow('Unknown tier');

@@ -43105,6 +43105,8 @@ function ownerRuleMatches(rule, signals, provider) {
       return (signals.labels ?? []).some((label) => label.trim().toLowerCase() === value);
     case "sender":
       return ownerSenderRuleMatches(signals.sender, value, tierRank(rule.tier) > tierRank("private"));
+    case "source":
+      return provider !== undefined && provider.trim().toLowerCase() === value;
   }
 }
 function detectorReasons(signals) {
@@ -62803,7 +62805,7 @@ function rejudgeStoredContent(set, record, options) {
     metadataTier: metadata.metadataTier,
     metadataForced: metadata.metadataForced,
     metadataFlagged: metadata.metadataFlagged,
-    metadataOwnerDecided: namesDecidedByOwner(record.reasons),
+    metadataOwnerDecided: namesDecidedByOwner(metadata.reasons),
     ...title ? { title } : {},
     ...path ? { path } : {},
     ...sender ? { sender } : {},
@@ -62899,20 +62901,29 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
   const previous = { ...record, reasons: record.reasons.filter((reason) => !reason.startsWith("content:")) };
   const retiredPrior = restsOnRetiredSourcePrior(record.reasons);
   const judgedAgain = (reason) => reason.startsWith("metadata:sniffer:") && (recheck !== undefined || !reason.startsWith(`metadata:sniffer:${sniffer?.id}:`));
-  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !retiredPrior && !recheck?.namesChanged && !record.reasons.some(judgedAgain))
-    return previous;
   const signals = {
     ...names.title ? { title: names.title } : {},
     ...names.path ? { path: names.path } : {},
     ...names.sender ? { sender: names.sender } : {},
     folderKeys: names.folderKeys
   };
-  const fresh = classifyItemTiers({ signals, namesOnly: true, ...parentContext ? { parentContext } : {} });
-  if (recheck && recheck.rules.length > 0) {
+  if (recheck && recheck.rules.length > 0 && record.state === "current" && !record.metadataForced && !namesDecidedByOwner(record.reasons)) {
     const ruled = classifyItemTiers({ signals, namesOnly: true, provider: subject.provider }, { rules: recheck.rules });
+    if (ruled.metadataForced && tierRank(ruled.metadataTier) < tierRank("secure")) {
+      return {
+        metadataTier: ruled.metadataTier,
+        metadataForced: true,
+        metadataFlagged: false,
+        metadataPending: false,
+        reasons: ruled.reasons
+      };
+    }
     if (ruled.metadataForced || namesDecidedByOwner(ruled.reasons))
       return previous;
   }
+  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !retiredPrior && !recheck?.namesChanged && !record.reasons.some(judgedAgain))
+    return previous;
+  const fresh = classifyItemTiers({ signals, namesOnly: true, ...parentContext ? { parentContext } : {} });
   const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
   const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
   const mayLower = retiredPrior || (recheck !== undefined ? providerReasons.length === 0 && (recheck.namesChanged === true || namesInputCovered(record.reasons, signals, parentContext)) : fromStoredNames);
@@ -64996,6 +65007,9 @@ function parseMatch(raw, label) {
   if (kind === "sender" && !SENDER_PATTERN.test(value.trim())) {
     throw new OperationError("config_error", `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`);
   }
+  if (kind === "source" && !SOURCE_PATTERN.test(value.trim())) {
+    throw new OperationError("config_error", `${label}.source must be a valid provider identifier (e.g. x, readwise).`);
+  }
   return { kind, value: value.trim() };
 }
 function serializeOwnerTierRule(rule) {
@@ -65100,7 +65114,7 @@ var init_tier_rules = __esm(() => {
   init_operation_error();
   init_owner_config_read();
   init_tier_classifier();
-  OWNER_TIER_RULE_MATCH_KINDS = ["pathPrefix", "folderKey", "label", "sender", "chat"];
+  OWNER_TIER_RULE_MATCH_KINDS = ["pathPrefix", "folderKey", "label", "sender", "chat", "source"];
   RULE_ID_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
   SOURCE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/i;
   SENDER_PATTERN = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
@@ -68055,7 +68069,13 @@ async function inspectChunks(inputs, scopes, check, options = {}) {
     const override = scope.ledger.getOverride(input, { withHistory: true });
     const overrideKey = JSON.stringify(override);
     const fullText = snapshot.chunks.map((chunk) => chunk.text).join("");
-    const ownerRead = personalOverrideAllowsText(override, fullText) || record.decidedBy === "owner_rule" && record.reasons.some((reason) => reason.startsWith("metadata:owner_rule:"));
+    const activeRules = !classification?.unavailableReason ? classification?.rules ?? [] : [];
+    const forcedPersonalRule = activeRules.some((rule) => rule.strength === "force" && tierRank(rule.tier) < tierRank("secure") && ownerRuleMatches(rule, {
+      ...snapshot.title ? { title: snapshot.title } : {},
+      ...snapshot.path ? { path: snapshot.path } : {},
+      ...snapshot.sender ? { sender: snapshot.sender } : {}
+    }, input.provider));
+    const ownerRead = personalOverrideAllowsText(override, fullText) || record.decidedBy === "owner_rule" && record.reasons.some((reason) => reason.startsWith("metadata:owner_rule:")) || forcedPersonalRule && contentSecretReasons(fullText).length === 0;
     const names = JSON.stringify([snapshot.title, snapshot.path, snapshot.sender]);
     const parentContext = set ? parentNamesContext(set, input) : undefined;
     snapshots.set(index, () => {
@@ -282525,11 +282545,57 @@ async function main() {
   const overPrivate = engineFront ? undefined : new TierOverPrivateMonitor(() => tierScopes().map((scope) => scope.ledger), (line) => console.warn(line));
   const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities) => judgeBoosts.raise(identities);
   let chunkJudgmentsInFlight = 0;
+  const pendingReleaseWindows = new Map;
+  let releaseWindowWarming = false;
+  let releaseWindowWarmTimer;
+  const scheduleReleaseWindowWarm = (delayMs) => {
+    if (releaseWindowWarmTimer || shuttingDown || pendingReleaseWindows.size === 0)
+      return;
+    releaseWindowWarmTimer = setTimeout(() => {
+      releaseWindowWarmTimer = undefined;
+      drainReleaseWindowWarm();
+    }, delayMs);
+    releaseWindowWarmTimer.unref?.();
+  };
+  const drainReleaseWindowWarm = async () => {
+    if (releaseWindowWarming || shuttingDown || pendingReleaseWindows.size === 0)
+      return;
+    if (chunkJudgmentsInFlight > 0) {
+      scheduleReleaseWindowWarm(1000);
+      return;
+    }
+    releaseWindowWarming = true;
+    try {
+      const first = pendingReleaseWindows.entries().next().value;
+      if (!first)
+        return;
+      pendingReleaseWindows.delete(first[0]);
+      try {
+        await judgeNow([first[1]], tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"), { budgetMs: 30000 });
+      } catch {}
+    } finally {
+      releaseWindowWarming = false;
+      if (pendingReleaseWindows.size > 0 && !shuttingDown)
+        scheduleReleaseWindowWarm(500);
+    }
+  };
   const runChunkJudgment = async (items, budgetMs) => {
     chunkJudgmentsInFlight++;
     tierSniffer?.preempt();
     try {
-      return await judgeNow(items, tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"), { budgetMs });
+      const result = await judgeNow(items, tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"), { budgetMs });
+      if (result.withheldPassages > 0) {
+        items.forEach((item, index) => {
+          const allowed = new Set(result.allowed[index] ?? []);
+          const remaining = item.chunkHashes.filter((hash) => !allowed.has(hash));
+          if (remaining.length === 0 || pendingReleaseWindows.size >= 64)
+            return;
+          const key = `${item.corpusId}\x00${item.provider}\x00${item.accountScope}\x00${item.providerConversationId ?? ""}\x00${item.providerItemId}`;
+          pendingReleaseWindows.set(key, { ...item, chunkHashes: remaining });
+        });
+        scheduleReleaseWindowWarm(1000);
+      }
+      return result;
     } finally {
       chunkJudgmentsInFlight--;
       tierSniffer?.wake();

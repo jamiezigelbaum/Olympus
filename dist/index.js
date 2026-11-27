@@ -11266,6 +11266,8 @@ function ownerRuleMatches(rule, signals, provider) {
       return (signals.labels ?? []).some((label) => label.trim().toLowerCase() === value);
     case "sender":
       return ownerSenderRuleMatches(signals.sender, value, tierRank(rule.tier) > tierRank("private"));
+    case "source":
+      return provider !== undefined && provider.trim().toLowerCase() === value;
   }
 }
 var TIER_RANK, UNDECIDED_TIER_SNIFFER, OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review";
