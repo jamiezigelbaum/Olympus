@@ -2143,20 +2143,26 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    * on the olympusplugin.ai page that opens Olympus there.
    */
   moreOnComputer: 'More controls on your computer: Private answers, anonymous answers, keys and agents',
+  moreOnComputerTitle: 'Open full dashboard in your browser',
+  moreOnComputerDetail: 'Private answers, anonymous answers, keys and agents',
   moreOnComputerOpen: 'Open',
   moreOnComputerOpenLabel: 'Open Olympus on your computer',
   /**
    * Remote mode (2026-10-10; core/remote-open.ts): the engine runs on a
    * server, so a "do this on your computer" control opens this box instead of
-   * the olympus:// page. The two command lines are built from the engine's
-   * port and the owner's own SSH name (remoteOpenInstructions).
+   * the olympus:// page. Built from the engine's port and the owner's SSH name.
    */
   remote: {
-    title: 'Olympus runs on a server, so this opens on your computer through a secure tunnel.',
+    title: 'Olympus runs on a server, so this opens in your browser through a secure tunnel.',
     askLine: 'Ask your assistant:',
     askPhrase: 'Open Olympus on my computer',
     askPhraseFor: 'Open Olympus on my computer to connect {source}',
-    byHandAfterAsk: 'Or do it yourself:',
+    byHandAfterAsk: 'Or run one command in Terminal:',
+    oneStep: 'Run this in Terminal on your computer, then open the link it prints:',
+    keepOpen: 'Leave Terminal open while using the dashboard (press Ctrl+C to close the tunnel).',
+    sshTargetLabel: 'Server SSH address (for example, user@my-server)',
+    sshTargetPlaceholder: 'user@my-server',
+    sshTargetRequired: 'Enter your server\'s SSH address above before copying.',
     onComputer: 'On your computer, run:',
     onServer: 'Then on the server, run this and open the link it prints in your computer\'s browser:',
     portNote: 'Keep {port} on both sides of the tunnel: the link only works on that port.',

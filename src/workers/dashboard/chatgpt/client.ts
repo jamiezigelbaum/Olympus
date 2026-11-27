@@ -209,6 +209,8 @@ export function chatgptDashboardClient(
     landed: { id: string; until: number } | null;
     /** What the last failed read got back, for the unreachable banner's See why. */
     lastFailure: RelayFailure | null;
+    /** User-entered SSH address when the server did not declare one (`remote.sshTarget`). */
+    remoteSshTarget: string;
     /** Sources whose Delete indexed data ran: source id to when to stop waiting for the row to settle. */
     deleting: Record<string, number>;
   } = {
@@ -245,6 +247,7 @@ export function chatgptDashboardClient(
     landingPrivacy: false,
     landed: null,
     lastFailure: null,
+    remoteSshTarget: '',
   };
   const H = config.host;
 
@@ -846,24 +849,38 @@ export function chatgptDashboardClient(
     const match = /^https:\/\/(?:www\.)?olympusplugin\.ai\/open\/((?:connect|fix|unreadable)\/[a-z]+)\/$/.exec(href);
     return match ? match[1]! : '';
   }
+  const SSH_TARGET_RE = /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}@)?[A-Za-z0-9][A-Za-z0-9.-]{0,190}$/;
+
+  function validSshTarget(value: unknown): string {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    return trimmed.length <= 255 && SSH_TARGET_RE.test(trimmed) ? trimmed : '';
+  }
+
   /**
-   * The two by-hand lines, exactly as core/remote-open.ts remoteOpenInstructions
-   * writes them (test/remote-open.test.ts holds the two equal): the tunnel on
-   * the engine's own port number, and a fresh one-time link from the server.
+   * Single-step Terminal command matching core/remote-open.ts remoteOpenOneCommand:
+   * opens the loopback tunnel on the engine's port, prints the clickable one-time
+   * launch link in the same window, and holds the tunnel open until Ctrl+C.
    */
-  function remoteLines(href: string): { onComputer: string; onServer: string; port: number } {
+  function remoteLines(href: string, overrideTarget?: string): { oneCommand: string; port: number; hasTarget: boolean; hasConfiguredTarget: boolean } {
     const remote = state.data.remote;
     const port = remote.port as number;
-    const target = typeof remote.sshTarget === 'string' && /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}@)?[A-Za-z0-9][A-Za-z0-9.-]{0,190}$/.test(remote.sshTarget)
-      ? remote.sshTarget
-      : 'you@your-server';
+    const configured = validSshTarget(remote.sshTarget);
+    const entered = validSshTarget(overrideTarget !== undefined ? overrideTarget : state.remoteSshTarget);
+    const target = configured || entered || 'you@your-server';
     const path = openPath(href);
+    const socket = typeof remote.socketPath === 'string' && /^\/[A-Za-z0-9_./-]+\/olympus\/worker\.sock$/.test(remote.socketPath) && !remote.socketPath.split('/').some((part: string) => part === '..' || part === '.')
+      ? remote.socketPath
+      : '';
+    const forward = socket
+      ? '-o ExitOnForwardFailure=yes -L 127.0.0.1:' + port + ':' + socket
+      : '-o ExitOnForwardFailure=yes -L 127.0.0.1:' + port + ':127.0.0.1:' + port;
+    const targetFlag = path ? ' --target ' + path : '';
     return {
-      onComputer: typeof remote.socketPath === 'string' && /^\/[A-Za-z0-9_./-]+\/olympus\/worker\.sock$/.test(remote.socketPath) && !remote.socketPath.split('/').some((part: string) => part === '..' || part === '.')
-        ? 'ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:' + port + ':' + remote.socketPath + ' ' + target
-        : 'ssh -N -L ' + port + ':127.0.0.1:' + port + ' ' + target,
-      onServer: 'olympus dashboard --no-open' + (path ? ' --target ' + path : ''),
+      oneCommand: 'ssh ' + forward + ' ' + target + ' \'PATH="$HOME/.local/bin:$PATH" olympus dashboard --no-open' + targetFlag + ' && cat\'',
       port,
+      hasTarget: !!(configured || entered),
+      hasConfiguredTarget: !!configured,
     };
   }
   /**
@@ -872,9 +889,10 @@ export function chatgptDashboardClient(
    * touches); then the line stays selected and the button says to press the
    * copy keys.
    */
-  function copyControl(code: HTMLElement, key: string): HTMLElement {
+  function copyControl(code: HTMLElement, key: string, disabled = false): HTMLButtonElement {
     const R = P.remote;
     const node = button(R.copy, key, () => {
+      if (node.disabled) return;
       let copied = false;
       try {
         const selection = window.getSelection();
@@ -889,16 +907,17 @@ export function chatgptDashboardClient(
         copied = false;
       }
       node.textContent = copied ? R.copied : R.copySelected;
-    }, 'plain');
+    }, 'plain') as HTMLButtonElement;
+    if (disabled) node.disabled = true;
     return node;
   }
-  function copyLine(text: string, key: string): HTMLElement {
+  function copyLine(text: string, key: string, disabled = false): HTMLElement {
     const code = el('code', '', text);
-    return add(el('div', 'remote-line'), code, copyControl(code, key));
+    return add(el('div', 'remote-line'), code, copyControl(code, key, disabled));
   }
-  /** The remote-mode box under a control, while it is open. */
-  function remoteBox(key: string, href: string, source?: { id: string; label: string }): HTMLElement | null {
-    if (!state.open['remote:' + key]) return null;
+  /** The remote-mode box under a control (or inside the full-dashboard disclosure). */
+  function remoteBox(key: string, href: string, source?: { id: string; label: string }, inline = false): HTMLElement | null {
+    if (!inline && !state.open['remote:' + key]) return null;
     const R = P.remote;
     const lines = remoteLines(href);
     const box = add(el('div', 'remote-box'), el('p', 'strong', R.title));
@@ -908,12 +927,35 @@ export function chatgptDashboardClient(
       const phrase = source && openPath(href).indexOf('connect/') === 0 ? fill(R.askPhraseFor, { source: source.label }) : R.askPhrase;
       add(box, el('p', '', R.askLine), copyLine(phrase, key + ':remote:ask'), el('p', 'muted', R.byHandAfterAsk));
     }
+    const codeEl = el('code', '', lines.oneCommand);
+    const copyBtn = copyControl(codeEl, key + ':remote:one', !lines.hasTarget);
+    const hint = el('p', 'muted', lines.hasTarget ? R.keepOpen : R.sshTargetRequired);
+    if (!lines.hasConfiguredTarget) {
+      const inputId = 'remote-ssh-' + key.replace(/[^a-z0-9_-]/gi, '-');
+      const label = el('label', '', R.sshTargetLabel);
+      label.setAttribute('for', inputId);
+      const input = el('input', 'text remote-target') as HTMLInputElement;
+      input.id = inputId;
+      input.type = 'text';
+      input.value = state.remoteSshTarget;
+      input.placeholder = R.sshTargetPlaceholder;
+      input.setAttribute('autocomplete', 'off');
+      input.setAttribute('spellcheck', 'false');
+      input.addEventListener('input', () => {
+        state.remoteSshTarget = input.value;
+        const next = remoteLines(href, input.value);
+        codeEl.textContent = next.oneCommand;
+        copyBtn.disabled = !next.hasTarget;
+        copyBtn.textContent = R.copy;
+        hint.textContent = next.hasTarget ? R.keepOpen : R.sshTargetRequired;
+      });
+      add(box, add(el('div', 'remote-target-field'), label, input));
+    }
     add(
       box,
-      el('p', '', R.onComputer),
-      copyLine(lines.onComputer, key + ':remote:tunnel'),
-      el('p', '', R.onServer),
-      copyLine(lines.onServer, key + ':remote:link'),
+      el('p', '', R.oneStep),
+      add(el('div', 'remote-line'), codeEl, copyBtn),
+      hint,
       el('p', 'muted', fill(R.portNote, { port: lines.port })),
     );
     return box;
@@ -3120,24 +3162,27 @@ export function chatgptDashboardClient(
   }
 
   /**
-   * Away from the computer (ChatGPT, OpenClaw), one quiet line in place of
-   * the On this computer section: what lives only there, and Open on the
-   * view model's `computerControls` page. Not while the whole page waits on
-   * the connection. In remote mode Open shows the tunnel instructions in
-   * place, as howLink does.
+   * Away from the computer (ChatGPT, OpenClaw), a high-contrast card in place of
+   * the On this computer section: what lives only in the full browser dashboard,
+   * and how to open it. In remote mode it uses the same disclosure toggle arrow
+   * (`<details>`) as Models above it; on a desktop host it offers a bordered Open
+   * button.
    */
   function moreOnComputer(): HTMLElement | null {
     if (onComputer() || GLOBAL_STATES.indexOf(connectionState()) >= 0) return null;
     const href = helpHref(state.data.computerControls && state.data.computerControls.href);
     if (!href) return null;
     const key = 'more-on-computer';
-    const line = add(el('div', 'section more-on-computer'), el('p', 'muted', P.moreOnComputer));
-    const remote = remoteMode();
-    const open = button(P.moreOnComputerOpen, key, remote ? () => toggleRemote(key) : () => openLink(href), 'plain');
-    open.className = 'btn link';
+    const section = el('section', 'section more-on-computer');
+    if (remoteMode()) {
+      const toggle = details('remote:' + key, doc.createTextNode(P.moreOnComputerTitle), 'more-on-computer-toggle');
+      add(toggle, el('p', 'muted', P.moreOnComputerDetail), remoteBox(key, href, undefined, true));
+      return add(section, toggle);
+    }
+    const text = add(el('div', 'row-text'), el('p', 'more-on-computer-title', P.moreOnComputerTitle), el('p', 'muted', P.moreOnComputerDetail));
+    const open = button(P.moreOnComputerOpen, key, () => openLink(href), 'plain');
     open.setAttribute('aria-label', P.moreOnComputerOpenLabel);
-    if (remote) open.setAttribute('aria-expanded', state.open['remote:' + key] ? 'true' : 'false');
-    return add(line, open, remote ? remoteBox(key, href) : null);
+    return add(section, add(el('div', 'more-on-computer-bar'), text, open));
   }
 
   /**

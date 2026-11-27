@@ -245,11 +245,19 @@ summary{cursor:pointer;border-radius:0.375rem}
 .landed{outline:3px solid var(--focus);outline-offset:4px;border-radius:10px;animation:landed-fade 2.5s ease-out 1.5s forwards}
 @keyframes landed-fade{to{outline-color:transparent}}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
-.remote-box{flex-basis:100%;margin-top:0.5rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.375rem;font-size:0.875rem}
+.remote-box{flex-basis:100%;margin-top:0.625rem;padding:0.75rem 0.875rem;border:1px solid var(--line);background:var(--bg);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.5rem;font-size:0.875rem}
 .remote-box p{margin:0}
-.more-on-computer{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
+.remote-target-field{display:flex;flex-direction:column;gap:0.25rem}
+.remote-target-field label{font-weight:600;color:var(--text);font-size:0.875rem}
+.more-on-computer{padding:0.875rem 1rem;border:1px solid var(--line);border-radius:0.75rem;background:var(--surface)}
+.more-on-computer-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem 1rem}
+.more-on-computer-title{font-size:0.9375rem;font-weight:600;color:var(--text)}
+.more-on-computer-toggle summary{font-size:0.9375rem;font-weight:600;color:var(--text);padding:0.125rem 0}
+.more-on-computer-toggle>.muted{margin-top:0.25rem}
+.more-on-computer-toggle .remote-box{margin-top:0.75rem}
 .remote-line{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
-.remote-line code{flex:1 1 16rem;min-width:0;padding:0.25rem 0.5rem;border:1px solid var(--line);border-radius:0.375rem;background:var(--bg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;overflow-wrap:anywhere;user-select:all}
+.remote-line code{flex:1 1 16rem;min-width:0;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.375rem;background:var(--surface);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;overflow-wrap:anywhere;user-select:all}
+.remote-line .btn{border-color:var(--muted);font-weight:600}
 .strong{font-weight:600}
 .error{color:var(--danger);font-weight:600}
 .picker-top{margin:0 0 0.75rem}

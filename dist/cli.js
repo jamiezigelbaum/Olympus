@@ -100802,14 +100802,21 @@ var init_vocabulary = __esm(() => {
     howOnComputer: "Do this on your computer",
     howOnComputerFix: "Fix this on your computer",
     moreOnComputer: "More controls on your computer: Private answers, anonymous answers, keys and agents",
+    moreOnComputerTitle: "Open full dashboard in your browser",
+    moreOnComputerDetail: "Private answers, anonymous answers, keys and agents",
     moreOnComputerOpen: "Open",
     moreOnComputerOpenLabel: "Open Olympus on your computer",
     remote: {
-      title: "Olympus runs on a server, so this opens on your computer through a secure tunnel.",
+      title: "Olympus runs on a server, so this opens in your browser through a secure tunnel.",
       askLine: "Ask your assistant:",
       askPhrase: "Open Olympus on my computer",
       askPhraseFor: "Open Olympus on my computer to connect {source}",
-      byHandAfterAsk: "Or do it yourself:",
+      byHandAfterAsk: "Or run one command in Terminal:",
+      oneStep: "Run this in Terminal on your computer, then open the link it prints:",
+      keepOpen: "Leave Terminal open while using the dashboard (press Ctrl+C to close the tunnel).",
+      sshTargetLabel: "Server SSH address (for example, user@my-server)",
+      sshTargetPlaceholder: "user@my-server",
+      sshTargetRequired: "Enter your server's SSH address above before copying.",
       onComputer: "On your computer, run:",
       onServer: "Then on the server, run this and open the link it prints in your computer's browser:",
       portNote: "Keep {port} on both sides of the tunnel: the link only works on that port.",
@@ -205533,7 +205540,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     landingScope: false,
     landingPrivacy: false,
     landed: null,
-    lastFailure: null
+    lastFailure: null,
+    remoteSshTarget: ""
   };
   const H = config.host;
   let nextId = 1;
@@ -206084,20 +206092,35 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const match = /^https:\/\/(?:www\.)?olympusplugin\.ai\/open\/((?:connect|fix|unreadable)\/[a-z]+)\/$/.exec(href);
     return match ? match[1] : "";
   }
-  function remoteLines(href) {
+  const SSH_TARGET_RE = /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}@)?[A-Za-z0-9][A-Za-z0-9.-]{0,190}$/;
+  function validSshTarget(value) {
+    if (typeof value !== "string")
+      return "";
+    const trimmed = value.trim();
+    return trimmed.length <= 255 && SSH_TARGET_RE.test(trimmed) ? trimmed : "";
+  }
+  function remoteLines(href, overrideTarget) {
     const remote = state.data.remote;
     const port = remote.port;
-    const target = typeof remote.sshTarget === "string" && /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}@)?[A-Za-z0-9][A-Za-z0-9.-]{0,190}$/.test(remote.sshTarget) ? remote.sshTarget : "you@your-server";
+    const configured = validSshTarget(remote.sshTarget);
+    const entered = validSshTarget(overrideTarget !== undefined ? overrideTarget : state.remoteSshTarget);
+    const target = configured || entered || "you@your-server";
     const path = openPath(href);
+    const socket = typeof remote.socketPath === "string" && /^\/[A-Za-z0-9_./-]+\/olympus\/worker\.sock$/.test(remote.socketPath) && !remote.socketPath.split("/").some((part) => part === ".." || part === ".") ? remote.socketPath : "";
+    const forward = socket ? "-o ExitOnForwardFailure=yes -L 127.0.0.1:" + port + ":" + socket : "-o ExitOnForwardFailure=yes -L 127.0.0.1:" + port + ":127.0.0.1:" + port;
+    const targetFlag = path ? " --target " + path : "";
     return {
-      onComputer: typeof remote.socketPath === "string" && /^\/[A-Za-z0-9_./-]+\/olympus\/worker\.sock$/.test(remote.socketPath) && !remote.socketPath.split("/").some((part) => part === ".." || part === ".") ? "ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:" + port + ":" + remote.socketPath + " " + target : "ssh -N -L " + port + ":127.0.0.1:" + port + " " + target,
-      onServer: "olympus dashboard --no-open" + (path ? " --target " + path : ""),
-      port
+      oneCommand: "ssh " + forward + " " + target + ` 'PATH="$HOME/.local/bin:$PATH" olympus dashboard --no-open` + targetFlag + " && cat'",
+      port,
+      hasTarget: !!(configured || entered),
+      hasConfiguredTarget: !!configured
     };
   }
-  function copyControl(code, key) {
+  function copyControl(code, key, disabled = false) {
     const R = P.remote;
     const node = button(R.copy, key, () => {
+      if (node.disabled)
+        return;
       let copied = false;
       try {
         const selection = window.getSelection();
@@ -206113,14 +206136,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       }
       node.textContent = copied ? R.copied : R.copySelected;
     }, "plain");
+    if (disabled)
+      node.disabled = true;
     return node;
   }
-  function copyLine(text, key) {
+  function copyLine(text, key, disabled = false) {
     const code = el("code", "", text);
-    return add(el("div", "remote-line"), code, copyControl(code, key));
+    return add(el("div", "remote-line"), code, copyControl(code, key, disabled));
   }
-  function remoteBox(key, href, source) {
-    if (!state.open["remote:" + key])
+  function remoteBox(key, href, source, inline = false) {
+    if (!inline && !state.open["remote:" + key])
       return null;
     const R = P.remote;
     const lines = remoteLines(href);
@@ -206131,7 +206156,31 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const phrase = source && openPath(href).indexOf("connect/") === 0 ? fill(R.askPhraseFor, { source: source.label }) : R.askPhrase;
       add(box, el("p", "", R.askLine), copyLine(phrase, key + ":remote:ask"), el("p", "muted", R.byHandAfterAsk));
     }
-    add(box, el("p", "", R.onComputer), copyLine(lines.onComputer, key + ":remote:tunnel"), el("p", "", R.onServer), copyLine(lines.onServer, key + ":remote:link"), el("p", "muted", fill(R.portNote, { port: lines.port })));
+    const codeEl = el("code", "", lines.oneCommand);
+    const copyBtn = copyControl(codeEl, key + ":remote:one", !lines.hasTarget);
+    const hint = el("p", "muted", lines.hasTarget ? R.keepOpen : R.sshTargetRequired);
+    if (!lines.hasConfiguredTarget) {
+      const inputId = "remote-ssh-" + key.replace(/[^a-z0-9_-]/gi, "-");
+      const label = el("label", "", R.sshTargetLabel);
+      label.setAttribute("for", inputId);
+      const input = el("input", "text remote-target");
+      input.id = inputId;
+      input.type = "text";
+      input.value = state.remoteSshTarget;
+      input.placeholder = R.sshTargetPlaceholder;
+      input.setAttribute("autocomplete", "off");
+      input.setAttribute("spellcheck", "false");
+      input.addEventListener("input", () => {
+        state.remoteSshTarget = input.value;
+        const next = remoteLines(href, input.value);
+        codeEl.textContent = next.oneCommand;
+        copyBtn.disabled = !next.hasTarget;
+        copyBtn.textContent = R.copy;
+        hint.textContent = next.hasTarget ? R.keepOpen : R.sshTargetRequired;
+      });
+      add(box, add(el("div", "remote-target-field"), label, input));
+    }
+    add(box, el("p", "", R.oneStep), add(el("div", "remote-line"), codeEl, copyBtn), hint, el("p", "muted", fill(R.portNote, { port: lines.port })));
     return box;
   }
   function globalReason() {
@@ -208019,14 +208068,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!href)
       return null;
     const key = "more-on-computer";
-    const line = add(el("div", "section more-on-computer"), el("p", "muted", P.moreOnComputer));
-    const remote = remoteMode();
-    const open = button(P.moreOnComputerOpen, key, remote ? () => toggleRemote(key) : () => openLink(href), "plain");
-    open.className = "btn link";
+    const section = el("section", "section more-on-computer");
+    if (remoteMode()) {
+      const toggle = details("remote:" + key, doc.createTextNode(P.moreOnComputerTitle), "more-on-computer-toggle");
+      add(toggle, el("p", "muted", P.moreOnComputerDetail), remoteBox(key, href, undefined, true));
+      return add(section, toggle);
+    }
+    const text = add(el("div", "row-text"), el("p", "more-on-computer-title", P.moreOnComputerTitle), el("p", "muted", P.moreOnComputerDetail));
+    const open = button(P.moreOnComputerOpen, key, () => openLink(href), "plain");
     open.setAttribute("aria-label", P.moreOnComputerOpenLabel);
-    if (remote)
-      open.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
-    return add(line, open, remote ? remoteBox(key, href) : null);
+    return add(section, add(el("div", "more-on-computer-bar"), text, open));
   }
   function computerSection() {
     if (!onComputer())
@@ -212558,11 +212609,19 @@ summary{cursor:pointer;border-radius:0.375rem}
 .landed{outline:3px solid var(--focus);outline-offset:4px;border-radius:10px;animation:landed-fade 2.5s ease-out 1.5s forwards}
 @keyframes landed-fade{to{outline-color:transparent}}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
-.remote-box{flex-basis:100%;margin-top:0.5rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.375rem;font-size:0.875rem}
+.remote-box{flex-basis:100%;margin-top:0.625rem;padding:0.75rem 0.875rem;border:1px solid var(--line);background:var(--bg);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.5rem;font-size:0.875rem}
 .remote-box p{margin:0}
-.more-on-computer{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
+.remote-target-field{display:flex;flex-direction:column;gap:0.25rem}
+.remote-target-field label{font-weight:600;color:var(--text);font-size:0.875rem}
+.more-on-computer{padding:0.875rem 1rem;border:1px solid var(--line);border-radius:0.75rem;background:var(--surface)}
+.more-on-computer-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem 1rem}
+.more-on-computer-title{font-size:0.9375rem;font-weight:600;color:var(--text)}
+.more-on-computer-toggle summary{font-size:0.9375rem;font-weight:600;color:var(--text);padding:0.125rem 0}
+.more-on-computer-toggle>.muted{margin-top:0.25rem}
+.more-on-computer-toggle .remote-box{margin-top:0.75rem}
 .remote-line{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
-.remote-line code{flex:1 1 16rem;min-width:0;padding:0.25rem 0.5rem;border:1px solid var(--line);border-radius:0.375rem;background:var(--bg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;overflow-wrap:anywhere;user-select:all}
+.remote-line code{flex:1 1 16rem;min-width:0;padding:0.375rem 0.625rem;border:1px solid var(--muted);border-radius:0.375rem;background:var(--surface);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;overflow-wrap:anywhere;user-select:all}
+.remote-line .btn{border-color:var(--muted);font-weight:600}
 .strong{font-weight:600}
 .error{color:var(--danger);font-weight:600}
 .picker-top{margin:0 0 0.75rem}

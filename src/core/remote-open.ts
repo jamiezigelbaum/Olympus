@@ -137,6 +137,24 @@ export function remoteOpenInstructions(input: { port: number; sshTarget?: string
   };
 }
 
+/**
+ * Single-command launch on the owner's computer: opens the loopback tunnel on
+ * the engine's port, runs `olympus dashboard --no-open` on the server so the
+ * clickable one-time launch link prints in the same Terminal window, and holds
+ * the tunnel open until Ctrl+C.
+ */
+export function remoteOpenOneCommand(input: { port: number; sshTarget?: string; target?: OpenTarget; socketPath?: string }): string {
+  const port = isValidPort(input.port) ? input.port : DEFAULT_ENGINE_PORT;
+  const sshTarget = isValidSshTarget(input.sshTarget) ? input.sshTarget.trim() : SSH_TARGET_PLACEHOLDER;
+  const path = input.target ? openTargetPath(input.target) : 'dashboard';
+  const socket = input.socketPath === undefined ? undefined : sshSocketPath(input.socketPath);
+  const forward = socket
+    ? `-o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:${socket}`
+    : `-o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:127.0.0.1:${port}`;
+  const targetFlag = path === 'dashboard' ? '' : ` --target ${path}`;
+  return `ssh ${forward} ${sshTarget} 'PATH="$HOME/.local/bin:$PATH" olympus dashboard --no-open${targetFlag} && cat'`;
+}
+
 /** Resolve at each page read: linger can outlive the graphical login session. */
 export function resolveAgentApprovalHost(input: {
   env: Record<string, string | undefined>;

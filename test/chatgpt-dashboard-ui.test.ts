@@ -383,16 +383,17 @@ describe('ready page', () => {
     ]);
   });
 
-  test('the last line names the controls only the computer has, and Open opens Olympus there', () => {
+  test('the last card names the full browser dashboard controls, and Open opens Olympus there', () => {
     const host = mount({ openai: {} });
     host.push({ structuredContent: model({ computerControls: { href: 'https://olympusplugin.ai/open/dashboard/' } }) });
     const line = host.win.document.querySelector('#app .more-on-computer')!;
     expect(line).not.toBeNull();
     // After Models, at the end of the page.
     expect(host.win.document.querySelector('#app main')!.lastElementChild).toBe(line);
-    expect(line.querySelector('p')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputer);
-    expect(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputer).toBe('More controls on your computer: Private answers, anonymous answers, keys and agents');
+    expect(line.querySelector('.more-on-computer-title')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputerTitle);
+    expect(line.querySelector('p.muted')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputerDetail);
     const open = line.querySelector('button')!;
+    expect(open.className).toBe('btn');
     expect(open.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputerOpen);
     expect(open.getAttribute('aria-label')).toBe(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputerOpenLabel);
     open.click();

@@ -22,6 +22,7 @@ import {
   isValidSshTarget,
   remoteOpenInstructions,
   remoteOpenNodeCommands,
+  remoteOpenOneCommand,
   resolveServerMode,
 } from '../src/core/remote-open.ts';
 import { OPEN_REMOTE_TOOL_NAME, isOwnerDirectTurn, openRemote, openRemoteDetails } from '../src/core/remote-open-tool.ts';
@@ -426,7 +427,7 @@ describe('the panel in remote mode', () => {
     while (hosts.length) await hosts.pop()!.happyDOM.close();
   });
 
-  test('Connect shows "Ask your assistant" and the two lines with the real port, instead of opening the /open/ page', () => {
+  test('Connect shows "Ask your assistant" and the single-step Terminal command with the real port, instead of opening the /open/ page', () => {
     const { win, sent, buttons } = mount(remoteModel({ port: 8123, sshTarget: 'jamie@sparta', agent: true }));
     hosts.push(win);
     const R = DASHBOARD_CHATGPT_PAGE_COPY.remote;
@@ -435,35 +436,51 @@ describe('the panel in remote mode', () => {
     const box = win.document.querySelector('.remote-box')!;
     expect(box).not.toBeNull();
     const lines = Array.from(box.querySelectorAll('code')).map((node) => node.textContent);
-    // The panel's own lines are exactly the engine's (core/remote-open.ts).
-    const expected = remoteOpenInstructions({ port: 8123, sshTarget: 'jamie@sparta', target: { kind: 'connect', source: 'x' } });
-    expect(lines).toEqual(['Open Olympus on my computer to connect X bookmarks', expected.onComputer, expected.onServer]);
+    // The panel's own command matches core/remote-open.ts remoteOpenOneCommand.
+    const expected = remoteOpenOneCommand({ port: 8123, sshTarget: 'jamie@sparta', target: { kind: 'connect', source: 'x' } });
+    expect(lines).toEqual(['Open Olympus on my computer to connect X bookmarks', expected]);
     expect(box.textContent).toContain(R.askLine);
     expect(box.textContent).toContain('Keep 8123 on both sides');
     expect(box.textContent).not.toMatch(/\bMac\b/);
-    expect(Array.from(box.querySelectorAll('button')).map((node) => node.textContent)).toEqual([R.copy, R.copy, R.copy]);
+    expect(Array.from(box.querySelectorAll('button')).map((node) => node.textContent)).toEqual([R.copy, R.copy]);
+    expect((box.querySelectorAll('button')[1] as unknown as HTMLButtonElement).disabled).toBe(false);
+    // Configured sshTarget needs no inline input.
+    expect(box.querySelector('input.remote-target')).toBeNull();
   });
 
-  test('Linux browser handoff prints the owner socket transport', () => {
+  test('Linux browser handoff prints the owner socket transport and lets the owner enter an SSH target when unconfigured', () => {
     const socketPath = '/run/user/1000/olympus/worker.sock';
     const model = copyDashboardViewModel(remoteModel({ port: 8010, socketPath, agent: false }));
     const { win, buttons } = mount(model);
     hosts.push(win);
     buttons().find(node => node.textContent === 'Connect')!.click();
-    const lines = Array.from(win.document.querySelectorAll('.remote-box code')).map(node => node.textContent);
-    expect(lines[0]).toBe('ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8010:/run/user/1000/olympus/worker.sock you@your-server');
+    const box = win.document.querySelector('.remote-box')!;
+    const copyBtn = box.querySelector('button') as unknown as HTMLButtonElement;
+    // Never allow copying the broken placeholder before a real SSH target is entered.
+    expect(copyBtn.disabled).toBe(true);
+    expect(box.querySelector('code')!.textContent).toBe(
+      remoteOpenOneCommand({ port: 8010, socketPath, target: { kind: 'connect', source: 'x' } }),
+    );
+    const input = box.querySelector('input.remote-target') as unknown as HTMLInputElement;
+    expect(input).not.toBeNull();
+    input.value = 'zig@sparta';
+    input.dispatchEvent(new win.Event('input', { bubbles: true }) as never);
+    expect(copyBtn.disabled).toBe(false);
+    expect(box.querySelector('code')!.textContent).toBe(
+      remoteOpenOneCommand({ port: 8010, socketPath, sshTarget: 'zig@sparta', target: { kind: 'connect', source: 'x' } }),
+    );
   });
 
-  test('without the agent route (Hermes, a hand-run worker): only the two lines, with the placeholder', () => {
+  test('without the agent route (Hermes, a hand-run worker): one command only, with Copy disabled until SSH target is filled', () => {
     const { win, buttons } = mount(remoteModel({ port: 8010, agent: false }));
     hosts.push(win);
     buttons().find((node) => node.textContent === 'Connect')!.click();
     const box = win.document.querySelector('.remote-box')!;
     expect(box.textContent).not.toContain(DASHBOARD_CHATGPT_PAGE_COPY.remote.askLine);
     expect(Array.from(box.querySelectorAll('code')).map((node) => node.textContent)).toEqual([
-      'ssh -N -L 8010:127.0.0.1:8010 you@your-server',
-      'olympus dashboard --no-open --target connect/x',
+      remoteOpenOneCommand({ port: 8010, target: { kind: 'connect', source: 'x' } }),
     ]);
+    expect((box.querySelector('button') as unknown as HTMLButtonElement).disabled).toBe(true);
   });
 
   // Jamie's live test, 2026-10-10: the OpenClaw Control UI tab on a headless
@@ -492,21 +509,30 @@ describe('the panel in remote mode', () => {
     const box = win.document.querySelector('.remote-box')!;
     expect(box).not.toBeNull();
     expect(box.textContent).toContain(DASHBOARD_CHATGPT_PAGE_COPY.remote.askLine);
-    const expected = remoteOpenInstructions({ port: 19789, target: { kind: 'fix', section: 'models' } });
-    expect(Array.from(box.querySelectorAll('code')).map((node) => node.textContent)).toEqual(['Open Olympus on my computer', expected.onComputer, expected.onServer]);
+    const expected = remoteOpenOneCommand({ port: 19789, target: { kind: 'fix', section: 'models' } });
+    expect(Array.from(box.querySelectorAll('code')).map((node) => node.textContent)).toEqual(['Open Olympus on my computer', expected]);
     expect(win.document.body.innerHTML).not.toContain('olympusplugin.ai/open/');
   });
 
-  test('the last line\'s Open shows the two lines for the plain dashboard, instead of opening the /open/ page', () => {
-    const { win, sent } = mount({ ...remoteModel({ port: 8010, agent: false }), computerControls: { href: 'https://olympusplugin.ai/open/dashboard/' } });
+  test('the last card uses a disclosure toggle arrow in remote mode and shows the single-step dashboard command', () => {
+    const { win, sent } = mount({
+      ...remoteModel({ port: 8010, sshTarget: 'zig@sparta', agent: false }),
+      computerControls: { href: 'https://olympusplugin.ai/open/dashboard/' },
+    });
     hosts.push(win);
-    const open = win.document.querySelector('.more-on-computer button') as unknown as HTMLButtonElement;
-    expect(open.getAttribute('aria-expanded')).toBe('false');
-    open.click();
+    const toggle = win.document.querySelector('.more-on-computer details.more-on-computer-toggle') as unknown as HTMLDetailsElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.open).toBe(false);
+    expect(toggle.querySelector('summary')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputerTitle);
+    expect(toggle.querySelector('p.muted')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.moreOnComputerDetail);
+    toggle.open = true;
+    toggle.dispatchEvent(new win.Event('toggle') as never);
     expect(sent.some((message) => message.method === 'ui/open-link')).toBe(false);
-    const box = win.document.querySelector('.more-on-computer .remote-box')!;
-    const expected = remoteOpenInstructions({ port: 8010, target: { kind: 'dashboard' } });
-    expect(Array.from(box.querySelectorAll('code')).map((node) => node.textContent)).toEqual([expected.onComputer, expected.onServer]);
+    const box = toggle.querySelector('.remote-box')!;
+    expect(Array.from(box.querySelectorAll('code')).map((node) => node.textContent)).toEqual([
+      remoteOpenOneCommand({ port: 8010, sshTarget: 'zig@sparta', target: { kind: 'dashboard' } }),
+    ]);
+    expect((box.querySelector('button') as unknown as HTMLButtonElement).disabled).toBe(false);
   });
 
   test('not remote: Connect still opens the /open/ page', () => {
