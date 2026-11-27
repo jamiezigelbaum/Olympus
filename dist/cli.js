@@ -100161,6 +100161,8 @@ function dashboardUnreadableUnsupportedPhrase(source) {
   return `${itemsPhrase(source, count)} in formats Olympus can't read yet${formats.length ? ` (${formats.join(", ")})` : ""}`;
 }
 function dashboardWaitingToReadPhrase(source) {
+  if (source.extraction_caught_up === true)
+    return;
   const count = dashboardWorkingSummary(source)?.waiting_items;
   return count ? `${itemsPhrase(source, count)} waiting to be read` : undefined;
 }
@@ -145585,7 +145587,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     ...mediaStorage ? { media_storage: mediaStorage } : {},
     ...metadataSync ? { metadata_sync: metadataSync } : {},
     ...definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {},
-    ...extractionCaughtUpFromSchedulers(schedulers, queue, ingestionHealth, answerReadiness) ? { extraction_caught_up: true } : {},
+    ...extractionCaughtUpFromSchedulers(schedulers, coverage, queue, ingestionHealth, answerReadiness) ? { extraction_caught_up: true } : {},
     ...definition.sync_name ? { sync_name: definition.sync_name } : {}
   };
   card.setup = dashboardSourceSetupStatus(card);
@@ -146848,7 +146850,7 @@ function metadataTraversalCompleteFromSchedulers(schedulers) {
   }
   return walks.length === 0 ? unreported ? false : undefined : walks.every(Boolean);
 }
-function extractionCaughtUpFromSchedulers(schedulers, queue, ingestionHealth, answerReadiness) {
+function extractionCaughtUpFromSchedulers(schedulers, coverage, queue, ingestionHealth, answerReadiness) {
   if (queue.waiting > 0 || queue.active > 0 || queue.needs_attention > 0)
     return false;
   if (ingestionHealth.stuck_count > 0 || ingestionHealth.drain_state === "disabled" || ingestionHealth.drain_state === "held")
@@ -146858,7 +146860,8 @@ function extractionCaughtUpFromSchedulers(schedulers, queue, ingestionHealth, an
   const extractTasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "extract"));
   if (extractTasks.length === 0)
     return false;
-  return extractTasks.every((task) => !task.running && task.consecutive_failures === 0 && !task.degraded_reason && task.checkpoint_active !== true && task.last_result?.status === "idle");
+  const hasReadContent = coverage.content_ready_items > 0;
+  return extractTasks.every((task) => !task.running && task.consecutive_failures === 0 && !task.degraded_reason && (hasReadContent || task.checkpoint_active !== true) && task.last_result?.status === "idle");
 }
 function changeWatchNote(scheduler) {
   const watch = scheduler?.change_watch;

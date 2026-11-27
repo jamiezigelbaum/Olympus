@@ -325,9 +325,9 @@ describe('sources that do report the walk keep their verdict', () => {
         connectedAt: '2026-07-01T00:00:00.000Z',
       }],
     };
-    const driveWith = (extractTask: Record<string, unknown>, queued = 0) => {
+    const driveWith = (extractTask: Record<string, unknown>, queued = 0, readItems = 58) => {
       const c = corpus({ id: 'internal.drive.docs', family: 'file', provider: 'google_drive', items: 302 });
-      c.counts = { ...c.counts, items_with_text: 58, items_embedded: 58, extraction_jobs_queued: queued, extraction_jobs_queued_actionable: queued };
+      c.counts = { ...c.counts, items_with_text: readItems, items_embedded: readItems, extraction_jobs_queued: queued, extraction_jobs_queued_actionable: queued };
       const status: SourceIndexStatusResult = {
         kind: 'source_index_status',
         generated_at: NOW.toISOString(),
@@ -368,9 +368,15 @@ describe('sources that do report the walk keep their verdict', () => {
     expect(idle.extraction_caught_up).toBe(true);
     expect(dashboardSourceProgress(idle, { now: NOW }).settled).toBe(true);
 
-    const midScan = driveWith({ checkpoint_active: true, last_result: { status: 'idle', counts: { jobs_queued: 0 } } });
-    expect(midScan.extraction_caught_up).toBeUndefined();
-    expect(dashboardSourceProgress(midScan, { now: NOW }).settled).toBe(false);
+    // An already-ingested source walking its ring cursor while idle is still caught up.
+    const ringCursorIdle = driveWith({ checkpoint_active: true, last_result: { status: 'idle', counts: { jobs_queued: 0 } } }, 0, 58);
+    expect(ringCursorIdle.extraction_caught_up).toBe(true);
+    expect(dashboardSourceProgress(ringCursorIdle, { now: NOW }).settled).toBe(true);
+
+    // A first-pass scan with zero content read yet and an open checkpoint stays in Reading.
+    const firstScanMidWalk = driveWith({ checkpoint_active: true, last_result: { status: 'idle', counts: { jobs_queued: 0 } } }, 0, 0);
+    expect(firstScanMidWalk.extraction_caught_up).toBeUndefined();
+    expect(dashboardSourceProgress(firstScanMidWalk, { now: NOW }).settled).toBe(false);
 
     const inProgress = driveWith({ last_result: { status: 'progress', counts: { jobs_queued: 2 } } });
     expect(inProgress.extraction_caught_up).toBeUndefined();

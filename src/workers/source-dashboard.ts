@@ -3147,7 +3147,7 @@ function sourceCardFromDefinition(
     ...(mediaStorage ? { media_storage: mediaStorage } : {}),
     ...(metadataSync ? { metadata_sync: metadataSync } : {}),
     ...(definition.content_arrives_extracted === true ? { content_arrives_extracted: true } : {}),
-    ...(extractionCaughtUpFromSchedulers(schedulers, queue, ingestionHealth, answerReadiness)
+    ...(extractionCaughtUpFromSchedulers(schedulers, coverage, queue, ingestionHealth, answerReadiness)
       ? { extraction_caught_up: true as const }
       : {}),
     ...(definition.sync_name ? { sync_name: definition.sync_name } : {}),
@@ -5369,6 +5369,7 @@ function metadataTraversalCompleteFromSchedulers(
  */
 function extractionCaughtUpFromSchedulers(
   schedulers: readonly SourceSchedulerSourceStatus[],
+  coverage: DashboardSourceCard['coverage'],
   queue: DashboardSourceCard['queue_health'],
   ingestionHealth: DashboardSourceCard['ingestion_health'],
   answerReadiness: DashboardSourceCard['answer_readiness'],
@@ -5378,11 +5379,16 @@ function extractionCaughtUpFromSchedulers(
   if (answerReadiness.label === 'Content extraction is stalled') return false;
   const extractTasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === 'extract'));
   if (extractTasks.length === 0) return false;
+  // Large already-ingested corpora (Dropbox, Telegram, WhatsApp) continuously
+  // walk already-seen items with a ring cursor (`checkpoint_active: true`)
+  // while reporting `status: 'idle'` and zero queued/processed jobs. Only block
+  // on an open checkpoint when no content has been read yet (first-pass scan).
+  const hasReadContent = coverage.content_ready_items > 0;
   return extractTasks.every((task) => (
     !task.running
     && task.consecutive_failures === 0
     && !task.degraded_reason
-    && task.checkpoint_active !== true
+    && (hasReadContent || task.checkpoint_active !== true)
     && task.last_result?.status === 'idle'
   ));
 }

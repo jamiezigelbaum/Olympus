@@ -1428,6 +1428,7 @@ export function dashboardUnreadableUnsupportedPhrase(source: DashboardSourceCard
 
 // Waiting is the unaccounted-for remainder of a defensible summary.
 export function dashboardWaitingToReadPhrase(source: DashboardSourceCard): string | undefined {
+  if (source.extraction_caught_up === true) return undefined;
   const count = dashboardWorkingSummary(source)?.waiting_items;
   return count ? `${itemsPhrase(source, count)} waiting to be read` : undefined;
 }
