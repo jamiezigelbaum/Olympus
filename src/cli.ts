@@ -3582,7 +3582,8 @@ export async function runDashboardCommand(
   const mintBase = socketPath ? new URL(`http://127.0.0.1:${new URL(base).port || '80'}`).origin : base;
   const openUrl = await mintDashboardOpeningUrl(mintBase, token, { ...dependencies, commandHint: olympusCommandHint() });
   if (socketError !== undefined) throw socketError;
-  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {}) }).onComputer : undefined;
+  const sshTarget = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv({ env: process.env }) }).sshTarget;
+  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(sshTarget ? { sshTarget } : {}) }).onComputer : undefined;
   let opened = false;
   if (!socketPath && !dependencies.noOpen) {
     try {
@@ -3656,7 +3657,8 @@ function runDashboardReadOnlyCommand(
     );
   }
   const socketPath = workerSocketPath();
-  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {}) }).onComputer : undefined;
+  const sshTarget = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv({ env: process.env }) }).sshTarget;
+  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || '80'), socketPath, ...(sshTarget ? { sshTarget } : {}) }).onComputer : undefined;
   let opened = false;
   if (!socketPath && !dependencies.noOpen) {
     try {

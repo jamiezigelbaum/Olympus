@@ -20148,6 +20148,7 @@ var init_vocabulary = __esm(() => {
       itemsMany: "{n} items",
       checked: "checked {when}",
       progress: "In progress",
+      paused: "Paused",
       left: "about {duration} left",
       waitBudget: "daily {api} API budget used",
       waitRateLimit: "{api} rate limit reached",

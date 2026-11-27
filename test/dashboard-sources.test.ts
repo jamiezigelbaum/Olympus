@@ -135,6 +135,74 @@ describe('Sources page', () => {
     expect(sourceLogoTile('readwise.library')).toContain('>R<');
     expect(sourceLogoTile('someone.else')).toContain('>S<');
   });
+
+  test('Sources stays calm on unreadable files, operator-paused budgets, imported archives, and routine syncs', () => {
+    const calm = {
+      generated_at: new Date().toISOString(),
+      sources: [
+        {
+          source_id: 'gmail.email', label: 'Gmail', family: 'email',
+          connection: { state: 'synced', action: { kind: 'none' } },
+          coverage: { indexed_items: 192_988 },
+          freshness: { label: 'Last checked less than 1 hour ago', stale: false },
+          answer_readiness: { state: 'needs_attention', label: 'Many files cannot be read' },
+          queue_health: { label: 'Caught up', failing_tasks: 0 },
+        },
+        {
+          source_id: 'dropbox.files', label: 'Dropbox', family: 'file',
+          connection: { state: 'synced', action: { kind: 'none' } },
+          coverage: { indexed_items: 453_343 },
+          freshness: { label: 'Last checked less than 1 hour ago', stale: false },
+          answer_readiness: { state: 'needs_attention', label: 'Many files cannot be read' },
+          schedule: { running: true, consecutive_failures: 0 },
+          queue_health: { label: 'Caught up', failing_tasks: 0 },
+        },
+        {
+          source_id: 'x.bookmarks', label: 'X bookmarks', family: 'x',
+          connection: { state: 'synced', action: { kind: 'none' } },
+          coverage: { indexed_items: 3_228 },
+          freshness: { label: 'Last checked 3 hours ago; refresh is late', stale: true },
+          schedule: { running: false, consecutive_failures: 0, degraded_reason: 'daily_cost_guard' },
+          queue_health: { label: 'Caught up', failing_tasks: 0 },
+        },
+        {
+          source_id: 'reflect.notes', label: 'Reflect', family: 'note',
+          connection: { state: 'synced', label: '1 archive imported', action: { kind: 'archive_import' } },
+          coverage: { indexed_items: 0 },
+          freshness: { label: 'Waiting for the first sync', stale: false },
+        },
+        {
+          source_id: 'google_drive.docs', label: 'Google Drive', family: 'file',
+          connection: { state: 'waiting_for_first_sync', action: { kind: 'none' } },
+          coverage: { indexed_items: 0 },
+          freshness: { label: 'Waiting for the first sync', stale: false },
+        },
+      ],
+    } as unknown as View;
+    const doc = new Window().document;
+    doc.body.innerHTML = renderDashboardConnectPage(calm, unlockedOptions);
+
+    const gmail = doc.querySelector('[data-source-row="gmail.email"]')!;
+    expect(gmail.querySelector('.logodot.ok')).not.toBeNull();
+    expect(gmail.textContent).toContain('192,988 messages');
+
+    const dropbox = doc.querySelector('[data-source-row="dropbox.files"]')!;
+    expect(dropbox.querySelector('.logodot.syncing')).not.toBeNull();
+    expect(dropbox.textContent).toContain('453,343 files');
+
+    const x = doc.querySelector('[data-source-row="x.bookmarks"]')!;
+    expect(x.querySelector('.logodot.ok')).not.toBeNull();
+    expect(x.textContent).toContain('3,228 posts · Last checked 3 hours ago · Sync paused');
+    expect(x.textContent).not.toContain('refresh is late');
+
+    const reflect = doc.querySelector('[data-source-row="reflect.notes"]')!;
+    expect(reflect.querySelector('.logodot.ok')).not.toBeNull();
+    expect(reflect.textContent).toContain('1 archive imported');
+    expect(reflect.textContent).not.toContain('Waiting for the first sync');
+
+    const drive = doc.querySelector('[data-source-row="google_drive.docs"]')!;
+    expect(drive.querySelector('.logodot.working')).not.toBeNull();
+  });
 });
 
 describe('Sources in the browser', () => {

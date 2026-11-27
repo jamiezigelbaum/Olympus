@@ -633,16 +633,53 @@ describe('the panel on the computer', () => {
     expect(doc.querySelector('[data-home-status]')!.textContent).toContain('1 thing needs you');
   });
 
-  test('Home shows the earlier-build privacy check counts after the last verdict', async () => {
-    const data = model({
+  test('Home shows the earlier-build privacy check counts while work remains, and hides them once finished', async () => {
+    const remaining = model({
+      sources: [TELEGRAM],
+      privacy: { configured: true, ruleCount: 0, pendingCount: 0, legacyPersonalBodies: { held: 12, judged: 7 } },
+    });
+    delete remaining.progress;
+    const activePage = await onHost(COMPUTER, remaining);
+    expect(activePage.win.document.querySelector('.home-progress')).toBeNull();
+    expect(activePage.win.document.querySelector('[data-home-status]')?.textContent)
+      .toContain('Held for a privacy check from earlier builds: 12 · Checked so far: 7');
+
+    const finished = model({
       sources: [TELEGRAM],
       privacy: { configured: true, ruleCount: 0, pendingCount: 0, legacyPersonalBodies: { held: 12, judged: 12 } },
     });
+    delete finished.progress;
+    const donePage = await onHost(COMPUTER, finished);
+    expect(donePage.win.document.querySelector('[data-home-status]')?.textContent)
+      .not.toContain('Held for a privacy check from earlier builds');
+  });
+
+  test('Home stays up to date with a pulsing green dot during routine background refreshes', async () => {
+    const refreshing = model({
+      sources: [{ ...TELEGRAM, status: 'Fresh', syncing: true } as DashboardViewModelV1['sources'][number]],
+    });
+    delete refreshing.progress;
+    const page = await onHost(COMPUTER, refreshing);
+    const status = page.win.document.querySelector('[data-home-status]')!;
+    expect(status.getAttribute('data-home-status')).toBe('ok');
+    expect(status.textContent).toContain('Olympus is up to date');
+    expect(status.querySelector('.dot')!.className).toBe('dot tone-good syncing');
+  });
+
+  test('Home hides passive per-file size skips and labels budget-only waits as Paused', async () => {
+    const data = model({
+      sources: [TELEGRAM],
+      waits: [
+        { sourceId: 'dropbox.files', label: 'Dropbox', reason: 'limit', api: 'Dropbox', limitLabel: 'Dropbox file size', since: '2026-11-10T12:00:00.000Z', limit: 8_000_000, used: 491_924_199, unit: 'bytes', waiting: { items: 142 } },
+        { sourceId: 'x.bookmarks', label: 'X bookmarks', reason: 'limit', api: 'X', limitLabel: 'daily X spending budget used', since: '2026-11-10T12:00:00.000Z', limit: 2, used: 2, unit: 'usd', resumesAt: '2026-11-11T00:00:00.000Z' },
+      ],
+    });
     delete data.progress;
     const page = await onHost(COMPUTER, data);
-    expect(page.win.document.querySelector('.home-progress')).toBeNull();
-    expect(page.win.document.querySelector('[data-home-status]')?.textContent)
-      .toContain('Held for a privacy check from earlier builds: 12 · Checked so far: 12');
+    const doc = page.win.document;
+    expect(doc.querySelector('[data-source-wait="dropbox.files"]')).toBeNull();
+    expect(doc.querySelector('[data-source-wait="x.bookmarks"]')).not.toBeNull();
+    expect(doc.querySelector('.home-progress h2')!.textContent).toBe('Paused');
   });
 
   test('Home shows items waiting for an embedding choice before any legacy body is held', async () => {

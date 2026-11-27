@@ -62,7 +62,16 @@ import { DASHBOARD_SETTINGS_ZKAPI_ID, dashboardPrivacyTabs, PRIVACY_TABS_CSS } f
 import { dashboardLocalPageHref } from '../host-page.ts';
 import { dashboardTopNav, TOP_NAV_CSS, type DashboardTab } from '../top-nav.ts';
 import { sourceLogoTile, SOURCE_LOGO_CSS } from '../source-logos.ts';
-import { dashboardActionLabel, dashboardAttentionLine, dashboardScopePending, DASHBOARD_DISCONNECTED_DATA_KEPT } from '../vocabulary.ts';
+import {
+  DASHBOARD_DISCONNECTED_DATA_KEPT,
+  DASHBOARD_MANY_UNREADABLE_LABEL,
+  dashboardActionLabel,
+  dashboardAttentionLine,
+  dashboardItemNoun,
+  dashboardOperatorPaused,
+  dashboardScopePending,
+  dashboardSyncKeepsFailing,
+} from '../vocabulary.ts';
 import { renderUpdateNotice, UPDATE_NOTICE_CSS } from '../update-now.ts';
 import type { SelfUpdateStatus } from '../../../core/self-update.ts';
 import { MODEL_PICKER_CSS, renderAnswerModelPickers, renderZkapiModelPicker } from '../model-pickers.ts';
@@ -295,14 +304,50 @@ function sourceFacts(source: DashboardSourceCard): string {
   if (dashboardScopePending(source)) return dashboardAttentionLine(source);
   const facts: string[] = [];
   const items = source.coverage?.indexed_items ?? 0;
-  if (items > 0) facts.push(`${items.toLocaleString('en-US')} ${MESSAGING_SOURCES.has(source.source_id) ? 'messages' : 'items'}`);
-  if (source.freshness?.label) facts.push(source.freshness.label);
+  if (items > 0) {
+    const noun = source.family ? dashboardItemNoun(source) : (MESSAGING_SOURCES.has(source.source_id) ? 'messages' : 'items');
+    facts.push(`${items.toLocaleString('en-US')} ${noun}`);
+  }
+  if (source.connection.action?.kind === 'archive_import' && source.connection.label) {
+    facts.push(source.connection.label);
+  } else if (dashboardOperatorPaused(source)) {
+    const base = source.freshness?.label?.replace(/;\s*refresh is late$/i, '').trim();
+    if (base) facts.push(base);
+    facts.push('Sync paused');
+  } else if (source.freshness?.label) {
+    facts.push(source.freshness.label);
+  }
   return facts.join(' · ');
 }
 
-function sourceStatus(source: DashboardSourceCard): 'ok' | 'attention' {
-  return source.connection.state === 'reauth_required' || dashboardScopePending(source) || source.freshness?.stale
-    || source.schedule?.consecutive_failures || source.answer_readiness?.state === 'needs_attention' ? 'attention' : 'ok';
+function sourceStatus(source: DashboardSourceCard): 'ok' | 'syncing' | 'working' | 'attention' {
+  const paused = dashboardOperatorPaused(source);
+  const archiveOnly = source.connection.action?.kind === 'archive_import';
+  const actionableReadiness = source.answer_readiness?.state === 'needs_attention'
+    && source.answer_readiness.label !== DASHBOARD_MANY_UNREADABLE_LABEL;
+  const keepsFailing = source.queue_health ? dashboardSyncKeepsFailing(source) : (source.schedule?.consecutive_failures ?? 0) >= 3 && !paused;
+  if (
+    source.connection.state === 'reauth_required'
+    || source.connection.state === 'awaiting_consent'
+    || !!source.connection.provider_refusal
+    || (source.connection.imports_attention?.length ?? 0) > 0
+    || !!source.storage_notice
+    || !!source.media_storage
+    || dashboardScopePending(source)
+    || keepsFailing
+    || actionableReadiness
+    || (source.freshness?.stale === true && !paused && !archiveOnly)
+  ) {
+    return 'attention';
+  }
+  const items = source.coverage?.indexed_items ?? 0;
+  if (source.connection.state === 'waiting_for_first_sync' || (source.connection.state === 'syncing' && items === 0)) {
+    return 'working';
+  }
+  if (source.schedule?.running === true || source.connection.state === 'syncing') {
+    return 'syncing';
+  }
+  return 'ok';
 }
 
 /**
@@ -811,7 +856,10 @@ export function renderDashboardHelpPage(options?: DashboardPageOptions): string 
 }
 
 function sourceSupportBlock(source: DashboardSourceCard): string {
-  if (!(source.schedule?.consecutive_failures || source.connection.state === 'reauth_required' || source.answer_readiness?.state === 'needs_attention')) return '';
+  const keepsFailing = source.queue_health ? dashboardSyncKeepsFailing(source) : (source.schedule?.consecutive_failures ?? 0) >= 3 && !dashboardOperatorPaused(source);
+  const actionableReadiness = source.answer_readiness?.state === 'needs_attention'
+    && source.answer_readiness.label !== DASHBOARD_MANY_UNREADABLE_LABEL;
+  if (!(keepsFailing || source.connection.state === 'reauth_required' || !!source.connection.provider_refusal || actionableReadiness)) return '';
   const id = `source-support-${source.source_id.replace(/[^a-z0-9-]/gi, '-')}`;
   const report = sourceSupportDetails({ sourceId: source.source_id, state: source.connection.state, failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash });
   return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;

@@ -1970,6 +1970,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
     itemsMany: '{n} items',
     checked: 'checked {when}',
     progress: 'In progress',
+    paused: 'Paused',
     /** A first index's time left, after its percent: "about 40 min left". */
     left: 'about {duration} left',
     /** A source Olympus parked on its own budget (#1044), and when it resumes. */

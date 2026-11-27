@@ -28,10 +28,10 @@ const LETTERS: Readonly<Record<string, { letter: string; color: string }>> = {
 
 /**
  * The logo tile: the product's mark on a small rounded tile, with the status
- * dot on its corner when a status is given ('ok' green, 'attention' orange,
- * 'off' grey).
+ * dot on its corner when a status is given ('ok' green, 'syncing' pulsing
+ * green, 'working' yellow, 'attention' orange, 'off' grey).
  */
-export function sourceLogoTile(sourceId: string, status?: 'ok' | 'attention' | 'off'): string {
+export function sourceLogoTile(sourceId: string, status?: 'ok' | 'syncing' | 'working' | 'attention' | 'off'): string {
   const brand = BRANDS[sourceId];
   const glyph = GLYPHS[sourceId];
   const letter = LETTERS[sourceId];
@@ -62,6 +62,10 @@ export const SOURCE_LOGO_CSS = `
 .logoletter { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; color: #fff; font-weight: 700; }
 .logodot { position: absolute; right: -3px; bottom: -3px; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--bg, #111); }
 .logodot.ok { background: #3fb950; }
+.logodot.syncing { background: #3fb950; animation: logodot-pulse 1.8s ease-in-out infinite; }
+.logodot.working { background: #d29922; }
 .logodot.attention { background: #e3a03a; }
 .logodot.off { background: #8b8b8b; }
+@keyframes logodot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .logodot.syncing { animation: none; } }
 `;

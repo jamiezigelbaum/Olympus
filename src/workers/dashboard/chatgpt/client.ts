@@ -2840,8 +2840,21 @@ export function chatgptDashboardClient(
     const Hm = P.home;
     // Source indexing, a model download, or an archive being read or removed.
     const running = moving();
+    // Yellow dot and "catching up" on Home only for initial ingestion, archive
+    // import, or model install; routine day-to-day refresh syncing keeps
+    // "Olympus is up to date" with a pulsing green dot.
+    const initialOrImport = archivesMoving()
+      || Object.keys(state.importStarted).length > 0
+      || (!!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== 'failed'))
+      || (!!data.progress && !progressFinished(data.progress) && data.progress.phase === 'initial')
+      || sources.some((source: Any) => {
+        if (!source || typeof source !== 'object') return false;
+        if (source.connecting) return true;
+        const p = sourceProgress(source);
+        return !!p && !p.stalled && p.phase !== 'refresh';
+      });
     const title = needs > 0 ? (needs === 1 ? Hm.needsYouOne : fill(Hm.needsYouMany, { n: count(needs) }))
-      : running ? Hm.catchingUp : Hm.upToDate;
+      : initialOrImport ? Hm.catchingUp : Hm.upToDate;
     const connected = sources.filter((source: Any) => String(source && source.status) !== 'Off').length;
     const items = state.computerMeta && typeof state.computerMeta.indexedItems === 'number' && isFinite(state.computerMeta.indexedItems)
       ? Math.max(0, Math.round(state.computerMeta.indexedItems)) : 0;
@@ -2849,17 +2862,6 @@ export function chatgptDashboardClient(
     if (items > 0) facts.push(items === 1 ? Hm.itemsOne : fill(Hm.itemsMany, { n: count(items) }));
     const when = ago(data.generatedAt);
     if (when) facts.push(fill(Hm.checked, { when }));
-    // Yellow dot on Home only for initial ingestion, archive import, or model
-    // install; routine day-to-day refresh syncing pulses green.
-    const initialOrImport = archivesMoving()
-      || Object.keys(state.importStarted).length > 0
-      || (!!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== 'failed'))
-      || sources.some((source: Any) => {
-        if (!source || typeof source !== 'object') return false;
-        if (source.connecting) return true;
-        const p = sourceProgress(source);
-        return !!p && !p.stalled && p.phase !== 'refresh';
-      });
     const dotClass = needs > 0 ? 'dot tone-warn' : running ? (initialOrImport ? 'dot tone-run' : 'dot tone-good syncing') : 'dot tone-good';
     const dot = el('span', dotClass);
     dot.setAttribute('aria-hidden', 'true');
@@ -2867,7 +2869,7 @@ export function chatgptDashboardClient(
     const earlier = legacyPersonalProgressText(data.privacy);
     if (earlier) add(text, el('p', 'muted', earlier));
     const card = add(el('section', 'home-status'), dot, text);
-    card.setAttribute('data-home-status', needs > 0 ? 'needs' : running ? 'running' : 'ok');
+    card.setAttribute('data-home-status', needs > 0 ? 'needs' : initialOrImport ? 'running' : 'ok');
     return card;
   }
 
@@ -2875,7 +2877,8 @@ export function chatgptDashboardClient(
     const progress = info?.legacyPersonalBodies;
     if (!progress) return undefined;
     const parts = [];
-    if (progress.held > 0 && isFinite(progress.held) && isFinite(progress.judged)) {
+    // Hide the earlier-build migration counter once every held item has been judged.
+    if (progress.held > 0 && isFinite(progress.held) && isFinite(progress.judged) && progress.judged < progress.held) {
       parts.push(fill(config.privacy.copy.legacyPersonalBodies, { held: count(progress.held), judged: count(progress.judged) }));
     }
     if (progress.waiting > 0 && isFinite(progress.waiting)) {
@@ -2977,16 +2980,24 @@ export function chatgptDashboardClient(
    * nothing is in progress.
    */
   function homeProgressSection(data: Any): HTMLElement | null {
-    const rows: HTMLElement[] = [];
+    const activeRows: HTMLElement[] = [];
+    const waitRows: HTMLElement[] = [];
     const progress = data.progress;
-    if (progress && !progressFinished(progress)) rows.push(homeIndexRow(progress));
-    if (data.models) for (const entry of installLines(data.models)) if (entry.state !== 'failed') rows.push(add(el('li', 'row home-line'), installLine(entry)));
+    if (progress && !progressFinished(progress)) activeRows.push(homeIndexRow(progress));
+    if (data.models) for (const entry of installLines(data.models)) if (entry.state !== 'failed') activeRows.push(add(el('li', 'row home-line'), installLine(entry)));
     const waits = Array.isArray(data.waits) ? data.waits : [];
-    for (const wait of waits) { const row = waitRow(wait); if (row) rows.push(row); }
+    for (const wait of waits) {
+      // Passive per-file size skips are standing extraction filters, not active jobs or temporary pauses.
+      if (wait && wait.unit === 'bytes') continue;
+      const row = waitRow(wait);
+      if (row) waitRows.push(row);
+    }
     const pending = privacyPendingRow(data);
-    if (pending) rows.push(pending);
+    if (pending) activeRows.push(pending);
+    const rows = activeRows.concat(waitRows);
     if (!rows.length) return null;
-    const section = add(el('section', 'section home-progress'), el('h2', '', P.home.progress));
+    const heading = activeRows.length > 0 ? P.home.progress : P.home.paused;
+    const section = add(el('section', 'section home-progress'), el('h2', '', heading));
     const list = el('ul', 'rows');
     for (const row of rows) add(list, row);
     return add(section, list);
@@ -3057,13 +3068,22 @@ export function chatgptDashboardClient(
     return local === utc ? fill(P.home.resumesUtc, { utc }) : fill(P.home.resumes, { local, utc });
   }
 
-  /** "$1.95 of $2.00" or "3,980 of 4,000 requests": rounded the way people read them. */
+  /** "$1.95 of $2.00", "469 MB of 8 MB", or "3,980 of 4,000 requests": rounded the way people read them. */
   function amountWords(used: Any, limit: Any, unit: string): string {
     const usd = unit === 'usd';
+    const bytes = unit === 'bytes';
+    const formatBytes = (value: number): string => {
+      if (value >= 1_073_741_824) return (value / 1_073_741_824).toFixed(value >= 10_737_418_240 ? 0 : 1).replace(/\.0$/, '') + ' GB';
+      if (value >= 1_048_576) return (value / 1_048_576).toFixed(value >= 10_485_760 ? 0 : 1).replace(/\.0$/, '') + ' MB';
+      if (value >= 1024) return Math.round(value / 1024).toLocaleString('en-US') + ' KB';
+      return Math.round(value).toLocaleString('en-US') + ' bytes';
+    };
     const say = (value: Any) => (typeof value === 'number' && isFinite(value)
-      ? usd ? '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : Math.round(value).toLocaleString('en-US')
+      ? usd ? '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : bytes ? formatBytes(value)
+        : Math.round(value).toLocaleString('en-US')
       : '?');
-    return fill(P.home.amountUsed, { used: say(used), limit: say(limit), unit: usd ? '' : unit }).replace(/\s+$/, '');
+    return fill(P.home.amountUsed, { used: say(used), limit: say(limit), unit: usd || bytes ? '' : unit }).replace(/\s+$/, '');
   }
 
   /** "X bookmarks · daily X API budget used · resumes at 01:00 (00:00 UTC)": no button (#1044). */

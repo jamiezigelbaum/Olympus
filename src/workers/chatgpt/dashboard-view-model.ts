@@ -345,6 +345,13 @@ export function buildChatGptDashboardViewModel(
     .sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index)
     .map(({ entry }) => entry);
 
+  const formatByteLimit = (bytes: number): string => {
+    if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(bytes >= 10_737_418_240 ? 0 : 1).replace(/\.0$/, '')} GB`;
+    if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(bytes >= 10_485_760 ? 0 : 1).replace(/\.0$/, '')} MB`;
+    if (bytes >= 1024) return `${Math.round(bytes / 1024).toLocaleString('en-US')} KB`;
+    return `${Math.round(bytes).toLocaleString('en-US')} bytes`;
+  };
+
   const waits: DashboardSourceWait[] = [];
   for (const stop of stops) {
     const registered = limits.find((entry) => entry.id === stop.id);
@@ -356,7 +363,9 @@ export function buildChatGptDashboardViewModel(
     const raiseTo = stop.toContinue?.raiseTo ?? Math.ceil(Math.max(1, (stop.limit ?? 0) * 2, (stop.used ?? 0) + 1));
     const fix: DashboardFix | undefined = limit.continue === 'none' ? undefined : {
       label: limit.continue === 'raise'
-        ? limit.unit === 'usd' ? `Raise to $${raiseTo.toLocaleString('en-US')} today` : `Raise to ${raiseTo.toLocaleString('en-US')} ${limit.unit === 'calls' && raiseTo === 1 ? 'call' : limit.unit}`
+        ? limit.unit === 'usd' ? `Raise to $${raiseTo.toLocaleString('en-US')} today`
+          : limit.unit === 'bytes' ? `Raise to ${formatByteLimit(raiseTo)}`
+          : `Raise to ${raiseTo.toLocaleString('en-US')} ${limit.unit === 'calls' && raiseTo === 1 ? 'call' : limit.unit}`
         : limit.continue === 'refill' ? 'Refill — re-check' : 'Run once',
       tool: 'olympus_limits', args: { action: 'continue', id: stop.id, subject: limitStopReference(stop),
         ...(limit.continue === 'raise' ? { to: raiseTo } : {}) },

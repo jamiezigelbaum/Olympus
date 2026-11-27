@@ -100671,6 +100671,7 @@ var init_vocabulary = __esm(() => {
       itemsMany: "{n} items",
       checked: "checked {when}",
       progress: "In progress",
+      paused: "Paused",
       left: "about {duration} left",
       waitBudget: "daily {api} API budget used",
       waitRateLimit: "{api} rate limit reached",
@@ -207771,7 +207772,15 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function homeStatus(data, needs, sources) {
     const Hm = P.home;
     const running = moving();
-    const title = needs > 0 ? needs === 1 ? Hm.needsYouOne : fill(Hm.needsYouMany, { n: count(needs) }) : running ? Hm.catchingUp : Hm.upToDate;
+    const initialOrImport = archivesMoving() || Object.keys(state.importStarted).length > 0 || !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== "failed") || !!data.progress && !progressFinished(data.progress) && data.progress.phase === "initial" || sources.some((source) => {
+      if (!source || typeof source !== "object")
+        return false;
+      if (source.connecting)
+        return true;
+      const p = sourceProgress(source);
+      return !!p && !p.stalled && p.phase !== "refresh";
+    });
+    const title = needs > 0 ? needs === 1 ? Hm.needsYouOne : fill(Hm.needsYouMany, { n: count(needs) }) : initialOrImport ? Hm.catchingUp : Hm.upToDate;
     const connected = sources.filter((source) => String(source && source.status) !== "Off").length;
     const items = state.computerMeta && typeof state.computerMeta.indexedItems === "number" && isFinite(state.computerMeta.indexedItems) ? Math.max(0, Math.round(state.computerMeta.indexedItems)) : 0;
     const facts = [connected === 1 ? Hm.sourcesOne : fill(Hm.sourcesMany, { n: count(connected) })];
@@ -207780,14 +207789,6 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const when = ago(data.generatedAt);
     if (when)
       facts.push(fill(Hm.checked, { when }));
-    const initialOrImport = archivesMoving() || Object.keys(state.importStarted).length > 0 || !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== "failed") || sources.some((source) => {
-      if (!source || typeof source !== "object")
-        return false;
-      if (source.connecting)
-        return true;
-      const p = sourceProgress(source);
-      return !!p && !p.stalled && p.phase !== "refresh";
-    });
     const dotClass = needs > 0 ? "dot tone-warn" : running ? initialOrImport ? "dot tone-run" : "dot tone-good syncing" : "dot tone-good";
     const dot = el("span", dotClass);
     dot.setAttribute("aria-hidden", "true");
@@ -207796,7 +207797,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (earlier)
       add(text, el("p", "muted", earlier));
     const card = add(el("section", "home-status"), dot, text);
-    card.setAttribute("data-home-status", needs > 0 ? "needs" : running ? "running" : "ok");
+    card.setAttribute("data-home-status", needs > 0 ? "needs" : initialOrImport ? "running" : "ok");
     return card;
   }
   function legacyPersonalProgressText(info) {
@@ -207804,7 +207805,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!progress)
       return;
     const parts = [];
-    if (progress.held > 0 && isFinite(progress.held) && isFinite(progress.judged)) {
+    if (progress.held > 0 && isFinite(progress.held) && isFinite(progress.judged) && progress.judged < progress.held) {
       parts.push(fill(config.privacy.copy.legacyPersonalBodies, { held: count(progress.held), judged: count(progress.judged) }));
     }
     if (progress.waiting > 0 && isFinite(progress.waiting)) {
@@ -207873,27 +207874,32 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return add(el("li", "row need"), body);
   }
   function homeProgressSection(data) {
-    const rows = [];
+    const activeRows = [];
+    const waitRows = [];
     const progress = data.progress;
     if (progress && !progressFinished(progress))
-      rows.push(homeIndexRow(progress));
+      activeRows.push(homeIndexRow(progress));
     if (data.models) {
       for (const entry of installLines(data.models))
         if (entry.state !== "failed")
-          rows.push(add(el("li", "row home-line"), installLine(entry)));
+          activeRows.push(add(el("li", "row home-line"), installLine(entry)));
     }
     const waits = Array.isArray(data.waits) ? data.waits : [];
     for (const wait of waits) {
+      if (wait && wait.unit === "bytes")
+        continue;
       const row = waitRow(wait);
       if (row)
-        rows.push(row);
+        waitRows.push(row);
     }
     const pending = privacyPendingRow(data);
     if (pending)
-      rows.push(pending);
+      activeRows.push(pending);
+    const rows = activeRows.concat(waitRows);
     if (!rows.length)
       return null;
-    const section = add(el("section", "section home-progress"), el("h2", "", P.home.progress));
+    const heading = activeRows.length > 0 ? P.home.progress : P.home.paused;
+    const section = add(el("section", "section home-progress"), el("h2", "", heading));
     const list = el("ul", "rows");
     for (const row of rows)
       add(list, row);
@@ -207966,8 +207972,18 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function amountWords(used, limit, unit) {
     const usd = unit === "usd";
-    const say = (value) => typeof value === "number" && isFinite(value) ? usd ? "$" + value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : Math.round(value).toLocaleString("en-US") : "?";
-    return fill(P.home.amountUsed, { used: say(used), limit: say(limit), unit: usd ? "" : unit }).replace(/\s+$/, "");
+    const bytes = unit === "bytes";
+    const formatBytes = (value) => {
+      if (value >= 1073741824)
+        return (value / 1073741824).toFixed(value >= 10737418240 ? 0 : 1).replace(/\.0$/, "") + " GB";
+      if (value >= 1048576)
+        return (value / 1048576).toFixed(value >= 10485760 ? 0 : 1).replace(/\.0$/, "") + " MB";
+      if (value >= 1024)
+        return Math.round(value / 1024).toLocaleString("en-US") + " KB";
+      return Math.round(value).toLocaleString("en-US") + " bytes";
+    };
+    const say = (value) => typeof value === "number" && isFinite(value) ? usd ? "$" + value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : bytes ? formatBytes(value) : Math.round(value).toLocaleString("en-US") : "?";
+    return fill(P.home.amountUsed, { used: say(used), limit: say(limit), unit: usd || bytes ? "" : unit }).replace(/\s+$/, "");
   }
   function waitRow(wait) {
     if (!wait || typeof wait.label !== "string")
@@ -214178,8 +214194,12 @@ var BRANDS, GLYPHS, LETTERS, SOURCE_LOGO_CSS = `
 .logoletter { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; color: #fff; font-weight: 700; }
 .logodot { position: absolute; right: -3px; bottom: -3px; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--bg, #111); }
 .logodot.ok { background: #3fb950; }
+.logodot.syncing { background: #3fb950; animation: logodot-pulse 1.8s ease-in-out infinite; }
+.logodot.working { background: #d29922; }
 .logodot.attention { background: #e3a03a; }
 .logodot.off { background: #8b8b8b; }
+@keyframes logodot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .logodot.syncing { animation: none; } }
 `;
 var init_source_logos = __esm(() => {
   init_components();
@@ -218845,14 +218865,38 @@ function sourceFacts(source) {
     return dashboardAttentionLine(source);
   const facts = [];
   const items = source.coverage?.indexed_items ?? 0;
-  if (items > 0)
-    facts.push(`${items.toLocaleString("en-US")} ${MESSAGING_SOURCES.has(source.source_id) ? "messages" : "items"}`);
-  if (source.freshness?.label)
+  if (items > 0) {
+    const noun = source.family ? dashboardItemNoun(source) : MESSAGING_SOURCES.has(source.source_id) ? "messages" : "items";
+    facts.push(`${items.toLocaleString("en-US")} ${noun}`);
+  }
+  if (source.connection.action?.kind === "archive_import" && source.connection.label) {
+    facts.push(source.connection.label);
+  } else if (dashboardOperatorPaused(source)) {
+    const base = source.freshness?.label?.replace(/;\s*refresh is late$/i, "").trim();
+    if (base)
+      facts.push(base);
+    facts.push("Sync paused");
+  } else if (source.freshness?.label) {
     facts.push(source.freshness.label);
+  }
   return facts.join(" · ");
 }
 function sourceStatus(source) {
-  return source.connection.state === "reauth_required" || dashboardScopePending(source) || source.freshness?.stale || source.schedule?.consecutive_failures || source.answer_readiness?.state === "needs_attention" ? "attention" : "ok";
+  const paused = dashboardOperatorPaused(source);
+  const archiveOnly = source.connection.action?.kind === "archive_import";
+  const actionableReadiness = source.answer_readiness?.state === "needs_attention" && source.answer_readiness.label !== DASHBOARD_MANY_UNREADABLE_LABEL;
+  const keepsFailing = source.queue_health ? dashboardSyncKeepsFailing(source) : (source.schedule?.consecutive_failures ?? 0) >= 3 && !paused;
+  if (source.connection.state === "reauth_required" || source.connection.state === "awaiting_consent" || !!source.connection.provider_refusal || (source.connection.imports_attention?.length ?? 0) > 0 || !!source.storage_notice || !!source.media_storage || dashboardScopePending(source) || keepsFailing || actionableReadiness || source.freshness?.stale === true && !paused && !archiveOnly) {
+    return "attention";
+  }
+  const items = source.coverage?.indexed_items ?? 0;
+  if (source.connection.state === "waiting_for_first_sync" || source.connection.state === "syncing" && items === 0) {
+    return "working";
+  }
+  if (source.schedule?.running === true || source.connection.state === "syncing") {
+    return "syncing";
+  }
+  return "ok";
 }
 function needsSetupAgain(source) {
   return CONNECTED_STATES.has(source.connection.state) && source.connection.action.kind !== "none" && source.connection.action.kind !== "archive_import" && !MESSAGING_SOURCES.has(source.source_id);
@@ -219164,7 +219208,9 @@ function renderDashboardHelpPage(options) {
   });
 }
 function sourceSupportBlock(source) {
-  if (!(source.schedule?.consecutive_failures || source.connection.state === "reauth_required" || source.answer_readiness?.state === "needs_attention"))
+  const keepsFailing = source.queue_health ? dashboardSyncKeepsFailing(source) : (source.schedule?.consecutive_failures ?? 0) >= 3 && !dashboardOperatorPaused(source);
+  const actionableReadiness = source.answer_readiness?.state === "needs_attention" && source.answer_readiness.label !== DASHBOARD_MANY_UNREADABLE_LABEL;
+  if (!(keepsFailing || source.connection.state === "reauth_required" || !!source.connection.provider_refusal || actionableReadiness))
     return "";
   const id = `source-support-${source.source_id.replace(/[^a-z0-9-]/gi, "-")}`;
   const report = sourceSupportDetails({ sourceId: source.source_id, state: source.connection.state, failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash });
@@ -260180,6 +260226,15 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync, options.remote !== undefined),
     index
   })).sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index).map(({ entry }) => entry);
+  const formatByteLimit = (bytes) => {
+    if (bytes >= 1073741824)
+      return `${(bytes / 1073741824).toFixed(bytes >= 10737418240 ? 0 : 1).replace(/\.0$/, "")} GB`;
+    if (bytes >= 1048576)
+      return `${(bytes / 1048576).toFixed(bytes >= 10485760 ? 0 : 1).replace(/\.0$/, "")} MB`;
+    if (bytes >= 1024)
+      return `${Math.round(bytes / 1024).toLocaleString("en-US")} KB`;
+    return `${Math.round(bytes).toLocaleString("en-US")} bytes`;
+  };
   const waits = [];
   for (const stop of stops) {
     const registered = limits.find((entry) => entry.id === stop.id);
@@ -260189,7 +260244,7 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     const row = rows.find(({ definition }) => limitStopSubjects(stop).some((subject) => subject === definition.source_id || subject === definition.primary_corpus_id || definition.corpus_source_ids.includes(subject)));
     const raiseTo = stop.toContinue?.raiseTo ?? Math.ceil(Math.max(1, (stop.limit ?? 0) * 2, (stop.used ?? 0) + 1));
     const fix = limit.continue === "none" ? undefined : {
-      label: limit.continue === "raise" ? limit.unit === "usd" ? `Raise to $${raiseTo.toLocaleString("en-US")} today` : `Raise to ${raiseTo.toLocaleString("en-US")} ${limit.unit === "calls" && raiseTo === 1 ? "call" : limit.unit}` : limit.continue === "refill" ? "Refill — re-check" : "Run once",
+      label: limit.continue === "raise" ? limit.unit === "usd" ? `Raise to $${raiseTo.toLocaleString("en-US")} today` : limit.unit === "bytes" ? `Raise to ${formatByteLimit(raiseTo)}` : `Raise to ${raiseTo.toLocaleString("en-US")} ${limit.unit === "calls" && raiseTo === 1 ? "call" : limit.unit}` : limit.continue === "refill" ? "Refill — re-check" : "Run once",
       tool: "olympus_limits",
       args: {
         action: "continue",
@@ -293308,7 +293363,8 @@ async function runDashboardCommand(dependencies = {}) {
   const openUrl = await mintDashboardOpeningUrl(mintBase, token, { ...dependencies, commandHint: olympusCommandHint2() });
   if (socketError !== undefined)
     throw socketError;
-  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || "80"), socketPath, ...process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {} }).onComputer : undefined;
+  const sshTarget = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv({ env: process.env }) }).sshTarget;
+  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || "80"), socketPath, ...sshTarget ? { sshTarget } : {} }).onComputer : undefined;
   let opened = false;
   if (!socketPath && !dependencies.noOpen) {
     try {
@@ -293342,7 +293398,8 @@ function runDashboardReadOnlyCommand(dependencies = {}) {
     throw new OperationError("config_error", "No worker auth token is configured, so there is no read-only view link to mint.", `Run ${olympusCommandHint2()} setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.`);
   }
   const socketPath = workerSocketPath();
-  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || "80"), socketPath, ...process.env.OLYMPUS_SERVER_SSH_TARGET ? { sshTarget: process.env.OLYMPUS_SERVER_SSH_TARGET } : {} }).onComputer : undefined;
+  const sshTarget = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv({ env: process.env }) }).sshTarget;
+  const handoff = socketPath ? remoteOpenInstructions({ port: Number(new URL(base).port || "80"), socketPath, ...sshTarget ? { sshTarget } : {} }).onComputer : undefined;
   let opened = false;
   if (!socketPath && !dependencies.noOpen) {
     try {
