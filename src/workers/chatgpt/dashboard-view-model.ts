@@ -33,7 +33,7 @@ import {
   dashboardHonestStatus,
   dashboardRefusedFirstConnect as refusedFirstConnect,
 } from '../dashboard/shared-status.ts';
-import { dashboardSourceProgress, type DashboardPhase } from '../dashboard/phases.ts';
+import { dashboardHasSettledPass, dashboardSourceProgress, type DashboardPhase } from '../dashboard/phases.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from '../dashboard/scheduler-markers.ts';
 import { isSourceFailureKind, sourceFailureKind, sourceFailureRef } from '../dashboard/source-failure.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
@@ -313,6 +313,20 @@ export function buildChatGptDashboardViewModel(
       // Many unreadable files are Olympus's problem, said on the row with its See why: a finished source stays Fresh.
       status = scrubbed.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL && (!progress || progress.stage === 'done') ? 'Fresh' : 'Working';
     }
+    // A settled source whose phases are all done and is only running a routine
+    // background sync tick stays Fresh with `syncing: true` (pulsing green),
+    // never flashing back to yellow Working (owner ruling, 2026-11-27).
+    const routineBackgroundSync = status === 'Working'
+      && !connecting
+      && !credentials
+      && !choosingScope
+      && imports.length === 0
+      && definition.connect_action.kind !== 'archive_import'
+      && progress?.stage === 'done'
+      && !progress.stalled
+      && card.coverage.indexed_items > 0
+      && dashboardHasSettledPass(card);
+    if (routineBackgroundSync) status = 'Fresh';
     // Whether this worker can sync the source at all: the raw card's own
     // flag, which the scrubbed card does not carry.
     const sync = connecting || status === 'Off' || card.sync_now_available !== true
@@ -578,11 +592,29 @@ function sourceEntry(
   // another computer without the tunnel lands on a page that does not load;
   // the row says how to finish from there (docs/ops/OAUTH_RELAY.md).
   const googleSource = definition.provider === 'gmail' || definition.provider === 'google_drive';
+  const syncing = status === 'Fresh'
+    && !connecting
+    && (!progress || progress.stage === 'done')
+    && definition.connect_action.kind !== 'archive_import'
+    && (card.schedule?.running === true || card.connection.state === 'syncing' || card.queue_health.active > 0);
+  // Owner ruling (2026-11-27): when a finished source was only flagged for
+  // passive unreadable files or is running a routine background sync tick,
+  // compute its calm freshness line ("synced 5m ago") rather than
+  // "Many files can't be read" or a Working line.
+  const lineCard: DashboardSourceCard = status === 'Fresh' && (syncing || card.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL)
+    ? {
+        ...card,
+        connection: card.connection.state === 'syncing' ? { ...card.connection, state: 'synced' } : card.connection,
+        queue_health: { ...card.queue_health, waiting: 0, active: 0 },
+        answer_readiness: { state: 'ready' as const, label: 'Ready for questions' },
+        ...(card.schedule ? { schedule: { ...card.schedule, running: false } } : {}),
+      }
+    : card;
   const ownDetail = connecting
     ? (onServer && googleSource ? DASHBOARD_CHATGPT_VOCABULARY.googleConnectingOnServer : CONNECTING_DETAIL)
     : inFlight
       ? STAGE_DETAIL[progress.stage as Exclude<SourceProgress['stage'], 'done'>]
-      : dashboardSubLine(card, { surface: 'chatgpt', now, ...(degraded ? { degradedCredentials: degraded } : {}) });
+      : dashboardSubLine(lineCard, { surface: 'chatgpt', now, ...(degraded ? { degradedCredentials: degraded } : {}) });
   // The owner's Sync now press, while it is the latest word, leads the row:
   // "Checking Dropbox…", then what it found. The engine's own words, so the
   // computer's row reads the same (a fresh row's line already says it).
@@ -678,6 +710,7 @@ function sourceEntry(
     ...(definition.sync_name ? { syncNoun: definition.sync_name.mid } : {}),
     group: sourceGroup(definition),
     status,
+    ...(syncing ? { syncing: true as const } : {}),
     ...(detail ? { detail } : {}),
     ...(lastSyncAt ? { lastSyncAt } : {}),
     ...(primary ? { primary } : {}),
@@ -1069,8 +1102,9 @@ function measuredSourceProgress(
   const reason = stalledReason({ stage, open, scrubbed, embedding, credentialsMissing });
   const stalled = reason !== undefined || open.state === 'stalled';
   const stall = stalled ? stallDetail(card, open, stage, reason, now) : undefined;
+  const phase: 'initial' | 'refresh' = neverSynced(scrubbed) || !dashboardHasSettledPass(card) ? 'initial' : 'refresh';
   return {
-    progress: { stage, unit, ...(done === undefined ? {} : { done }), total, ...(percent === undefined ? {} : { percent }), stalled, ...(reason ? { stalledReason: reason } : {}), ...(stall ? { stall } : {}) },
+    progress: { stage, phase, unit, ...(done === undefined ? {} : { done }), total, ...(percent === undefined ? {} : { percent }), stalled, ...(reason ? { stalledReason: reason } : {}), ...(stall ? { stall } : {}) },
     counts,
   };
 }

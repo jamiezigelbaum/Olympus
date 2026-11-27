@@ -841,73 +841,37 @@ const PAGE_CURSOR = `2026-10-01T00:00:00.000Z~${'C'.repeat(22)}`;
 const UNREADABLE_META = { unreadable: [{ sourceId: 'dropbox.files', files: [{ name: 'Q3 deck.key', token: FILE_TOKEN }, { name: 'scan.tiff' }], more: 1, after: PAGE_CURSOR }] };
 
 describe('See why on the computer', () => {
-  test('lists the computer\'s own files: each with a token opens through the computer-only tool, the rest plain text', async () => {
+  test('hides passive unreadable-file See why on healthy rows and never leaks open tokens', async () => {
     const page = await onHost(DROPBOX_LANDING, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
-    const why = page.win.document.querySelector('details.why')!;
-    expect(Array.from(why.querySelectorAll('ul.files li')).map((node) => node.textContent)).toEqual(['Q3 deck.key', 'scan.tiff', 'and 1 more']);
-    // The result's ChatGPT names and its "and N more" link give way to the computer's list.
-    expect(why.textContent).not.toContain('ChatGPT name.pdf');
-    // Q3 deck opens; "and 1 more" pages the rest.
-    expect(Array.from(why.querySelectorAll('ul.files button')).map((node) => node.textContent)).toEqual(['Q3 deck.key', 'and 1 more']);
-    const open = why.querySelector('ul.files button')! as unknown as HTMLButtonElement;
-    expect(open.getAttribute('aria-label')).toBe('Open Q3 deck.key');
-    open.click();
-    await settle();
-    const calls = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params);
-    expect(calls[calls.length - 1]).toEqual({ name: OPEN_UNREADABLE_FILE_TOOL_NAME, arguments: { token: FILE_TOKEN } });
-    page.respond('tools/call', { content: [{ type: 'text', text: 'Opening the file\'s page.' }], structuredContent: { status: 'open_link', url: 'https://www.dropbox.com/preview/Q3%20deck.key' } });
-    await settle();
-    expect(page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual(['https://www.dropbox.com/preview/Q3%20deck.key']);
-    // The token is spent: the dashboard is read again for fresh ones.
-    expect(page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name)).toEqual([DASHBOARD_TOOL_NAME, OPEN_UNREADABLE_FILE_TOOL_NAME, DASHBOARD_TOOL_NAME]);
+    expect(page.win.document.querySelector('details.why')).toBeNull();
+    expect(page.win.document.body.innerHTML).not.toContain(FILE_TOKEN);
+    expect(page.win.document.body.innerHTML).not.toContain('Q3 deck.key');
+    // Landing on a source with no stall outlines the row itself.
+    expect(page.win.document.querySelector('.row.source.landed')).not.toBeNull();
   });
 
-  // Codex review of #231 (P2c): past the first page, every file is reachable.
-  test('"and N more" reads the next page and lists it under the first, each file opening', async () => {
-    const page = await onHost(DROPBOX_LANDING, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
-    const more = () => Array.from(page.win.document.querySelectorAll('details.why ul.files button')).find((node) => /more$/.test(node.textContent ?? '')) as unknown as HTMLButtonElement | undefined;
-    more()!.click();
-    await settle();
-    const calls = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params);
-    expect(calls[calls.length - 1]).toEqual({ name: UNREADABLE_FILES_PAGE_TOOL_NAME, arguments: { source_id: 'dropbox.files', after: PAGE_CURSOR } });
-    const NEXT = 'N'.repeat(43);
-    page.respond('tools/call', { content: [{ type: 'text', text: '1 more files.' }], structuredContent: { status: 'listed', source_id: 'dropbox.files', files: [{ name: 'page two.pdf', token: NEXT }], more: 0 } });
-    await settle();
-    const why = page.win.document.querySelector('details.why')!;
-    expect(Array.from(why.querySelectorAll('ul.files li')).map((node) => node.textContent)).toEqual(['Q3 deck.key', 'scan.tiff', 'page two.pdf']);
-    expect(more()).toBeUndefined();
-    (Array.from(why.querySelectorAll('ul.files button')).find((node) => node.textContent === 'page two.pdf') as unknown as HTMLButtonElement).click();
-    await settle();
-    const last = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params).at(-1);
-    expect(last).toEqual({ name: OPEN_UNREADABLE_FILE_TOOL_NAME, arguments: { token: NEXT } });
-  });
-
-  test('a file that is gone says so beside it', async () => {
-    const page = await onHost(DROPBOX_LANDING, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
-    (page.win.document.querySelector('details.why ul.files button') as unknown as HTMLButtonElement).click();
-    await settle();
-    page.respond('tools/call', { isError: true, content: [{ type: 'text', text: 'This file is no longer in the list. Refresh the dashboard.' }], structuredContent: { error: 'gone' } });
-    await settle();
-    expect(page.text()).toContain('This file is no longer in the list. Refresh the dashboard.');
-  });
-
-  test('a forged token is plain text, and a result without the computer\'s list shows the result\'s own names', async () => {
-    const forged = await onHost(DROPBOX_LANDING, model({ sources: [UNREADABLE_DROPBOX] }), { unreadable: [{ sourceId: 'dropbox.files', files: [{ name: 'x.pdf', token: '../../etc' }], more: 0 }] });
-    expect(forged.win.document.querySelectorAll('details.why ul.files button').length).toBe(0);
-    expect(forged.win.document.querySelector('details.why ul.files')!.textContent).toBe('x.pdf');
-    const plain = await onHost(DROPBOX_LANDING, model({ sources: [UNREADABLE_DROPBOX] }), { indexFaster: { on: false } });
-    expect(Array.from(plain.win.document.querySelectorAll('details.why ul.files li')).map((node) => node.textContent)).toEqual(['ChatGPT name.pdf', 'and 2 more']);
-  });
-
-  test('ChatGPT never shows the computer\'s list, even if a result carried it', async () => {
+  test('ChatGPT also hides passive unreadable-file See why and never leaks computer tokens', async () => {
     const page = await onHost(undefined, model({ sources: [UNREADABLE_DROPBOX] }), UNREADABLE_META);
-    const files = Array.from(page.win.document.querySelectorAll('details.why ul.files li')).map((node) => node.textContent);
-    expect(files).toEqual(['ChatGPT name.pdf', 'and 2 more']);
+    expect(page.win.document.querySelector('details.why')).toBeNull();
     expect(page.win.document.body.innerHTML).not.toContain(FILE_TOKEN);
   });
 
-  test('an open link lands on that source\'s See why: open, focused, outlined briefly', async () => {
-    const page = await onHost({ ...COMPUTER, landing: { sourceId: 'dropbox.files' } }, model({ sources: [TELEGRAM, UNREADABLE_DROPBOX] }), UNREADABLE_META);
+  test('an open link lands on a stalled source\'s See why: open, focused, outlined briefly', async () => {
+    const stalledDropbox = {
+      ...UNREADABLE_DROPBOX,
+      status: 'Working' as const,
+      progress: {
+        stage: 'reading' as const,
+        unit: 'files' as const,
+        done: 10,
+        total: 100,
+        percent: 10,
+        stalled: true,
+        stalledReason: 'provider_unavailable' as const,
+        stall: { cause: 'failing' as const, failure: 'provider_busy' as const, failures: 2 },
+      },
+    };
+    const page = await onHost({ ...COMPUTER, landing: { sourceId: 'dropbox.files' } }, model({ sources: [TELEGRAM, stalledDropbox] }), UNREADABLE_META);
     const why = page.win.document.querySelector('details.why')! as unknown as HTMLDetailsElement;
     expect(why.open).toBe(true);
     expect(why.classList.contains('landed')).toBe(true);

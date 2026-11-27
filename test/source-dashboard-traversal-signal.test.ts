@@ -383,5 +383,65 @@ describe('sources that do report the walk keep their verdict', () => {
 
     const queuedWork = driveWith({ last_result: { status: 'idle', counts: { jobs_queued: 0 } } }, 3);
     expect(queuedWork.extraction_caught_up).toBeUndefined();
+
+    // A routine scheduled sync tick (sync task running, queue.active=1) must NOT
+    // knock a settled source's extraction_caught_up back to false while extract
+    // tasks are idle and no extraction jobs are leased.
+    const driveWithSyncTick = (opts: { syncRunning?: boolean; extractRunning?: boolean; leasedJobs?: number }) => {
+      const c = corpus({ id: 'internal.drive.docs', family: 'file', provider: 'google_drive', items: 302 });
+      c.counts = {
+        ...c.counts,
+        items_with_text: 58,
+        items_embedded: 58,
+        extraction_jobs_queued: 0,
+        extraction_jobs_queued_actionable: 0,
+        extraction_jobs_leased_current_actionable: opts.leasedJobs ?? 0,
+      };
+      const status: SourceIndexStatusResult = {
+        kind: 'source_index_status',
+        generated_at: NOW.toISOString(),
+        corpora: [c],
+        policy: { read_only: true, raw_source_exposed: false, source_packets_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true },
+      };
+      const scheduler: SourceSchedulerStatus = {
+        kind: 'source_scheduler_status',
+        enabled: true,
+        running: true,
+        generated_at: NOW.toISOString(),
+        sources: [{
+          source_id: 'google_drive.docs',
+          corpus_id: 'internal.drive.docs',
+          sync_cadence: 'continuous',
+          sync_interval_seconds: 300,
+          freshness_threshold_hours: 26,
+          freshness_hours: 1,
+          stale_sync_anomaly: false,
+          tasks: [
+            { id: 'google_drive.docs_store_pull', kind: 'sync', metadata_walk_role: 'primary', running: opts.syncRunning === true, consecutive_failures: 0, last_success_at: '2026-07-28T11:05:00.000Z', last_attempt_at: '2026-07-28T11:05:00.000Z', last_result: { status: 'idle', counts: { traversal_complete: 1 } } },
+            { id: 'google_drive.docs_extract', kind: 'extract', running: opts.extractRunning === true, consecutive_failures: 0, last_success_at: '2026-07-28T11:05:00.000Z', last_attempt_at: '2026-07-28T11:05:00.000Z', last_result: { status: 'idle', counts: { jobs_queued: 0 } } },
+          ],
+        }],
+        policy: { raw_source_exposed: false, source_text_returned: false, source_scope_keys_exposed: false, counts_only: true },
+      } as unknown as SourceSchedulerStatus;
+      return buildSourceDashboardViewModel({
+        sourceIndexStatus: status,
+        schedulerStatus: scheduler,
+        sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+        connectedHandleRegistry: driveHandles,
+        now: NOW,
+      }).sources.find((s) => s.source_id === 'google_drive.docs')!;
+    };
+
+    const duringSyncTick = driveWithSyncTick({ syncRunning: true });
+    expect(duringSyncTick.queue_health.active).toBe(1);
+    expect(duringSyncTick.extraction_caught_up).toBe(true);
+    expect(dashboardSourceProgress(duringSyncTick, { now: NOW }).settled).toBe(true);
+    const panelDuringSync = buildChatGptDashboardViewModel({ sources: [duringSyncTick], generated_at: NOW.toISOString() } as SourceDashboardViewModel, { now: NOW })
+      .sources.find((s) => s.id === 'google_drive.docs')!;
+    expect(panelDuringSync.status).toBe('Fresh');
+    expect(panelDuringSync.syncing).toBe(true);
+
+    expect(driveWithSyncTick({ extractRunning: true }).extraction_caught_up).toBeUndefined();
+    expect(driveWithSyncTick({ leasedJobs: 1 }).extraction_caught_up).toBeUndefined();
   });
 });

@@ -20296,6 +20296,7 @@ var init_vocabulary = __esm(() => {
     },
     sourcePaused: "Paused",
     syncChecking: "Checking…",
+    syncing: "Syncing",
     deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
     deleteDataConfirmMessages: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.",
     deleteDataConfirmMessagesMedia: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.",

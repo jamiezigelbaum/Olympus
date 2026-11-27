@@ -582,29 +582,6 @@ export function chatgptDashboardClient(
         refreshTimer = pageHidden() ? null : setTimeout(backgroundRefresh, R.settleMs);
         return;
       }
-      if (name === H.unreadableOpenTool) {
-        // The engine opened the file's copy on this computer, or answers the
-        // file's own web page for this page to open. The token is spent:
-        // read the list again for fresh ones.
-        const url = result && result.structuredContent ? result.structuredContent.url : '';
-        if (typeof url === 'string' && url) openLink(url);
-        refresh();
-        return;
-      }
-      if (name === H.unreadablePageTool) {
-        // The next page of the list: appended under the files already shown.
-        const page = result && result.structuredContent;
-        if (page && page.status === 'listed' && typeof page.source_id === 'string' && Array.isArray(page.files)) {
-          const prior = state.unreadablePages[page.source_id];
-          state.unreadablePages[page.source_id] = {
-            files: (prior ? prior.files : []).concat(unreadableEntries(page.files)),
-            more: moreCount(page.more),
-            after: cursorOf(page.after),
-          };
-        }
-        redraw();
-        return;
-      }
       // A failed delete falls through to acceptResult, which shows the error;
       // only a result that is not an error reads as deleted (PR #455 review).
       if (name === config.deleteDataTool && !(result && result.isError)) {
@@ -1287,27 +1264,40 @@ export function chatgptDashboardClient(
     const status = String(source.status || '');
     // The Archives row on the computer: its own list, and Import an archive in place.
     const archives = archivesMeta(id);
+    const joined = sourceImportsMeta(id);
     const item = sourceItem(source);
-    // A source that needs the owner gets the amber dot, whatever its status word.
+    const progress = sourceProgress(source);
+    const checking = syncChecking(source);
+    // Yellow is reserved for initial ingestion or importing a new archive;
+    // normal day-to-day incremental sync on an already-connected source stays
+    // green with a subtle pulse animation (owner ruling, 2026-11-27).
     const starting = importStarting(id);
-    const tone = item ? 'warn' : starting ? (config.statusTone as Any).Working || 'run' : (config.statusTone as Any)[status] || 'off';
+    const importingArchive = !!starting
+      || (!!archives && Array.isArray(archives.archives) && archives.archives.some((entry: Any) => !!entry && entry.status === 'importing'))
+      || (!!joined && Array.isArray(joined.imports) && joined.imports.some((entry: Any) => !!entry && entry.status === 'importing'));
+    const refreshSync = !!progress && !progress.stalled && progress.phase === 'refresh' && !item && !importingArchive;
+    const routineSync = !item && !importingArchive && !source.connecting
+      && (refreshSync || (status === 'Fresh' && (source.syncing === true || checking)));
+    // A source that needs the owner gets the amber dot, whatever its status word.
+    const tone = item ? 'warn'
+      : importingArchive ? (config.statusTone as Any).Working || 'run'
+      : routineSync ? 'good'
+      : (config.statusTone as Any)[status] || 'off';
     const row = el('li', item ? 'row source need-row' : 'row source');
     const main = el('div', 'source-main');
-    const dot = el('span', 'dot tone-' + tone);
+    const dot = el('span', 'dot tone-' + tone + (routineSync ? ' syncing' : ''));
     dot.setAttribute('aria-hidden', 'true');
     // Under Other archives the section names the row; its line says which exports it is for.
     const head = add(el('p', 'source-head'), dot, other
       ? add(el('span', 'source-name source-for', P.otherArchives.line), el('span', 'sr', ' — ' + String(source.label || '')))
       : el('span', 'source-name', String(source.label || '')));
     // The dot and the line under the name carry the state; the word is for screen readers only.
-    const off = status === 'Off' && !item && !starting;
-    if (!off) add(head, el('span', 'sr', ' — ' + (item ? P.needsYou : status)));
+    const off = status === 'Off' && !item && !importingArchive;
+    if (!off) add(head, el('span', 'sr', ' — ' + (item ? P.needsYou : routineSync ? P.syncing : status)));
     add(main, head);
     const meta: string[] = [];
-    const progress = sourceProgress(source);
     const stalledWords = progress ? stalledSentence(progress, source) : '';
     const detail = typeof source.detail === 'string' && source.detail ? source.detail : '';
-    const checking = syncChecking(source);
     // What the last Sync now found leads the row while the engine carries it
     // (about ten minutes): its line is the engine's `detail` then.
     const manual = !checking && !source.connecting && syncResult(source) && !!detail;
@@ -1326,7 +1316,10 @@ export function chatgptDashboardClient(
       meta.push(fill(H.copy.archives.inSource.starting, { name: starting.name }));
     } else if (item) meta.push(capitalise(itemReason(item, source)));
     else if (off) meta.push(capitalise(detail || P.notConnected));
-    else if (detail) meta.push(capitalise(detail));
+    else if (source.syncing === true) {
+      meta.push(P.syncing);
+      if (detail) meta.push(capitalise(detail));
+    } else if (detail) meta.push(capitalise(detail));
     // Never synced or fresh wording while work is unfinished: the stage line is
     // the detail then. Said once: when the engine's own line already says when
     // it synced, the page adds no second "Synced …" (it once printed
@@ -1343,7 +1336,6 @@ export function chatgptDashboardClient(
     }
     // A pause the row shows (not one a Sync now line stands in for) gets its See why.
     // The archives that are inputs of this source, shown in its own card (computer only).
-    const joined = sourceImportsMeta(id);
     const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual)
       || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null)
       || (joined ? archiveNotRunning(joined, id) : null);
@@ -2157,107 +2149,18 @@ export function chatgptDashboardClient(
   }
 
   /**
-   * "See why", under a row with files that can't be read: a count per reason,
-   * then which files (owner ruling, 2026-10-10: never say something is wrong
-   * without a way to find out exactly what), and one note. In ChatGPT the
-   * newest few names and "and N more", which opens the computer's full list;
-   * on the computer every file from its own list, each opening the file. An
-   * older engine's bare number has no reasons and shows nothing beyond the
-   * row's own line.
+   * "See why", under a stalled source row: only real stalls/failures are shown
+   * on the Sources status list (owner ruling, 2026-11-27). Passive unreadable
+   * or unsupported files that Olympus does not retry and the owner cannot act
+   * on are hidden from the Sources status list.
    */
   function seeWhy(source: Any, id: string, stalled: boolean): HTMLElement | null {
-    // Why the row is stalled first, then the files it can't read: one See why per row.
     const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];
-    const unreadable = source.unreadable;
-    const words = P.unreadableReasons as Any;
-    const lines = unreadable && typeof unreadable === 'object' && Array.isArray(unreadable.reasons)
-      ? unreadable.reasons
-        .filter((reason: Any) => reason && words[reason.code] && Number(reason.count) > 0)
-        .map((reason: Any) => {
-          const n = Number(reason.count);
-          return add(el('li'), document.createTextNode(fill(n === 1 ? words[reason.code].one : words[reason.code].other, { count: count(n) })));
-        })
-      : [];
-    if (!lines.length && !stall.length) return null;
+    if (!stall.length) return null;
     const box = details('why:' + id, document.createTextNode(P.seeWhy), 'why');
     if (state.landed && state.landed.id === id) box.className += ' landed';
-    if (stall.length) add(box, add(el('ul', 'plain stall-why'), ...stall.map((line) => el('li', '', line))));
-    if (lines.length) {
-      add(box, add(el('ul', 'plain'), ...lines), unreadableFiles(unreadable, id), el('p', 'why-note', unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
-    }
+    add(box, add(el('ul', 'plain stall-why'), ...stall.map((line) => el('li', '', line))));
     return box;
-  }
-
-  /** The unreadable files under See why: the computer's own list when it has one, else the result's names. */
-  function unreadableFiles(unreadable: Any, id: string): HTMLElement | null {
-    const list = el('ul', 'plain files');
-    const own = computerUnreadable(id);
-    if (own) {
-      own.files.forEach((file: Any, index: number) => {
-        const item = el('li');
-        if (typeof file.token === 'string' && file.token) {
-          const key = 'why-file:' + id + ':' + index;
-          const control = fixControl({ label: file.name, tool: H.unreadableOpenTool, args: { token: file.token } }, key, 'plain', false);
-          const opener = control.querySelector('button');
-          if (opener && opener.textContent === file.name) {
-            opener.className = 'btn link file';
-            opener.setAttribute('aria-label', fill(P.unreadableOpen, { name: file.name }));
-          }
-          add(item, control);
-        } else add(item, document.createTextNode(file.name));
-        // Exactly why, after the name (owner rule, 2026-11-04).
-        const why = file.reason ? (P.unreadableFileReasons as Any)[file.reason] : '';
-        if (typeof why === 'string' && why) add(item, el('span', 'muted file-why', ' · ' + why));
-        add(list, item);
-      });
-      if (own.more > 0) {
-        // The next page from where this one ended, so every file is reachable however many there are.
-        const label = fill(P.unreadableMore, { count: count(own.more) });
-        add(list, own.after
-          ? add(el('li'), fixControl({ label, tool: H.unreadablePageTool, args: { source_id: id, after: own.after } }, 'why-page:' + id, 'plain', false))
-          : el('li', 'muted', label));
-      }
-      return list.childNodes.length ? list : null;
-    }
-    const names = Array.isArray(unreadable.names) ? unreadable.names.filter((name: Any) => typeof name === 'string' && name) : [];
-    names.forEach((name: string) => add(list, el('li', '', name)));
-    if (unreadable.more && typeof unreadable.more === 'object') {
-      add(list, add(el('li'), fixControl(unreadable.more, 'why-more:' + id, 'plain', false)));
-    }
-    return list.childNodes.length ? list : null;
-  }
-
-  /** Computer only: this source's unreadable files from the computer meta (names, open tokens), or null. */
-  function computerUnreadable(id: string): { files: Array<{ name: string; token?: string; reason?: string }>; more: number; after: string } | null {
-    const meta = state.computerMeta;
-    if (!onComputer() || !meta || !Array.isArray(meta.unreadable)) return null;
-    const entry = meta.unreadable.filter((item: Any) => item && item.sourceId === id)[0];
-    if (!entry || !Array.isArray(entry.files)) return null;
-    const pages = state.unreadablePages[id];
-    const files = unreadableEntries(entry.files).concat(pages ? pages.files : []);
-    const more = pages ? pages.more : moreCount(entry.more);
-    const after = pages ? pages.after : cursorOf(entry.after);
-    return files.length || more ? { files, more, after } : null;
-  }
-
-  /** A page cursor exactly as the engine gave it, or ''. */
-  function cursorOf(value: Any): string {
-    return typeof value === 'string' && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : '';
-  }
-
-  function unreadableEntries(input: Any[]): Array<{ name: string; token?: string; reason?: string }> {
-    return input
-      .filter((file: Any) => file && typeof file.name === 'string' && file.name)
-      .map((file: Any) => {
-        const reason = typeof file.reason === 'string' && Object.prototype.hasOwnProperty.call(P.unreadableFileReasons, file.reason) ? { reason: file.reason } : {};
-        return typeof file.token === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(file.token)
-          ? { name: file.name, token: file.token, ...reason }
-          : { name: file.name, ...reason };
-      });
-  }
-
-  function moreCount(value: Any): number {
-    return typeof value === 'number' && isFinite(value) && value > 0 ? Math.floor(value) : 0;
   }
 
   /**
@@ -2442,7 +2345,7 @@ export function chatgptDashboardClient(
    * progress to show.
    */
   function sourceProgressBlock(progress: Any, source: Any, stalledWords: string): HTMLElement {
-    const box = el('div', progress.stalled ? 'source-progress stalled' : 'source-progress');
+    const box = el('div', progress.stalled ? 'source-progress stalled' : progress.phase === 'refresh' ? 'source-progress refresh' : 'source-progress');
     const name = String(source.label || '');
     if (progress.stalled) {
       const real = (Number(progress.total) || 0) > 0 && (Number(progress.percent) || 0) > 0 && progress.stage !== 'done';
@@ -2904,7 +2807,19 @@ export function chatgptDashboardClient(
     if (items > 0) facts.push(items === 1 ? Hm.itemsOne : fill(Hm.itemsMany, { n: count(items) }));
     const when = ago(data.generatedAt);
     if (when) facts.push(fill(Hm.checked, { when }));
-    const dot = el('span', 'dot tone-' + (needs > 0 ? 'warn' : running ? 'run' : 'good'));
+    // Yellow dot on Home only for initial ingestion, archive import, or model
+    // install; routine day-to-day refresh syncing pulses green.
+    const initialOrImport = archivesMoving()
+      || Object.keys(state.importStarted).length > 0
+      || (!!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== 'failed'))
+      || sources.some((source: Any) => {
+        if (!source || typeof source !== 'object') return false;
+        if (source.connecting) return true;
+        const p = sourceProgress(source);
+        return !!p && !p.stalled && p.phase !== 'refresh';
+      });
+    const dotClass = needs > 0 ? 'dot tone-warn' : running ? (initialOrImport ? 'dot tone-run' : 'dot tone-good syncing') : 'dot tone-good';
+    const dot = el('span', dotClass);
     dot.setAttribute('aria-hidden', 'true');
     const text = add(el('div', 'row-text'), el('p', 'home-title', title), el('p', 'muted', facts.join(' · ')));
     const earlier = legacyPersonalProgressText(data.privacy);
@@ -3393,7 +3308,7 @@ export function chatgptDashboardClient(
     const sources = Array.isArray(data.sources) ? data.sources : [];
     if (sources.some((source: Any) => {
       if (!source || typeof source !== 'object') return false;
-      if (source.connecting || source.status === 'Working' || syncChecking(source)) return true;
+      if (source.connecting || source.status === 'Working' || source.syncing === true || syncChecking(source)) return true;
       const progress = sourceProgress(source);
       return !!progress && !progress.stalled;
     })) return true;

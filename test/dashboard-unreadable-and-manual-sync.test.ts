@@ -180,15 +180,29 @@ describe('reading finishes when every in-scope file is read or unreadable', () =
     expect(extraction.measure).toEqual({ kind: 'ratio', done: 5, total: 12, percent: 41.7 });
   });
 
-  test('ChatGPT sees the same finished source, with its count and a way to the list', () => {
+  test('ChatGPT sees the same finished source with a calm freshness line while keeping unreadable counts in the view model', () => {
     const v1 = buildChatGptDashboardViewModel(viewOf(finishedWithUnreadable()), { now: NOW });
     const dropbox = v1.sources.find((source) => source.id === 'dropbox.files')!;
+    expect(dropbox.status).toBe('Fresh');
     expect(dropbox.progress?.stage).toBe('done');
     expect(dropbox.unreadable).toMatchObject({ count: 2, reasons: [{ code: 'damaged_or_unsupported', count: 2 }] });
-    // No names were listed here, so "and 2 more" leads to the computer's list.
+    // No names were listed here, so "and 2 more" leads to the computer's list in structured data.
     expect(dropbox.unreadable?.more).toMatchObject({ label: 'and 2 more', href: 'https://olympusplugin.ai/open/unreadable/dropbox/', openHref: true });
-    expect(dropbox.detail).toContain("2 files can't be read");
+    // Owner ruling (2026-11-27): non-actionable unreadable counts stay off the calm Sources row subtitle.
+    expect(dropbox.detail).toBe('synced 40m ago');
+    expect(dropbox.detail).not.toContain("can't be read");
     expect(dropbox.detail).not.toContain('paused');
+
+    // Even when answer_readiness carries the legacy "Many files cannot be read" label,
+    // a finished source stays Fresh with its calm freshness subtitle.
+    const manyV1 = buildChatGptDashboardViewModel(
+      viewOf({ ...finishedWithUnreadable(), answer_readiness: { state: 'needs_attention', label: 'Many files cannot be read' } }),
+      { now: NOW },
+    );
+    const manyDropbox = manyV1.sources.find((source) => source.id === 'dropbox.files')!;
+    expect(manyDropbox.status).toBe('Fresh');
+    expect(manyDropbox.detail).toBe('synced 40m ago');
+    expect(manyDropbox.detail).not.toContain('Many files');
   });
 
   test('unsupported kinds and pictures not read here settle extraction and embedding without inflating unreadable counts', () => {

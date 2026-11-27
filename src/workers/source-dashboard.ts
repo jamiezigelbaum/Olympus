@@ -5374,10 +5374,20 @@ function extractionCaughtUpFromSchedulers(
   ingestionHealth: DashboardSourceCard['ingestion_health'],
   answerReadiness: DashboardSourceCard['answer_readiness'],
 ): boolean {
-  if (queue.waiting > 0 || queue.active > 0 || queue.needs_attention > 0) return false;
+  const uniqueSchedulers = [...new Set(schedulers)];
+  // `queue.active` includes running non-extraction tasks (for example routine
+  // scheduled sync pulls). Subtract running non-extract tasks so a normal
+  // background sync tick does not knock a settled source back into Reading
+  // while still blocking whenever any extraction job is leased or running.
+  const runningNonExtractTasks = uniqueSchedulers
+    .flatMap((scheduler) => scheduler.tasks)
+    .filter((task) => task.kind !== 'extract' && task.running)
+    .length;
+  const activeExtractionWork = Math.max(0, queue.active - runningNonExtractTasks);
+  if (queue.waiting > 0 || activeExtractionWork > 0 || queue.needs_attention > 0) return false;
   if (ingestionHealth.stuck_count > 0 || ingestionHealth.drain_state === 'disabled' || ingestionHealth.drain_state === 'held') return false;
   if (answerReadiness.label === 'Content extraction is stalled') return false;
-  const extractTasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === 'extract'));
+  const extractTasks = uniqueSchedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === 'extract'));
   if (extractTasks.length === 0) return false;
   // Large already-ingested corpora (Dropbox, Telegram, WhatsApp) continuously
   // walk already-seen items with a ring cursor (`checkpoint_active: true`)

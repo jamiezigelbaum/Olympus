@@ -239,15 +239,20 @@ export function dashboardToolResult(view: DashboardViewModelV1): ChatGptToolResu
  */
 export function dashboardForApprovedPage(view: DashboardViewModelV1): DashboardViewModelV1 {
   const sources = view.sources.map((source) => {
-    const progress = source.progress;
-    if (!progress || (finite(progress.done) && finite(progress.percent))) return source;
-    const { progress: _progress, ...row } = source;
-    const stage = { listing: 'Finding items', reading: 'Reading', indexing: 'Indexing', done: 'Done' }[progress.stage];
-    const detail = `${stage} · progress not measured${progress.stalled ? ' · paused' : ''}`;
+    const { syncing: _syncing, ...base } = source;
+    const progress = base.progress;
+    if (!progress) return base;
+    const { phase: _phase, ...approvedProgress } = progress;
+    if (finite(approvedProgress.done) && finite(approvedProgress.percent)) {
+      return { ...base, progress: approvedProgress };
+    }
+    const { progress: _progress, ...row } = base;
+    const stage = { listing: 'Finding items', reading: 'Reading', indexing: 'Indexing', done: 'Done' }[approvedProgress.stage];
+    const detail = `${stage} · progress not measured${approvedProgress.stalled ? ' · paused' : ''}`;
     // A real stall already renders a label with no bar at total=0. Keep its
     // reason and See why evidence; do not invent a stall for active work.
-    const { done: _done, percent: _percent, ...stall } = progress;
-    return { ...row, detail, ...(progress.stalled ? { progress: { ...stall, total: 0 } } : {}) };
+    const { done: _done, percent: _percent, ...stall } = approvedProgress;
+    return { ...row, detail, ...(approvedProgress.stalled ? { progress: { ...stall, total: 0 } } : {}) };
   });
   // A busy engine's line (contract `engine`, 16 Nov 2026) is newer than the submitted page too.
   const { progress, engine: _engine, ...rest } = view;
@@ -388,6 +393,7 @@ function copySource(source: DashboardSource): DashboardSource {
     status: STATUSES.has(source.status) ? source.status : 'Waiting',
   };
   out.supportDetails = sourceSupportDetails({ sourceId: source.id, state: out.status, failure: source.progress?.stall?.failure ?? source.lastManualSync?.failure, ref: source.progress?.stall?.ref ?? source.lastManualSync?.ref, need: supportNeed(source.supportDetails) });
+  if (source.syncing === true) out.syncing = true;
   if (source.detail) out.detail = text(source.detail);
   if (iso(source.lastSyncAt)) out.lastSyncAt = iso(source.lastSyncAt)!;
   if (source.primary) out.primary = copyFix(source.primary);
@@ -479,6 +485,7 @@ function copySourceProgress(progress: SourceProgress): SourceProgress {
   const stall = stalled ? copyStallDetail(progress.stall) : undefined;
   return {
     stage: SOURCE_STAGES.has(progress.stage) ? progress.stage : 'listing',
+    ...(progress.phase === 'initial' || progress.phase === 'refresh' ? { phase: progress.phase } : {}),
     unit: UNITS.has(progress.unit) ? progress.unit : 'items',
     ...(finite(progress.done) ? { done: whole(progress.done) } : {}),
     total: whole(progress.total),

@@ -179,6 +179,8 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .status{color:var(--muted);font-size:0.875rem}
 .source-actions{display:flex;flex-wrap:nowrap;align-items:center;gap:12px;justify-content:flex-start}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
+.dot.syncing{animation:dot-pulse 1.8s ease-in-out infinite}
+@keyframes dot-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.35;transform:scale(0.88)}}
 .tone-good{background:var(--good)}.tone-run{background:var(--run)}.tone-warn{background:var(--warn)}
 .tone-bad{background:var(--bad)}.tone-off{background:var(--off)}.tone-line{background:transparent;border:2px solid var(--idle)}
 .fix{display:inline-flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
@@ -392,6 +394,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .privacy .field,.privacy .text{width:100%;box-sizing:border-box}
 .source-progress{display:flex;flex-direction:column;gap:0.25rem;margin-top:0.375rem}
 .source-progress .bar{height:0.375rem}
+.source-progress.refresh .bar-fill{background:var(--good)}
 .source-progress.stalled .bar-fill{background:var(--warn)}
 .stall-line{font-size:0.875rem}
 .reason.error{color:var(--danger)}
@@ -402,7 +405,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-import.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.row.source.has-import.has-actions:not(.has-menu)>.source-actions{grid-row:2;justify-content:flex-start}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}.landed,.dot.syncing{animation:none}}
 `;
 
 /** The Archives card's source id (source-dashboard.ts), shown in its own section below Sources. */

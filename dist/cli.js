@@ -99803,7 +99803,7 @@ function dashboardSubLine(source, options) {
     case "Waiting":
       return waitingLine(source);
     case "Fresh":
-      return freshLine(source, options?.now ?? new Date);
+      return freshLine(source, options?.now ?? new Date, options);
     case "Off":
       return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && source.connection.action.kind !== "archive_import" && !dashboardUnsettledWithData(source) ? DASHBOARD_DISCONNECTED_DATA_KEPT : source.connection.label;
   }
@@ -100088,16 +100088,17 @@ function dashboardCount(value) {
   const digits = String(Math.abs(rounded)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return rounded < 0 ? `-${digits}` : digits;
 }
-function freshLine(source, now) {
+function freshLine(source, now, options) {
   if (source.freshness.label.startsWith("Answer lane:"))
     return "answers questions directly";
   if (source.connection.action.kind === "archive_import")
     return source.connection.label;
   const waiting = dashboardWaitingToReadPhrase(source);
-  const unreadable = dashboardUnreadablePhrase(source);
-  const unreadableUnsupported = dashboardUnreadableUnsupportedPhrase(source);
-  const unsupportedKind = dashboardUnsupportedKindPhrase(source);
-  const pictures = dashboardPicturesNotReadHerePhrase(source);
+  const quietPanel = options?.surface === "chatgpt";
+  const unreadable = quietPanel ? undefined : dashboardUnreadablePhrase(source);
+  const unreadableUnsupported = quietPanel ? undefined : dashboardUnreadableUnsupportedPhrase(source);
+  const unsupportedKind = quietPanel ? undefined : dashboardUnsupportedKindPhrase(source);
+  const pictures = quietPanel ? undefined : dashboardPicturesNotReadHerePhrase(source);
   const manual = dashboardManualSyncLine(source, now);
   const capture = dashboardCaptureClause(source);
   const pass = dashboardLivePassClause(source);
@@ -100818,6 +100819,7 @@ var init_vocabulary = __esm(() => {
     },
     sourcePaused: "Paused",
     syncChecking: "Checking…",
+    syncing: "Syncing",
     deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
     deleteDataConfirmMessages: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.",
     deleteDataConfirmMessagesMedia: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.",
@@ -146851,13 +146853,16 @@ function metadataTraversalCompleteFromSchedulers(schedulers) {
   return walks.length === 0 ? unreported ? false : undefined : walks.every(Boolean);
 }
 function extractionCaughtUpFromSchedulers(schedulers, coverage, queue, ingestionHealth, answerReadiness) {
-  if (queue.waiting > 0 || queue.active > 0 || queue.needs_attention > 0)
+  const uniqueSchedulers = [...new Set(schedulers)];
+  const runningNonExtractTasks = uniqueSchedulers.flatMap((scheduler) => scheduler.tasks).filter((task) => task.kind !== "extract" && task.running).length;
+  const activeExtractionWork = Math.max(0, queue.active - runningNonExtractTasks);
+  if (queue.waiting > 0 || activeExtractionWork > 0 || queue.needs_attention > 0)
     return false;
   if (ingestionHealth.stuck_count > 0 || ingestionHealth.drain_state === "disabled" || ingestionHealth.drain_state === "held")
     return false;
   if (answerReadiness.label === "Content extraction is stalled")
     return false;
-  const extractTasks = schedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "extract"));
+  const extractTasks = uniqueSchedulers.flatMap((scheduler) => scheduler.tasks.filter((task) => task.kind === "extract"));
   if (extractTasks.length === 0)
     return false;
   const hasReadContent = coverage.content_ready_items > 0;
@@ -205827,26 +205832,6 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         refreshTimer = pageHidden() ? null : setTimeout(backgroundRefresh, R.settleMs);
         return;
       }
-      if (name === H.unreadableOpenTool) {
-        const url = result && result.structuredContent ? result.structuredContent.url : "";
-        if (typeof url === "string" && url)
-          openLink(url);
-        refresh();
-        return;
-      }
-      if (name === H.unreadablePageTool) {
-        const page = result && result.structuredContent;
-        if (page && page.status === "listed" && typeof page.source_id === "string" && Array.isArray(page.files)) {
-          const prior = state.unreadablePages[page.source_id];
-          state.unreadablePages[page.source_id] = {
-            files: (prior ? prior.files : []).concat(unreadableEntries(page.files)),
-            more: moreCount(page.more),
-            after: cursorOf(page.after)
-          };
-        }
-        redraw();
-        return;
-      }
       if (name === config.deleteDataTool && !(result && result.isError)) {
         const deletedId = args && typeof args.source_id === "string" ? args.source_id : "";
         if (deletedId)
@@ -206454,23 +206439,27 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const id = String(source.id || source.label);
     const status = String(source.status || "");
     const archives = archivesMeta(id);
+    const joined = sourceImportsMeta(id);
     const item = sourceItem(source);
+    const progress = sourceProgress(source);
+    const checking = syncChecking(source);
     const starting = importStarting(id);
-    const tone = item ? "warn" : starting ? config.statusTone.Working || "run" : config.statusTone[status] || "off";
+    const importingArchive = !!starting || !!archives && Array.isArray(archives.archives) && archives.archives.some((entry) => !!entry && entry.status === "importing") || !!joined && Array.isArray(joined.imports) && joined.imports.some((entry) => !!entry && entry.status === "importing");
+    const refreshSync = !!progress && !progress.stalled && progress.phase === "refresh" && !item && !importingArchive;
+    const routineSync = !item && !importingArchive && !source.connecting && (refreshSync || status === "Fresh" && (source.syncing === true || checking));
+    const tone = item ? "warn" : importingArchive ? config.statusTone.Working || "run" : routineSync ? "good" : config.statusTone[status] || "off";
     const row = el("li", item ? "row source need-row" : "row source");
     const main = el("div", "source-main");
-    const dot = el("span", "dot tone-" + tone);
+    const dot = el("span", "dot tone-" + tone + (routineSync ? " syncing" : ""));
     dot.setAttribute("aria-hidden", "true");
     const head = add(el("p", "source-head"), dot, other ? add(el("span", "source-name source-for", P.otherArchives.line), el("span", "sr", " — " + String(source.label || ""))) : el("span", "source-name", String(source.label || "")));
-    const off = status === "Off" && !item && !starting;
+    const off = status === "Off" && !item && !importingArchive;
     if (!off)
-      add(head, el("span", "sr", " — " + (item ? P.needsYou : status)));
+      add(head, el("span", "sr", " — " + (item ? P.needsYou : routineSync ? P.syncing : status)));
     add(main, head);
     const meta = [];
-    const progress = sourceProgress(source);
     const stalledWords = progress ? stalledSentence(progress, source) : "";
     const detail = typeof source.detail === "string" && source.detail ? source.detail : "";
-    const checking = syncChecking(source);
     const manual = !checking && !source.connecting && syncResult(source) && !!detail;
     if (source.connecting) {
       meta.push(capitalise(detail || (item ? itemReason(item, source) : "")));
@@ -206487,7 +206476,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       meta.push(capitalise(itemReason(item, source)));
     else if (off)
       meta.push(capitalise(detail || P.notConnected));
-    else if (detail)
+    else if (source.syncing === true) {
+      meta.push(P.syncing);
+      if (detail)
+        meta.push(capitalise(detail));
+    } else if (detail)
       meta.push(capitalise(detail));
     if (typeof source.lastSyncAt === "string" && ago(source.lastSyncAt) && !source.connecting && !progress && !checking && !manual && !saysSynced(detail)) {
       meta.push(fill(P.synced, { when: ago(source.lastSyncAt) }));
@@ -206498,7 +206491,6 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
     }
-    const joined = sourceImportsMeta(id);
     const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null) || (joined ? archiveNotRunning(joined, id) : null);
     const failedStall = !!progress?.stalled && (progress.stalledReason === "provider_unavailable" || progress.stall?.cause === "failing");
     if (source.supportDetails && (failedStall || status === "Failing" || status === "Needs you" || source.lastManualSync?.outcome === "failed")) {
@@ -207159,83 +207151,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function seeWhy(source, id, stalled) {
     const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];
-    const unreadable = source.unreadable;
-    const words = P.unreadableReasons;
-    const lines = unreadable && typeof unreadable === "object" && Array.isArray(unreadable.reasons) ? unreadable.reasons.filter((reason) => reason && words[reason.code] && Number(reason.count) > 0).map((reason) => {
-      const n = Number(reason.count);
-      return add(el("li"), document.createTextNode(fill(n === 1 ? words[reason.code].one : words[reason.code].other, { count: count(n) })));
-    }) : [];
-    if (!lines.length && !stall.length)
+    if (!stall.length)
       return null;
     const box = details("why:" + id, document.createTextNode(P.seeWhy), "why");
     if (state.landed && state.landed.id === id)
       box.className += " landed";
-    if (stall.length)
-      add(box, add(el("ul", "plain stall-why"), ...stall.map((line) => el("li", "", line))));
-    if (lines.length) {
-      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
-    }
+    add(box, add(el("ul", "plain stall-why"), ...stall.map((line) => el("li", "", line))));
     return box;
-  }
-  function unreadableFiles(unreadable, id) {
-    const list = el("ul", "plain files");
-    const own = computerUnreadable(id);
-    if (own) {
-      own.files.forEach((file, index) => {
-        const item = el("li");
-        if (typeof file.token === "string" && file.token) {
-          const key = "why-file:" + id + ":" + index;
-          const control = fixControl({ label: file.name, tool: H.unreadableOpenTool, args: { token: file.token } }, key, "plain", false);
-          const opener = control.querySelector("button");
-          if (opener && opener.textContent === file.name) {
-            opener.className = "btn link file";
-            opener.setAttribute("aria-label", fill(P.unreadableOpen, { name: file.name }));
-          }
-          add(item, control);
-        } else
-          add(item, document.createTextNode(file.name));
-        const why = file.reason ? P.unreadableFileReasons[file.reason] : "";
-        if (typeof why === "string" && why)
-          add(item, el("span", "muted file-why", " · " + why));
-        add(list, item);
-      });
-      if (own.more > 0) {
-        const label = fill(P.unreadableMore, { count: count(own.more) });
-        add(list, own.after ? add(el("li"), fixControl({ label, tool: H.unreadablePageTool, args: { source_id: id, after: own.after } }, "why-page:" + id, "plain", false)) : el("li", "muted", label));
-      }
-      return list.childNodes.length ? list : null;
-    }
-    const names = Array.isArray(unreadable.names) ? unreadable.names.filter((name) => typeof name === "string" && name) : [];
-    names.forEach((name) => add(list, el("li", "", name)));
-    if (unreadable.more && typeof unreadable.more === "object") {
-      add(list, add(el("li"), fixControl(unreadable.more, "why-more:" + id, "plain", false)));
-    }
-    return list.childNodes.length ? list : null;
-  }
-  function computerUnreadable(id) {
-    const meta = state.computerMeta;
-    if (!onComputer() || !meta || !Array.isArray(meta.unreadable))
-      return null;
-    const entry = meta.unreadable.filter((item) => item && item.sourceId === id)[0];
-    if (!entry || !Array.isArray(entry.files))
-      return null;
-    const pages = state.unreadablePages[id];
-    const files = unreadableEntries(entry.files).concat(pages ? pages.files : []);
-    const more = pages ? pages.more : moreCount(entry.more);
-    const after = pages ? pages.after : cursorOf(entry.after);
-    return files.length || more ? { files, more, after } : null;
-  }
-  function cursorOf(value) {
-    return typeof value === "string" && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : "";
-  }
-  function unreadableEntries(input) {
-    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => {
-      const reason = typeof file.reason === "string" && Object.prototype.hasOwnProperty.call(P.unreadableFileReasons, file.reason) ? { reason: file.reason } : {};
-      return typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token, ...reason } : { name: file.name, ...reason };
-    });
-  }
-  function moreCount(value) {
-    return typeof value === "number" && isFinite(value) && value > 0 ? Math.floor(value) : 0;
   }
   function applyLanding() {
     const id = state.landing;
@@ -207389,7 +207311,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return add(bar, el("div", "bar-fill"));
   }
   function sourceProgressBlock(progress, source, stalledWords) {
-    const box = el("div", progress.stalled ? "source-progress stalled" : "source-progress");
+    const box = el("div", progress.stalled ? "source-progress stalled" : progress.phase === "refresh" ? "source-progress refresh" : "source-progress");
     const name = String(source.label || "");
     if (progress.stalled) {
       const real = (Number(progress.total) || 0) > 0 && (Number(progress.percent) || 0) > 0 && progress.stage !== "done";
@@ -207809,7 +207731,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const when = ago(data.generatedAt);
     if (when)
       facts.push(fill(Hm.checked, { when }));
-    const dot = el("span", "dot tone-" + (needs > 0 ? "warn" : running ? "run" : "good"));
+    const initialOrImport = archivesMoving() || Object.keys(state.importStarted).length > 0 || !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== "failed") || sources.some((source) => {
+      if (!source || typeof source !== "object")
+        return false;
+      if (source.connecting)
+        return true;
+      const p = sourceProgress(source);
+      return !!p && !p.stalled && p.phase !== "refresh";
+    });
+    const dotClass = needs > 0 ? "dot tone-warn" : running ? initialOrImport ? "dot tone-run" : "dot tone-good syncing" : "dot tone-good";
+    const dot = el("span", dotClass);
     dot.setAttribute("aria-hidden", "true");
     const text = add(el("div", "row-text"), el("p", "home-title", title), el("p", "muted", facts.join(" · ")));
     const earlier = legacyPersonalProgressText(data.privacy);
@@ -208253,7 +208184,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (sources.some((source) => {
       if (!source || typeof source !== "object")
         return false;
-      if (source.connecting || source.status === "Working" || syncChecking(source))
+      if (source.connecting || source.status === "Working" || source.syncing === true || syncChecking(source))
         return true;
       const progress = sourceProgress(source);
       return !!progress && !progress.stalled;
@@ -212561,6 +212492,8 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .status{color:var(--muted);font-size:0.875rem}
 .source-actions{display:flex;flex-wrap:nowrap;align-items:center;gap:12px;justify-content:flex-start}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
+.dot.syncing{animation:dot-pulse 1.8s ease-in-out infinite}
+@keyframes dot-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.35;transform:scale(0.88)}}
 .tone-good{background:var(--good)}.tone-run{background:var(--run)}.tone-warn{background:var(--warn)}
 .tone-bad{background:var(--bad)}.tone-off{background:var(--off)}.tone-line{background:transparent;border:2px solid var(--idle)}
 .fix{display:inline-flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
@@ -212774,6 +212707,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .privacy .field,.privacy .text{width:100%;box-sizing:border-box}
 .source-progress{display:flex;flex-direction:column;gap:0.25rem;margin-top:0.375rem}
 .source-progress .bar{height:0.375rem}
+.source-progress.refresh .bar-fill{background:var(--good)}
 .source-progress.stalled .bar-fill{background:var(--warn)}
 .stall-line{font-size:0.875rem}
 .reason.error{color:var(--danger)}
@@ -212784,7 +212718,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-import.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.row.source.has-import.has-actions:not(.has-menu)>.source-actions{grid-row:2;justify-content:flex-start}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}.landed,.dot.syncing{animation:none}}
 `;
 });
 
@@ -260177,6 +260111,9 @@ function buildChatGptDashboardViewModel(view, options = {}) {
     if (!connecting && !credentials && !choosingScope && imports.length === 0 && (status === "Needs you" || status === "Failing") && ownerHasNothingToDo(scrubbed, stopped, degraded)) {
       status = scrubbed.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL && (!progress || progress.stage === "done") ? "Fresh" : "Working";
     }
+    const routineBackgroundSync = status === "Working" && !connecting && !credentials && !choosingScope && imports.length === 0 && definition.connect_action.kind !== "archive_import" && progress?.stage === "done" && !progress.stalled && card.coverage.indexed_items > 0 && dashboardHasSettledPass(card);
+    if (routineBackgroundSync)
+      status = "Fresh";
     const sync = connecting || status === "Off" || card.sync_now_available !== true ? undefined : syncFix(definition, scrubbed, status, card.connection.action.kind, degraded, progress);
     return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress, counts: measured?.counts, sync };
   });
@@ -260358,7 +260295,15 @@ function sourceGroup(definition) {
 function sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync, onServer = false) {
   const inFlight = progress && progress.stage !== "done" && status !== "Needs you" && status !== "Failing";
   const googleSource = definition.provider === "gmail" || definition.provider === "google_drive";
-  const ownDetail = connecting ? onServer && googleSource ? DASHBOARD_CHATGPT_VOCABULARY.googleConnectingOnServer : CONNECTING_DETAIL : inFlight ? STAGE_DETAIL[progress.stage] : dashboardSubLine(card, { surface: "chatgpt", now, ...degraded ? { degradedCredentials: degraded } : {} });
+  const syncing = status === "Fresh" && !connecting && (!progress || progress.stage === "done") && definition.connect_action.kind !== "archive_import" && (card.schedule?.running === true || card.connection.state === "syncing" || card.queue_health.active > 0);
+  const lineCard = status === "Fresh" && (syncing || card.answer_readiness.label === DASHBOARD_MANY_UNREADABLE_LABEL) ? {
+    ...card,
+    connection: card.connection.state === "syncing" ? { ...card.connection, state: "synced" } : card.connection,
+    queue_health: { ...card.queue_health, waiting: 0, active: 0 },
+    answer_readiness: { state: "ready", label: "Ready for questions" },
+    ...card.schedule ? { schedule: { ...card.schedule, running: false } } : {}
+  } : card;
+  const ownDetail = connecting ? onServer && googleSource ? DASHBOARD_CHATGPT_VOCABULARY.googleConnectingOnServer : CONNECTING_DETAIL : inFlight ? STAGE_DETAIL[progress.stage] : dashboardSubLine(lineCard, { surface: "chatgpt", now, ...degraded ? { degradedCredentials: degraded } : {} });
   const manualLine = connecting || dashboardScopePending(card) ? undefined : dashboardManualSyncLine(card, now);
   const signinMoved = card.connection.google_signin_moved === true && status === "Fresh" && !connecting && !inFlight;
   const detail = manualLine && !(ownDetail ?? "").startsWith(manualLine) ? manualLine : signinMoved ? DASHBOARD_CHATGPT_VOCABULARY.googleSigninMoved : ownDetail;
@@ -260412,6 +260357,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     ...definition.sync_name ? { syncNoun: definition.sync_name.mid } : {},
     group: sourceGroup(definition),
     status,
+    ...syncing ? { syncing: true } : {},
     ...detail ? { detail } : {},
     ...lastSyncAt ? { lastSyncAt } : {},
     ...primary ? { primary } : {},
@@ -260619,8 +260565,9 @@ function measuredSourceProgress(card, scrubbed, embedding, signIn, now) {
   const reason = stalledReason({ stage, open, scrubbed, embedding, credentialsMissing });
   const stalled = reason !== undefined || open.state === "stalled";
   const stall = stalled ? stallDetail(card, open, stage, reason, now) : undefined;
+  const phase = neverSynced(scrubbed) || !dashboardHasSettledPass(card) ? "initial" : "refresh";
   return {
-    progress: { stage, unit, ...done === undefined ? {} : { done }, total, ...percent === undefined ? {} : { percent }, stalled, ...reason ? { stalledReason: reason } : {}, ...stall ? { stall } : {} },
+    progress: { stage, phase, unit, ...done === undefined ? {} : { done }, total, ...percent === undefined ? {} : { percent }, stalled, ...reason ? { stalledReason: reason } : {}, ...stall ? { stall } : {} },
     counts
   };
 }
@@ -263653,14 +263600,19 @@ function dashboardToolResult(view) {
 }
 function dashboardForApprovedPage(view) {
   const sources = view.sources.map((source) => {
-    const progress = source.progress;
-    if (!progress || finite2(progress.done) && finite2(progress.percent))
-      return source;
-    const { progress: _progress, ...row } = source;
-    const stage = { listing: "Finding items", reading: "Reading", indexing: "Indexing", done: "Done" }[progress.stage];
-    const detail = `${stage} · progress not measured${progress.stalled ? " · paused" : ""}`;
-    const { done: _done, percent: _percent, ...stall } = progress;
-    return { ...row, detail, ...progress.stalled ? { progress: { ...stall, total: 0 } } : {} };
+    const { syncing: _syncing, ...base } = source;
+    const progress = base.progress;
+    if (!progress)
+      return base;
+    const { phase: _phase, ...approvedProgress } = progress;
+    if (finite2(approvedProgress.done) && finite2(approvedProgress.percent)) {
+      return { ...base, progress: approvedProgress };
+    }
+    const { progress: _progress, ...row } = base;
+    const stage = { listing: "Finding items", reading: "Reading", indexing: "Indexing", done: "Done" }[approvedProgress.stage];
+    const detail = `${stage} · progress not measured${approvedProgress.stalled ? " · paused" : ""}`;
+    const { done: _done, percent: _percent, ...stall } = approvedProgress;
+    return { ...row, detail, ...approvedProgress.stalled ? { progress: { ...stall, total: 0 } } : {} };
   });
   const { progress, engine: _engine, ...rest } = view;
   return { ...rest, sources, ...progress && finite2(progress.percent) && finite2(progress.itemsLeft) ? { progress } : {} };
@@ -263792,6 +263744,8 @@ function copySource(source) {
     status: STATUSES2.has(source.status) ? source.status : "Waiting"
   };
   out.supportDetails = sourceSupportDetails({ sourceId: source.id, state: out.status, failure: source.progress?.stall?.failure ?? source.lastManualSync?.failure, ref: source.progress?.stall?.ref ?? source.lastManualSync?.ref, need: supportNeed(source.supportDetails) });
+  if (source.syncing === true)
+    out.syncing = true;
   if (source.detail)
     out.detail = text5(source.detail);
   if (iso3(source.lastSyncAt))
@@ -263863,6 +263817,7 @@ function copySourceProgress(progress) {
   const stall = stalled ? copyStallDetail(progress.stall) : undefined;
   return {
     stage: SOURCE_STAGES.has(progress.stage) ? progress.stage : "listing",
+    ...progress.phase === "initial" || progress.phase === "refresh" ? { phase: progress.phase } : {},
     unit: UNITS2.has(progress.unit) ? progress.unit : "items",
     ...finite2(progress.done) ? { done: whole(progress.done) } : {},
     total: whole(progress.total),

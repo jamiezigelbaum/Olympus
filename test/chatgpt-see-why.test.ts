@@ -175,7 +175,7 @@ describe('the names: newest first, capped, and only the card\'s own list', () =>
   });
 });
 
-describe('the panel renders See why', () => {
+describe('the panel hides passive unreadable-file See why and keeps See why for real stalls', () => {
   const windows: Window[] = [];
   afterEach(async () => {
     while (windows.length) await windows.pop()!.happyDOM.close();
@@ -203,93 +203,73 @@ describe('the panel renders See why', () => {
     connection: { state: 'ready' },
     needsYou: [],
     sources: [{
-      id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Fresh', detail: "synced 12m ago · 2 files can't be read",
+      id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Fresh', detail: 'synced 12m ago',
       lastSyncAt: new Date(Date.now() - 12 * 60_000).toISOString(), ...overrides,
     }],
     models: { embedding: { kind: 'built_in', state: 'ready' } },
     generatedAt: new Date().toISOString(),
   });
 
-  test('the row line stays, with a See why disclosure listing the reason count and one note', () => {
+  test('healthy rows with unreadable files show their calm freshness line and no inline See why', () => {
     const win = mount(fresh({ unreadable: { count: 2, reasons: [{ code: 'damaged_or_unsupported', count: 2 }] } }));
     const row = win.document.querySelector('.row.source')!;
-    expect(row.querySelector('.source-main .muted')!.textContent).toBe("Synced 12m ago · 2 files can't be read");
+    expect(row.querySelector('.source-main .muted')!.textContent).toBe('Synced 12m ago');
+    expect(row.querySelector('details.why')).toBeNull();
+  });
+
+  test('passive Private-held unreadable items and "many" flag never render inline See why or remote tunnel popups', () => {
+    const win = mount({
+      ...fresh({
+        unreadable: {
+          count: 15,
+          many: true,
+          names: ['Photo', 'File'],
+          reasons: [{ code: 'privacy_check_missing', count: 15 }],
+          more: { label: 'and 13 more', tool: DASHBOARD_TOOL_NAME, args: {}, href: MORE_HREF, openHref: true },
+        },
+      }),
+      remote: { port: 8123, sshTarget: 'jamie@sparta', agent: false },
+    });
+    const row = win.document.querySelector('.row.source')!;
+    expect(row.querySelector('details.why')).toBeNull();
+    expect(row.querySelector('.remote-box')).toBeNull();
+    expect(row.textContent).not.toContain('and 13 more');
+  });
+
+  test('a genuinely stalled source still renders See why with its stall explanation', () => {
+    const win = mount(fresh({
+      status: 'Working',
+      progress: {
+        stage: 'reading',
+        unit: 'files',
+        done: 10,
+        total: 100,
+        percent: 10,
+        stalled: true,
+        stalledReason: 'provider_unavailable',
+        stall: { cause: 'failing', failure: 'provider_busy', failures: 3 },
+      },
+      unreadable: {
+        count: 7,
+        reasons: [{ code: 'damaged_or_unsupported', count: 7 }],
+        names: ['Q3 board deck.key'],
+        more: { label: 'and 6 more', tool: DASHBOARD_TOOL_NAME, args: {}, href: MORE_HREF, openHref: true },
+      },
+    }));
+    const row = win.document.querySelector('.row.source')!;
     const why = row.querySelector('details.why')!;
+    expect(why).not.toBeNull();
     expect(why.querySelector('summary')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.seeWhy);
-    expect(Array.from(why.querySelectorAll('li')).map((node) => node.textContent))
-      .toEqual(["2 files Olympus can't read at all"]);
-    expect(why.querySelector('.why-note')!.textContent).toBe(DASHBOARD_UNREADABLE_NOTE);
+    expect(why.querySelector('ul.stall-why')).not.toBeNull();
+    // Passive unreadable file names and "and N more" stay hidden even on a stalled row.
+    expect(why.querySelector('ul.files')).toBeNull();
+    expect(why.textContent).not.toContain('Q3 board deck.key');
+    expect(why.textContent).not.toContain('and 6 more');
   });
 
-  test('the legacy reason code describes a Private hold without a missing check or retry instruction', () => {
-    const win = mount(fresh({ unreadable: { count: 2, names: ['Welcome one', 'Welcome two'],
-      reasons: [{ code: 'privacy_check_missing', count: 2 }] } }));
-    const why = win.document.querySelector('details.why')!;
-    expect(why.textContent).toContain('Welcome one');
-    expect(why.textContent).toContain('Welcome two');
-    expect(why.textContent).not.toContain('Sync now');
-    expect(why.textContent).toContain("kept Private because Olympus couldn't read them");
-    expect(why.textContent).not.toContain('privacy checks were missing');
-    expect(why.textContent).not.toContain('damaged');
-    expect(why.textContent).toContain(DASHBOARD_UNREADABLE_NOTE);
-  });
-
-  test('one file is singular; past the alarm share the note says it may be Olympus', () => {
-    const win = mount(fresh({ unreadable: { count: 1, many: true, reasons: [{ code: 'damaged_or_unsupported', count: 1 }] } }));
-    const why = win.document.querySelector('details.why')!;
-    expect(why.querySelector('li')!.textContent).toBe("1 file Olympus can't read at all");
-    expect(why.querySelector('.why-note')!.textContent).toBe(DASHBOARD_UNREADABLE_NOTE_MANY);
-  });
-
-  test('no See why without reasons: nothing unreadable, or an older engine\'s bare count', () => {
+  test('no See why when nothing is stalled, and no file path reaches the panel whatever the data carries', () => {
     expect(mount(fresh({ detail: 'synced 12m ago' })).document.querySelector('details.why')).toBeNull();
     expect(mount(fresh({ unreadable: 2 as any })).document.querySelector('details.why')).toBeNull();
-  });
-
-  test('the names sit inside the closed See why, and "and N more" opens the computer\'s list', () => {
-    const sent: any[] = [];
-    const win = mount(fresh({ unreadable: {
-      count: 7,
-      reasons: [{ code: 'damaged_or_unsupported', count: 7 }],
-      names: ['Q3 board deck.key', 'scan-0042.tiff'],
-      more: { label: 'and 5 more', tool: DASHBOARD_TOOL_NAME, args: {}, href: MORE_HREF, openHref: true },
-    } }), sent);
-    const row = win.document.querySelector('.row.source')!;
-    const why = row.querySelector('details.why')! as unknown as HTMLDetailsElement;
-    expect(why.open).toBe(false);
-    expect(row.querySelector('.source-main .muted')!.textContent).toBe("Synced 12m ago · 2 files can't be read");
-    expect(why.querySelector('summary')!.textContent).not.toContain('Q3 board deck.key');
-    expect(why.querySelector('summary')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.seeWhy);
-    const files = Array.from(why.querySelectorAll('ul.files li')).map((node) => node.textContent);
-    expect(files).toEqual(['Q3 board deck.key', 'scan-0042.tiff', 'and 5 more']);
-    const more = Array.from(why.querySelectorAll('ul.files button')).find((node) => node.textContent === 'and 5 more') as unknown as HTMLButtonElement;
-    more.click();
-    expect(sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual([MORE_HREF]);
-  });
-
-  // On a server, the computer's full list is the remote route: the tunnel
-  // and `olympus dashboard --no-open --target unreadable/dropbox`, never the
-  // /open/ page (its olympus:// link would open the laptop's own Olympus).
-  test('engine on a server: "and N more" shows the remote lines for unreadable/dropbox, never the /open/ page', () => {
-    const sent: any[] = [];
-    const win = mount({ ...fresh({ unreadable: {
-      count: 7,
-      reasons: [{ code: 'damaged_or_unsupported', count: 7 }],
-      names: ['Q3 board deck.key', 'scan-0042.tiff'],
-      more: { label: 'and 5 more', tool: DASHBOARD_TOOL_NAME, args: {}, href: MORE_HREF, openHref: true },
-    } }), remote: { port: 8123, sshTarget: 'jamie@sparta', agent: false } }, sent);
-    const more = Array.from(win.document.querySelectorAll('details.why ul.files button')).find((node) => node.textContent === 'and 5 more') as unknown as HTMLButtonElement;
-    more.click();
-    expect(sent.some((message) => message.method === 'ui/open-link')).toBe(false);
-    const box = win.document.querySelector('.remote-box')!;
-    expect(box).not.toBeNull();
-    expect(Array.from(box.querySelectorAll('code')).map((node) => node.textContent)).toEqual([
-      'ssh -N -L 8123:127.0.0.1:8123 jamie@sparta',
-      'olympus dashboard --no-open --target unreadable/dropbox',
-    ]);
-  });
-
-  test('no file path reaches the panel, whatever the data carries', () => {
     const hostile = { count: 2, files: [SECRET_NAME, SECRET_PATH], reasons: [
       { code: 'damaged_or_unsupported', count: 2, name: SECRET_NAME, path: SECRET_PATH },
       { code: SECRET_NAME, count: 1 },
@@ -299,7 +279,7 @@ describe('the panel renders See why', () => {
     expect(page).not.toContain(SECRET_NAME);
     expect(page).not.toContain(SECRET_PATH);
     expect(page).not.toContain('Taxes');
-    expect(win.document.querySelectorAll('details.why ul:not(.files) li').length).toBe(1);
+    expect(win.document.querySelector('details.why')).toBeNull();
   });
 });
 

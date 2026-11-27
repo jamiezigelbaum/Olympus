@@ -284,6 +284,44 @@ describe('per-source progress', () => {
     host.push({ structuredContent: model({ sources: [{ ...indexingDrive, status: 'Fresh', progress: { stage: 'done', unit: 'files', done: 300, total: 300, percent: 100, stalled: false } }] }) });
     expect(host.doc.querySelector('.source-progress')).toBeNull();
   });
+
+  test('dot semantics: solid green idle, pulsing green for routine sync/refresh, yellow for first-time sync, orange for Needs you', () => {
+    const host = mount({});
+    const nowIso = new Date(Date.now() - 5 * 60_000).toISOString();
+    host.push({
+      structuredContent: model({
+        needsYou: [ITEMS[1]!],
+        sources: [
+          { id: 'gmail.email', label: 'Gmail', group: 'cloud', status: 'Fresh', detail: 'synced 5m ago', lastSyncAt: nowIso },
+          { id: 'telegram.messages', label: 'Telegram', group: 'cloud', status: 'Fresh', syncing: true, detail: 'synced 5m ago', lastSyncAt: nowIso },
+          {
+            id: 'google_drive.docs', label: 'Google Drive', group: 'cloud', status: 'Working', detail: 'Reading',
+            progress: { stage: 'reading', phase: 'refresh', unit: 'files', done: 2, total: 5, percent: 40, stalled: false },
+          },
+          {
+            id: 'local.files', label: 'Files on this computer', group: 'local', status: 'Working', detail: 'Reading',
+            progress: { stage: 'reading', phase: 'initial', unit: 'files', done: 120, total: 300, percent: 40, stalled: false },
+          },
+          stalledDropbox,
+        ],
+      }),
+    });
+    expect(row(host, 'Gmail').querySelector('.dot')!.className).toBe('dot tone-good');
+    expect(row(host, 'Gmail').querySelector('.source-main .muted')!.textContent).toBe('Synced 5m ago');
+
+    expect(row(host, 'Telegram').querySelector('.dot')!.className).toBe('dot tone-good syncing');
+    expect(row(host, 'Telegram').querySelector('.source-main .muted')!.textContent).toBe('Syncing · Synced 5m ago');
+
+    const drive = row(host, 'Google Drive');
+    expect(drive.querySelector('.dot')!.className).toBe('dot tone-good syncing');
+    expect(drive.querySelector('.source-progress')!.className).toBe('source-progress refresh');
+
+    const local = row(host, 'Files on this computer');
+    expect(local.querySelector('.dot')!.className).toBe('dot tone-run');
+    expect(local.querySelector('.source-progress')!.className).toBe('source-progress');
+
+    expect(row(host, 'Dropbox').querySelector('.dot')!.className).toBe('dot tone-warn');
+  });
 });
 
 describe('top-level progress', () => {

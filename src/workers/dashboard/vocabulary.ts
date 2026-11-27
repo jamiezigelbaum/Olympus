@@ -426,7 +426,7 @@ export function dashboardSubLine(
     case 'Waiting':
       return waitingLine(source);
     case 'Fresh':
-      return freshLine(source, options?.now ?? new Date());
+      return freshLine(source, options?.now ?? new Date(), options);
     case 'Off':
       // Not connected with indexed data left: disconnected on purpose, data
       // kept (owner ruling, 2026-10-23), not a lost sign-in. A card whose
@@ -1313,17 +1313,20 @@ export function dashboardCount(value: number): string {
   return rounded < 0 ? `-${digits}` : digits;
 }
 
-function freshLine(source: DashboardSourceCard, now: Date): string {
+function freshLine(source: DashboardSourceCard, now: Date, options?: DashboardVocabularyOptions): string {
   // The answer lane has nothing to sync, and its freshness label is the only
   // field that says so.
   if (source.freshness.label.startsWith('Answer lane:')) return 'answers questions directly';
   // Imports are read once, never synced: the line says how many are held.
   if (source.connection.action.kind === 'archive_import') return source.connection.label;
   const waiting = dashboardWaitingToReadPhrase(source);
-  const unreadable = dashboardUnreadablePhrase(source);
-  const unreadableUnsupported = dashboardUnreadableUnsupportedPhrase(source);
-  const unsupportedKind = dashboardUnsupportedKindPhrase(source);
-  const pictures = dashboardPicturesNotReadHerePhrase(source);
+  // Owner ruling (2026-11-27): non-actionable unreadable/unsupported file counts
+  // are hidden from the unified Sources status list so healthy rows stay calm.
+  const quietPanel = options?.surface === 'chatgpt';
+  const unreadable = quietPanel ? undefined : dashboardUnreadablePhrase(source);
+  const unreadableUnsupported = quietPanel ? undefined : dashboardUnreadableUnsupportedPhrase(source);
+  const unsupportedKind = quietPanel ? undefined : dashboardUnsupportedKindPhrase(source);
+  const pictures = quietPanel ? undefined : dashboardPicturesNotReadHerePhrase(source);
   // The owner's own Sync now press, while it is the latest word, says what it
   // found in place of the bare sync time.
   const manual = dashboardManualSyncLine(source, now);
@@ -2170,6 +2173,8 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    * the engine's own (dashboardManualSyncLine), the same on both surfaces.
    */
   syncChecking: 'Checking…',
+  /** A connected source running a routine day-to-day incremental sync check. */
+  syncing: 'Syncing',
   /**
    * Delete indexed data (owner, 2026-10-23), for a source that is already
    * disconnected. The confirmation says what goes and what does not, in the

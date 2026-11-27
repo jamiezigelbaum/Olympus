@@ -133,6 +133,8 @@ export interface SourceStallDetail {
 
 export interface SourceProgress {
   stage: 'listing' | 'reading' | 'indexing' | 'done';
+  /** 'initial' during a first sync; 'refresh' for routine incremental updates on an already-connected source. */
+  phase?: 'initial' | 'refresh';
   unit: 'files' | 'messages' | 'items';
   /** Absent when the store cannot measure the numerator. */
   done?: number;
@@ -154,6 +156,8 @@ export interface DashboardSource {
   syncNoun?: string;
   group: 'local' | 'cloud';
   status: DashboardStatus;
+  /** True when an already-connected source is running a routine day-to-day sync check. */
+  syncing?: true;
   detail?: string;
   lastSyncAt?: string;
   primary?: DashboardFix;
