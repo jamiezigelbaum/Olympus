@@ -210,7 +210,7 @@ function parseMatch(raw: unknown, label: string): OwnerTierRule['match'] {
   if (kind === 'source' && !SOURCE_PATTERN.test(value.trim())) {
     throw new OperationError(
       'config_error',
-      `${label}.source must be a valid provider identifier (e.g. x, readwise).`,
+      `${label}.source must be a valid provider identifier.`,
     );
   }
   return { kind, value: value.trim() };

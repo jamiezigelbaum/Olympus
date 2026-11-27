@@ -43095,6 +43095,7 @@ function ownerRuleMatches(rule, signals, provider) {
   const value = rule.match.value.trim().toLowerCase();
   if (!value)
     return false;
+  const itemSource = provider?.trim().toLowerCase();
   switch (rule.match.kind) {
     case "pathPrefix":
       return pathPrefixMatches(signals.path, value);
@@ -43106,7 +43107,7 @@ function ownerRuleMatches(rule, signals, provider) {
     case "sender":
       return ownerSenderRuleMatches(signals.sender, value, tierRank(rule.tier) > tierRank("private"));
     case "source":
-      return provider !== undefined && provider.trim().toLowerCase() === value;
+      return itemSource === value;
   }
 }
 function detectorReasons(signals) {
@@ -65008,7 +65009,7 @@ function parseMatch(raw, label) {
     throw new OperationError("config_error", `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`);
   }
   if (kind === "source" && !SOURCE_PATTERN.test(value.trim())) {
-    throw new OperationError("config_error", `${label}.source must be a valid provider identifier (e.g. x, readwise).`);
+    throw new OperationError("config_error", `${label}.source must be a valid provider identifier.`);
   }
   return { kind, value: value.trim() };
 }

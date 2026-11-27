@@ -14846,6 +14846,7 @@ function ownerRuleMatches(rule, signals, provider) {
   const value = rule.match.value.trim().toLowerCase();
   if (!value)
     return false;
+  const itemSource = provider?.trim().toLowerCase();
   switch (rule.match.kind) {
     case "pathPrefix":
       return pathPrefixMatches(signals.path, value);
@@ -14857,7 +14858,7 @@ function ownerRuleMatches(rule, signals, provider) {
     case "sender":
       return ownerSenderRuleMatches(signals.sender, value, tierRank(rule.tier) > tierRank("private"));
     case "source":
-      return provider !== undefined && provider.trim().toLowerCase() === value;
+      return itemSource === value;
   }
 }
 function detectorReasons(signals) {
