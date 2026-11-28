@@ -45,8 +45,6 @@ const repoRoot = join(import.meta.dir, '..');
 const CONNECTOR_STORE_FAMILY_DEBT = [
   { line: "if (this.family !== 'chat') {", mainLine: 4888,
     retire: 'Replace sender-aggregation eligibility with sender metadata capability.' },
-  { line: "if (store.family !== 'chat') return [];", mainLine: 12644,
-    retire: 'Replace recency-lane eligibility with a source-neutral recency capability.' },
   { line: "?? (item.identity.family === 'chat' ? metadataString(item.metadata, 'chat') : undefined);", mainLine: 13536,
     retire: 'Have connectors normalize conversation titles into shared metadata.' },
   { line: "...(item.identity.family === 'chat'", mainLine: 13558,

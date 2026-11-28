@@ -35647,16 +35647,16 @@ ${parentKey(ref)}`, { ref, origin });
     }
     return matches;
   }
-  recentItems(maxResults, accountScope, filters) {
-    const read = this.recentItemsRead(maxResults, accountScope, filters);
+  recentItems(maxResults, accountScope, filters, recencyOrder = "authored") {
+    const read = this.recentItemsRead(maxResults, accountScope, filters, recencyOrder);
     return this.visibleRecentRows(this.db.query(read.sql).all(...read.params), accountScope, filters);
   }
-  async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs, onCutShort) {
+  async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs, onCutShort, recencyOrder = "authored") {
     if (!offThreadReadsSupported(this.dbPath))
-      return this.recentItems(maxResults, accountScope, filters);
+      return this.recentItems(maxResults, accountScope, filters, recencyOrder);
     let rows;
     try {
-      rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {});
+      rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters, recencyOrder), deadlineAtMs !== undefined ? { deadlineAtMs } : {});
     } catch (error) {
       if (!(error instanceof OffThreadReadBusyError))
         throw error;
@@ -35669,20 +35669,21 @@ ${parentKey(ref)}`, { ref, origin });
     }
     return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows, accountScope, filters), this.childVisibilityLane())).map((row) => searchRowFromItemRow(row));
   }
-  recentItemsRead(maxResults, accountScope, filters) {
+  recentItemsRead(maxResults, accountScope, filters, recencyOrder = "authored") {
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
+    const updatedExpr = recencyOrder === "updated" ? "COALESCE(i.updated_at, i.fetched_at, i.indexed_at) AS updated_at" : "i.updated_at";
     const columns = `
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
         i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
-        i.mime_type, i.authored_at, i.updated_at,
+        i.mime_type, i.authored_at, ${updatedExpr},
         i.trust_tier, i.sync_run_id,
         0 AS rank`;
-    const time = "COALESCE(i.authored_at, i.updated_at, i.indexed_at)";
+    const time = recencyOrder === "updated" ? "COALESCE(i.updated_at, i.fetched_at, i.indexed_at, i.authored_at)" : "COALESCE(i.authored_at, i.updated_at, i.indexed_at)";
     const hasChunks = "EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)";
-    if (selectedFilters.sql) {
+    if (selectedFilters.sql || recencyOrder === "updated") {
       return {
         mode: "all",
         site: "recentItemsRead",

@@ -48,11 +48,14 @@ export function createXBookmarksSourceConnector(
 ): SourceConnector {
   const account = requireAccount(options.account);
   const fetchedAt = validIso(options.fetchedAt ?? new Date().toISOString());
-  const items = dedupePosts(options.posts).map((post) => xBookmarkRawItemFromPost(
+  const fetchedAtMs = Date.parse(fetchedAt);
+  // Preserve X's reverse-saved bookmark order in fetchedAt (newest-saved first)
+  // without touching updatedAt, which feeds embedding_input_hash.
+  const items = dedupePosts(options.posts).map((post, index) => xBookmarkRawItemFromPost(
     post,
     account,
     options.foldersByPostId?.get(post.id) ?? [],
-    fetchedAt,
+    new Date(fetchedAtMs - index).toISOString(),
   ));
   const byLocalId = new Map(items.map((item) => [item.identity.localItemId, item]));
 

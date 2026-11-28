@@ -844,14 +844,89 @@ export function questionHasTemporalIntent(input: Pick<BuildEvidencePackInput, 'q
 
 export function hasTemporalIntent(value: string): boolean {
   const normalized = value.toLowerCase();
-  // "just got/received", "right now", "today", "N minutes ago" are the chat
-  // phrasings of recency (2026-07-05: "did I just get a message..." missed
-  // the recent/latest/newest list and evidence stayed relevance-ordered).
+  // "just got/received", "right now", "today", "N minutes ago", "last N" are
+  // recency phrasings (2026-07-05: "did I just get a message..." missed the
+  // recent/latest/newest list and evidence stayed relevance-ordered).
   return /\b(recent|latest|newest|current|most\s+recent)\b/.test(normalized)
+    || /\blast\s+(\d+|few|couple|several|one|two|three|four|five|six|seven|eight|nine|ten)\b/.test(normalized)
     || /\bjust\s+(got|get|received|receive|arrived|arrive|came|come|sent|send|landed|land)\b/.test(normalized)
     || /\bright\s+now\b/.test(normalized)
     || /\btoday\b/.test(normalized)
     || /\b(seconds?|minutes?|moments?|hours?)\s+ago\b/.test(normalized);
+}
+
+const RECENCY_COUNT_CUES = new Set(['last', 'latest', 'newest', 'recent']);
+const RECENCY_COUNT_SKIP = new Set(['my', 'the', 'most', 'very']);
+const RECENCY_COUNT_WORDS: Readonly<Record<string, number>> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  couple: 2,
+  few: 5,
+  several: 5,
+};
+const RECENCY_TIME_UNITS = new Set([
+  'second', 'seconds', 'sec', 'secs',
+  'minute', 'minutes', 'min', 'mins',
+  'hour', 'hours', 'hr', 'hrs',
+  'day', 'days', 'week', 'weeks',
+  'month', 'months', 'year', 'years',
+]);
+const MAX_REQUESTED_RECENCY_SEATS = 8;
+
+function asciiWordTokens(value: string): string[] {
+  const tokens: string[] = [];
+  let start = -1;
+  for (let i = 0; i <= value.length; i += 1) {
+    const code = i < value.length ? value.charCodeAt(i) : 0;
+    const isWord = (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+    if (isWord) {
+      if (start < 0) start = i;
+    } else if (start >= 0) {
+      tokens.push(value.slice(start, i).toLowerCase());
+      start = -1;
+    }
+  }
+  return tokens;
+}
+
+export function requestedRecencyCount(value: string): number | undefined {
+  const tokens = asciiWordTokens(value);
+  let best: number | undefined;
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (!RECENCY_COUNT_CUES.has(tokens[i]!)) continue;
+    let next = i + 1;
+    while (next < tokens.length && RECENCY_COUNT_SKIP.has(tokens[next]!)) next += 1;
+    const token = tokens[next];
+    if (!token) continue;
+    if (RECENCY_TIME_UNITS.has(tokens[next + 1] ?? '')) continue;
+    let parsed: number | undefined;
+    if (token in RECENCY_COUNT_WORDS) {
+      parsed = RECENCY_COUNT_WORDS[token];
+    } else if (token.length <= 2 && [...token].every((ch) => ch >= '0' && ch <= '9')) {
+      parsed = Number.parseInt(token, 10);
+    }
+    if (parsed !== undefined && parsed >= 2) {
+      const bounded = Math.min(MAX_REQUESTED_RECENCY_SEATS, parsed);
+      if (best === undefined || bounded > best) best = bounded;
+    }
+  }
+  return best;
+}
+
+export function questionRequestedRecencyCount(input: Pick<BuildEvidencePackInput, 'question' | 'searchQuery'>): number | undefined {
+  const fromQuestion = requestedRecencyCount(input.question);
+  const fromQuery = input.searchQuery ? requestedRecencyCount(input.searchQuery) : undefined;
+  if (fromQuestion === undefined) return fromQuery;
+  if (fromQuery === undefined) return fromQuestion;
+  return Math.max(fromQuestion, fromQuery);
 }
 
 // --- Multi-query retrieval ---------------------------------------------------
@@ -999,7 +1074,12 @@ async function runRoutedSearches(
     const matches = new Set(run.matchingCandidateIds ?? []);
     return run.hits.filter(hit => !semantic.has(routedHitCandidateId(hit)) || matches.has(routedHitCandidateId(hit)));
   }) : runs.map(run => run.hits);
-  const recency = seatRoutedQueryRuns(drawRuns, readWideEnabled() ? Math.max(READ_WIDE_MATCH_LIMIT, retrievalLimit) : retrievalLimit, questionHasTemporalIntent(input));
+  const recency = seatRoutedQueryRuns(
+    drawRuns,
+    readWideEnabled() ? Math.max(READ_WIDE_MATCH_LIMIT, retrievalLimit) : retrievalLimit,
+    questionHasTemporalIntent(input),
+    questionRequestedRecencyCount(input),
+  );
   const { degradations: budgetDegradations } = recency;
   // The runs' semantic seats sit past the fused cut, so they are seated again
   // after it, best margin first, as each run seated them.
@@ -1122,6 +1202,7 @@ export function seatRoutedQueryRuns(
   runs: readonly (readonly SourceIndexRoutedSearchHit[])[],
   retrievalLimit: number,
   temporalIntent: boolean,
+  recencyCount?: number,
 ): { hits: SourceIndexRoutedSearchHit[]; degradations: RetrievalDegradation[]; recencySeats: number } {
   const ranked = fuseRankedCandidateLanes({
     lanes: runs.map((run, index) => ({ name: String(index + 1), items: run })),
@@ -1141,7 +1222,7 @@ export function seatRoutedQueryRuns(
   // The fused budget cuts again, so the recency seats are taken again from
   // the fused pool; the router's leader seats are not re-reserved here.
   const recency = temporalIntent
-    ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit)
+    ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit, recencyCount)
     : { ...budgeted, recencySeats: 0 };
   return recency;
 }
@@ -1170,6 +1251,7 @@ function runRoutedSearch(
   laneTimeoutMs: number,
   poolAllocation?: { storeDepth: number; semanticSeats?: number },
 ): Promise<SourceIndexRoutedSearchResponse> {
+  const recencyCount = questionRequestedRecencyCount(input);
   return observeSourceAnswerRoutedQuery(ordinal, () =>
     routeSourceIndexSearch({
       registry: input.registry,
@@ -1180,6 +1262,7 @@ function runRoutedSearch(
         ...(input.corpusIds ? { corpusIds: input.corpusIds } : {}),
         context: input.searchContext,
         ...(questionHasTemporalIntent(input) ? { temporalIntent: true } : {}),
+        ...(recencyCount !== undefined ? { recencyCount } : {}),
         ...(poolAllocation ? { poolAllocation } : {}),
         ...(readWideEnabled() ? { readWide: true } : {}),
       },

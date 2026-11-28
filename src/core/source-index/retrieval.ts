@@ -360,14 +360,16 @@ export const RESERVED_RECENCY_SEATS = 2;
 export function withReservedRecencySeats<T extends {
   corpusId: string;
   newestInStore?: number;
-  provenance?: { citation?: { authoredAt?: string } };
+  provenance?: { citation?: { authoredAt?: string; updatedAt?: string } };
 }>(
   seated: { hits: T[]; degradations: RetrievalDegradation[] },
   pool: readonly T[],
   budget: number,
+  requestedSeats = RESERVED_RECENCY_SEATS,
 ): { hits: T[]; degradations: RetrievalDegradation[]; recencySeats: number } {
-  const seats = Math.min(RESERVED_RECENCY_SEATS, Math.max(0, budget - RESERVED_HEAD_SEATS));
-  const time = (hit: T) => Date.parse(hit.provenance?.citation?.authoredAt ?? '') || 0;
+  const desiredSeats = Math.max(RESERVED_RECENCY_SEATS, Math.floor(requestedSeats));
+  const seats = Math.min(desiredSeats, Math.max(0, budget - RESERVED_HEAD_SEATS));
+  const time = (hit: T) => Date.parse(hit.provenance?.citation?.updatedAt ?? hit.provenance?.citation?.authoredAt ?? '') || 0;
   const newest = pool
     .filter((hit) => hit.newestInStore !== undefined)
     .map((hit, order) => ({ hit, order }))

@@ -67,9 +67,11 @@ export interface SourceIndexSearchRequest {
   corpusIds?: readonly string[];
   families?: readonly SourceFamily[];
   // The question asks for what is new ("did I just get...", "latest"):
-  // chat stores' pinned newest messages take the recency seats
+  // recency-capable stores' pinned newest items take the recency seats
   // (withReservedRecencySeats). Decided by the caller's existing heuristic.
   temporalIntent?: boolean;
+  // Optional bounded count of newest items requested by the question (e.g. "last 5").
+  recencyCount?: number;
   // Ask-only: append store matches after the ordinary draw, before semantic seats.
   readWide?: boolean;
   // A reranker pool (evidence-pack): seat every store's leader, then go deep
@@ -85,6 +87,7 @@ export interface SourceIndexCorpusSearchRequest {
   maxResults: number;
   corpus: SourceIndexCorpusDefinition;
   context: SourceIndexSearchContext;
+  recencyCount?: number;
   // Explicit deadlines from other callers remain supported by adapters. Routed
   // lanes use batch progress instead of imposing a total deadline.
   deadlineAtMs?: number;
@@ -655,6 +658,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: searchedContext,
+      ...(request.recencyCount !== undefined ? { recencyCount: request.recencyCount } : {}),
       onProgress: () => progress(),
       [DEFER_SEARCH_DELIVERY]: true,
       onPartialResponse: (response, lane = 'keyword') => {
@@ -884,7 +888,7 @@ export function withSemanticPoolSeats(
 // Pure seating shared by routed search and offline eval replay.
 export function seatRoutedLanes(
   lanes: readonly SeatingLane[],
-  options: Pick<SourceIndexSearchRequest, 'maxResults' | 'poolAllocation' | 'temporalIntent' | 'readWide'>,
+  options: Pick<SourceIndexSearchRequest, 'maxResults' | 'poolAllocation' | 'temporalIntent' | 'recencyCount' | 'readWide'>,
 ): { hits: SourceIndexRoutedSearchHit[]; degradations: RetrievalDegradation[]; recencySeats: number; semanticSeats?: SemanticPoolSeat[] } {
   // Store order within each turn: how well each store's best hit answers
   // this question (storeOrderForQuestion), then lane declaration order.
@@ -919,7 +923,7 @@ export function seatRoutedLanes(
   const pool = fusedAll.map((candidate) => candidate.item);
   const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
   const recency = options.temporalIntent
-    ? withReservedRecencySeats(leadered, pool, options.maxResults)
+    ? withReservedRecencySeats(leadered, pool, options.maxResults, options.recencyCount)
     : { ...leadered, recencySeats: 0 };
   if (options.readWide) {
     const taken = new Set(recency.hits.map(routedHitCandidateId));

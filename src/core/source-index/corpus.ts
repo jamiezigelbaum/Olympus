@@ -12,9 +12,11 @@ import {
 
 export const SOURCE_INDEX_ACTIVATION_MODES = ['lexical_only', 'hybrid_shadow', 'hybrid_primary'] as const;
 export const SOURCE_INDEX_EMBEDDING_POLICIES = ['disabled', 'local_only', 'cloud_allowed_by_policy', 'cloud_allowed'] as const;
+export const SOURCE_INDEX_RECENCY_LANES = ['authored', 'updated'] as const;
 
 export type SourceIndexActivationMode = (typeof SOURCE_INDEX_ACTIVATION_MODES)[number];
 export type SourceIndexCorpusEmbeddingPolicy = (typeof SOURCE_INDEX_EMBEDDING_POLICIES)[number];
+export type SourceIndexRecencyLane = (typeof SOURCE_INDEX_RECENCY_LANES)[number];
 
 export interface SourceIndexCorpusDefinition {
   corpusId: string;
@@ -24,6 +26,7 @@ export interface SourceIndexCorpusDefinition {
   storageProfile: SourceIndexStorageProfile;
   defaultSensitivity: SourceSensitivity;
   embeddingPolicy: SourceIndexCorpusEmbeddingPolicy;
+  recencyLane?: SourceIndexRecencyLane;
   description?: string;
 }
 
@@ -36,6 +39,7 @@ export type SourceIndexCorpusDefinitionInput = {
   storageProfileInput?: Omit<SourceIndexStorageProfileInput, 'trustDomain'>;
   defaultSensitivity?: SourceSensitivityInput;
   embeddingPolicy?: SourceIndexCorpusEmbeddingPolicy;
+  recencyLane?: SourceIndexRecencyLane;
   description?: string;
 };
 
@@ -81,6 +85,7 @@ export function defineSourceIndexCorpus(input: SourceIndexCorpusDefinitionInput)
 
   const embeddingPolicy = input.embeddingPolicy ?? defaultEmbeddingPolicyForStorage(storageProfile);
   assertEmbeddingPolicyMatchesStorage(embeddingPolicy, storageProfile);
+  const recencyLane = input.recencyLane ?? defaultRecencyLaneForFamily(input.family);
 
   return {
     corpusId,
@@ -90,8 +95,15 @@ export function defineSourceIndexCorpus(input: SourceIndexCorpusDefinitionInput)
     storageProfile,
     defaultSensitivity,
     embeddingPolicy,
+    ...(recencyLane ? { recencyLane } : {}),
     ...(input.description ? { description: input.description } : {}),
   };
+}
+
+function defaultRecencyLaneForFamily(family: SourceFamily): SourceIndexRecencyLane | undefined {
+  if (family === 'chat') return 'authored';
+  if (family === 'x') return 'updated';
+  return undefined;
 }
 
 export function buildSourceIndexCorpusRegistry(corpora: readonly SourceIndexCorpusDefinition[]): SourceIndexCorpusRegistry {

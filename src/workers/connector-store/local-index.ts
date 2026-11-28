@@ -207,6 +207,7 @@ import {
   defineSourceIndexCorpus,
   type SourceIndexActivationMode,
   type SourceIndexCorpusDefinition,
+  type SourceIndexRecencyLane,
 } from '../../core/source-index/corpus.ts';
 import { FileLeaseBusyError, withFileLease, type FileLeaseTimers } from '../../core/file-lease.ts';
 import {
@@ -17240,8 +17241,9 @@ export class LocalConnectorStore {
     maxResults: number,
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
+    recencyOrder: SourceIndexRecencyLane = 'authored',
   ): ConnectorStoreSearchRow[] {
-    const read = this.recentItemsRead(maxResults, accountScope, filters);
+    const read = this.recentItemsRead(maxResults, accountScope, filters, recencyOrder);
     return this.visibleRecentRows(this.db.query(read.sql).all(...(read.params as Array<string | number>)) as ItemRow[], accountScope, filters);
   }
 
@@ -17255,11 +17257,12 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters,
     deadlineAtMs?: number,
     onCutShort?: () => void,
+    recencyOrder: SourceIndexRecencyLane = 'authored',
   ): Promise<ConnectorStoreSearchRow[]> {
-    if (!offThreadReadsSupported(this.dbPath)) return this.recentItems(maxResults, accountScope, filters);
+    if (!offThreadReadsSupported(this.dbPath)) return this.recentItems(maxResults, accountScope, filters, recencyOrder);
     let rows: ItemRow[];
     try {
-      rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {}) as ItemRow[];
+      rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters, recencyOrder), deadlineAtMs !== undefined ? { deadlineAtMs } : {}) as ItemRow[];
     } catch (error) {
       if (!(error instanceof OffThreadReadBusyError)) throw error;
       onCutShort?.();
@@ -17276,20 +17279,26 @@ export class LocalConnectorStore {
     maxResults: number,
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
+    recencyOrder: SourceIndexRecencyLane = 'authored',
   ): StoreRead {
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
+    const updatedExpr = recencyOrder === 'updated'
+      ? 'COALESCE(i.updated_at, i.fetched_at, i.indexed_at) AS updated_at'
+      : 'i.updated_at';
     const columns = `
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
         i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
-        i.mime_type, i.authored_at, i.updated_at,
+        i.mime_type, i.authored_at, ${updatedExpr},
         i.trust_tier, i.sync_run_id,
         0 AS rank`;
-    const time = 'COALESCE(i.authored_at, i.updated_at, i.indexed_at)';
+    const time = recencyOrder === 'updated'
+      ? 'COALESCE(i.updated_at, i.fetched_at, i.indexed_at, i.authored_at)'
+      : 'COALESCE(i.authored_at, i.updated_at, i.indexed_at)';
     const hasChunks = 'EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)';
-    if (selectedFilters.sql) {
+    if (selectedFilters.sql || recencyOrder === 'updated') {
       return {
         mode: 'all',
         site: 'recentItemsRead',
@@ -19157,7 +19166,7 @@ export function createConnectorStoreCorpusAdapter(
       publishKeywordLane(emitPartial, keywordLane.rows);
       markStage?.('keyword_relaxation_ms');
       let recencyCut = false;
-      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
+      const recencyRows = await chatRecencyLaneRows(store, request.corpus.recencyLane, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
       markStage?.('recency_read_ms');
       keywordLane = (await refreshSearchTierVisibility(store, keywordLane, [], searchEligibility)).keyword;
       markStage?.('keyword_revalidation_ms');
@@ -19213,6 +19222,7 @@ export function createConnectorStoreCorpusAdapter(
           filters?.locatorPathScope,
         )),
         limit: request.maxResults,
+        ...(request.recencyCount !== undefined ? { recencyCount: request.recencyCount } : {}),
         ...(options.resultProjector ? { resultProjector: options.resultProjector } : {}),
         ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
       }), keywordLane);
@@ -19436,13 +19446,14 @@ const CHAT_RECENCY_PIN_COUNT = 2;
 
 async function chatRecencyLaneRows(
   store: LocalConnectorStore,
+  recencyOrder: SourceIndexRecencyLane | undefined,
   accountScope?: string,
   filters?: ConnectorStoreSearchFilters,
   deadlineAtMs?: number,
   onCutShort?: () => void,
   searchEligibility?: ConnectorStoreSearchEligibility,
 ): Promise<ConnectorStoreSearchRow[]> {
-  if (store.family !== 'chat') return [];
+  if (!recencyOrder) return [];
   // Full lane depth regardless of maxResults: the lane feeds FUSION, not the
   // final cut. Capping it at maxResults=3 dropped a message that was only 4
   // items deep minutes after it arrived (2026-07-05 probe). It reads last, so
@@ -19450,7 +19461,7 @@ async function chatRecencyLaneRows(
   // without one, it held the whole lane past the router's cut and the keyword
   // rows already read were dropped with it (#1305). Busy, it is left out and
   // its audit says so, so the answer names the source (#1460).
-  const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
+  const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort, recencyOrder);
   const eligible = searchEligibility?.(rows);
   return (eligible ? rows.filter((_, index) => eligible[index]) : rows).map(row => ({ ...row, contentMatched: true }));
 }
@@ -19495,11 +19506,15 @@ function withPinnedNewestChatHits(input: {
   recencyRows: readonly ConnectorStoreSearchRow[];
   hits: SourceIndexSearchHit[];
   limit: number;
+  recencyCount?: number;
   resultProjector?: ConnectorStoreResultProjector;
   locatorPathScope?: string;
 }): SourceIndexSearchHit[] {
   const limit = Math.max(1, Math.min(Math.floor(input.limit), MAX_SEARCH_RESULTS));
-  const pinCount = Math.min(CHAT_RECENCY_PIN_COUNT, input.hits.length ? limit - 1 : limit, input.recencyRows.length);
+  const requestedPins = input.recencyCount !== undefined
+    ? Math.max(CHAT_RECENCY_PIN_COUNT, Math.min(CHAT_RECENCY_LANE_LIMIT, Math.floor(input.recencyCount)))
+    : CHAT_RECENCY_PIN_COUNT;
+  const pinCount = Math.min(requestedPins, input.hits.length ? limit - 1 : limit, input.recencyRows.length);
   if (pinCount === 0) return input.hits;
   const result = [...input.hits];
   for (let index = 0; index < pinCount; index += 1) {
@@ -19652,7 +19667,7 @@ async function hybridConnectorStoreSearch(
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.('keyword_relaxation_ms');
   let recencyCut = false;
-  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
+  const recencyRows = await chatRecencyLaneRows(store, request.corpus.recencyLane, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
   markStage?.('recency_read_ms');
   const checked = await refreshSearchTierVisibility(store, keywordLane, vectorLane.rows, searchEligibility);
   keywordLane = checked.keyword;
@@ -19712,6 +19727,7 @@ async function hybridConnectorStoreSearch(
       filters?.locatorPathScope,
     )),
     limit: maxResults,
+    ...(request.recencyCount !== undefined ? { recencyCount: request.recencyCount } : {}),
     ...(resultProjector ? { resultProjector } : {}),
     ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
   }), keywordLane);

@@ -3229,6 +3229,7 @@ function defineSourceIndexCorpus(input) {
   }
   const embeddingPolicy = input.embeddingPolicy ?? defaultEmbeddingPolicyForStorage(storageProfile);
   assertEmbeddingPolicyMatchesStorage(embeddingPolicy, storageProfile);
+  const recencyLane = input.recencyLane ?? defaultRecencyLaneForFamily(input.family);
   return {
     corpusId,
     family: input.family,
@@ -3237,8 +3238,16 @@ function defineSourceIndexCorpus(input) {
     storageProfile,
     defaultSensitivity,
     embeddingPolicy,
+    ...recencyLane ? { recencyLane } : {},
     ...input.description ? { description: input.description } : {}
   };
+}
+function defaultRecencyLaneForFamily(family) {
+  if (family === "chat")
+    return "authored";
+  if (family === "x")
+    return "updated";
+  return;
 }
 function buildSourceIndexCorpusRegistry(corpora) {
   const byId = new Map;
@@ -68821,9 +68830,10 @@ function withRestatedBudgetCuts(budgeted, hits) {
     ]
   };
 }
-function withReservedRecencySeats(seated, pool, budget) {
-  const seats = Math.min(RESERVED_RECENCY_SEATS, Math.max(0, budget - RESERVED_HEAD_SEATS));
-  const time = (hit) => Date.parse(hit.provenance?.citation?.authoredAt ?? "") || 0;
+function withReservedRecencySeats(seated, pool, budget, requestedSeats = RESERVED_RECENCY_SEATS) {
+  const desiredSeats = Math.max(RESERVED_RECENCY_SEATS, Math.floor(requestedSeats));
+  const seats = Math.min(desiredSeats, Math.max(0, budget - RESERVED_HEAD_SEATS));
+  const time = (hit) => Date.parse(hit.provenance?.citation?.updatedAt ?? hit.provenance?.citation?.authoredAt ?? "") || 0;
   const newest = pool.filter((hit) => hit.newestInStore !== undefined).map((hit, order) => ({ hit, order })).sort((left, right) => time(right.hit) - time(left.hit) || left.hit.newestInStore - right.hit.newestInStore || left.order - right.order).slice(0, seats).map(({ hit }) => hit);
   if (newest.length === 0 || seated.hits.length < 1)
     return { ...seated, recencySeats: 0 };
@@ -69200,6 +69210,7 @@ async function routePreparedSourceIndexSearch(options) {
       maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: searchedContext,
+      ...request.recencyCount !== undefined ? { recencyCount: request.recencyCount } : {},
       onProgress: () => progress(),
       [DEFER_SEARCH_DELIVERY]: true,
       onPartialResponse: (response, lane = "keyword") => {
@@ -69400,7 +69411,7 @@ function seatRoutedLanes(lanes, options) {
   const budgeted = options.poolAllocation ? applyStrengthPoolBudget(fusedAll, options.maxResults, laneOrder, options.poolAllocation.storeDepth) : applyPerCorpusResultBudget(fusedAll, options.maxResults);
   const pool = fusedAll.map((candidate) => candidate.item);
   const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
-  const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults) : { ...leadered, recencySeats: 0 };
+  const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults, options.recencyCount) : { ...leadered, recencySeats: 0 };
   if (options.readWide) {
     const taken = new Set(recency.hits.map(routedHitCandidateId));
     const matches = fusedAll.map((candidate) => candidate.item).filter((hit) => lanes.some((lane) => lane.name === hit.corpusId && (!lane.matchingIds || lane.matchingIds.has(routedHitCandidateId(hit)))));
@@ -71175,7 +71186,7 @@ function createConnectorStoreCorpusAdapter(options) {
         publishKeywordLane(emitPartial, keywordLane.rows);
         markStage?.("keyword_relaxation_ms");
         let recencyCut = false;
-        const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => {
+        const recencyRows = await chatRecencyLaneRows(store, request.corpus.recencyLane, options.accountScope, filters, request.deadlineAtMs, () => {
           recencyCut = true;
         }, searchEligibility);
         markStage?.("recency_read_ms");
@@ -71218,6 +71229,7 @@ function createConnectorStoreCorpusAdapter(options) {
             matchesWholeQuestion: complete
           }).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, options.resultProjector, filters?.locatorPathScope)),
           limit: request.maxResults,
+          ...request.recencyCount !== undefined ? { recencyCount: request.recencyCount } : {},
           ...options.resultProjector ? { resultProjector: options.resultProjector } : {},
           ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
         }), keywordLane);
@@ -71350,10 +71362,10 @@ function createConnectorStoreCorpusAdapter(options) {
   }
   return expanded;
 }
-async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs, onCutShort, searchEligibility) {
-  if (store.family !== "chat")
+async function chatRecencyLaneRows(store, recencyOrder, accountScope, filters, deadlineAtMs, onCutShort, searchEligibility) {
+  if (!recencyOrder)
     return [];
-  const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
+  const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort, recencyOrder);
   const eligible = searchEligibility?.(rows);
   return (eligible ? rows.filter((_, index) => eligible[index]) : rows).map((row) => ({ ...row, contentMatched: true }));
 }
@@ -71383,7 +71395,8 @@ function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPat
 }
 function withPinnedNewestChatHits(input) {
   const limit = Math.max(1, Math.min(Math.floor(input.limit), MAX_SEARCH_RESULTS));
-  const pinCount = Math.min(CHAT_RECENCY_PIN_COUNT, input.hits.length ? limit - 1 : limit, input.recencyRows.length);
+  const requestedPins = input.recencyCount !== undefined ? Math.max(CHAT_RECENCY_PIN_COUNT, Math.min(CHAT_RECENCY_LANE_LIMIT, Math.floor(input.recencyCount))) : CHAT_RECENCY_PIN_COUNT;
+  const pinCount = Math.min(requestedPins, input.hits.length ? limit - 1 : limit, input.recencyRows.length);
   if (pinCount === 0)
     return input.hits;
   const result = [...input.hits];
@@ -71490,7 +71503,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.("keyword_relaxation_ms");
   let recencyCut = false;
-  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => {
+  const recencyRows = await chatRecencyLaneRows(store, request.corpus.recencyLane, accountScope, filters, request.deadlineAtMs, () => {
     recencyCut = true;
   }, searchEligibility);
   markStage?.("recency_read_ms");
@@ -71530,6 +71543,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
       matchesWholeQuestion: keywordComplete
     }).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
     limit: maxResults,
+    ...request.recencyCount !== undefined ? { recencyCount: request.recencyCount } : {},
     ...resultProjector ? { resultProjector } : {},
     ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
   }), keywordLane);
@@ -83266,16 +83280,16 @@ ${parentKey(ref)}`, { ref, origin });
       }
       return matches;
     }
-    recentItems(maxResults, accountScope, filters) {
-      const read = this.recentItemsRead(maxResults, accountScope, filters);
+    recentItems(maxResults, accountScope, filters, recencyOrder = "authored") {
+      const read = this.recentItemsRead(maxResults, accountScope, filters, recencyOrder);
       return this.visibleRecentRows(this.db.query(read.sql).all(...read.params), accountScope, filters);
     }
-    async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs, onCutShort) {
+    async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs, onCutShort, recencyOrder = "authored") {
       if (!offThreadReadsSupported(this.dbPath))
-        return this.recentItems(maxResults, accountScope, filters);
+        return this.recentItems(maxResults, accountScope, filters, recencyOrder);
       let rows;
       try {
-        rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {});
+        rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters, recencyOrder), deadlineAtMs !== undefined ? { deadlineAtMs } : {});
       } catch (error) {
         if (!(error instanceof OffThreadReadBusyError))
           throw error;
@@ -83288,20 +83302,21 @@ ${parentKey(ref)}`, { ref, origin });
       }
       return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows, accountScope, filters), this.childVisibilityLane())).map((row) => searchRowFromItemRow(row));
     }
-    recentItemsRead(maxResults, accountScope, filters) {
+    recentItemsRead(maxResults, accountScope, filters, recencyOrder = "authored") {
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
       const selectedFilters = connectorStoreFilterSql(filters);
+      const updatedExpr = recencyOrder === "updated" ? "COALESCE(i.updated_at, i.fetched_at, i.indexed_at) AS updated_at" : "i.updated_at";
       const columns = `
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
         i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
-        i.mime_type, i.authored_at, i.updated_at,
+        i.mime_type, i.authored_at, ${updatedExpr},
         i.trust_tier, i.sync_run_id,
         0 AS rank`;
-      const time = "COALESCE(i.authored_at, i.updated_at, i.indexed_at)";
+      const time = recencyOrder === "updated" ? "COALESCE(i.updated_at, i.fetched_at, i.indexed_at, i.authored_at)" : "COALESCE(i.authored_at, i.updated_at, i.indexed_at)";
       const hasChunks = "EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)";
-      if (selectedFilters.sql) {
+      if (selectedFilters.sql || recencyOrder === "updated") {
         return {
           mode: "all",
           site: "recentItemsRead",
@@ -90670,7 +90685,8 @@ import { createHash as createHash41 } from "node:crypto";
 function createXBookmarksSourceConnector(options) {
   const account = requireAccount(options.account);
   const fetchedAt = validIso(options.fetchedAt ?? new Date().toISOString());
-  const items = dedupePosts(options.posts).map((post) => xBookmarkRawItemFromPost(post, account, options.foldersByPostId?.get(post.id) ?? [], fetchedAt));
+  const fetchedAtMs = Date.parse(fetchedAt);
+  const items = dedupePosts(options.posts).map((post, index) => xBookmarkRawItemFromPost(post, account, options.foldersByPostId?.get(post.id) ?? [], new Date(fetchedAtMs - index).toISOString()));
   const byLocalId = new Map(items.map((item) => [item.identity.localItemId, item]));
   return {
     id: options.connectorId ?? X_BOOKMARKS_LIVE_CONNECTOR_ID,
@@ -113472,7 +113488,60 @@ function questionHasTemporalIntent(input) {
 }
 function hasTemporalIntent(value) {
   const normalized = value.toLowerCase();
-  return /\b(recent|latest|newest|current|most\s+recent)\b/.test(normalized) || /\bjust\s+(got|get|received|receive|arrived|arrive|came|come|sent|send|landed|land)\b/.test(normalized) || /\bright\s+now\b/.test(normalized) || /\btoday\b/.test(normalized) || /\b(seconds?|minutes?|moments?|hours?)\s+ago\b/.test(normalized);
+  return /\b(recent|latest|newest|current|most\s+recent)\b/.test(normalized) || /\blast\s+(\d+|few|couple|several|one|two|three|four|five|six|seven|eight|nine|ten)\b/.test(normalized) || /\bjust\s+(got|get|received|receive|arrived|arrive|came|come|sent|send|landed|land)\b/.test(normalized) || /\bright\s+now\b/.test(normalized) || /\btoday\b/.test(normalized) || /\b(seconds?|minutes?|moments?|hours?)\s+ago\b/.test(normalized);
+}
+function asciiWordTokens(value) {
+  const tokens = [];
+  let start = -1;
+  for (let i = 0;i <= value.length; i += 1) {
+    const code = i < value.length ? value.charCodeAt(i) : 0;
+    const isWord = code >= 48 && code <= 57 || code >= 65 && code <= 90 || code >= 97 && code <= 122;
+    if (isWord) {
+      if (start < 0)
+        start = i;
+    } else if (start >= 0) {
+      tokens.push(value.slice(start, i).toLowerCase());
+      start = -1;
+    }
+  }
+  return tokens;
+}
+function requestedRecencyCount(value) {
+  const tokens = asciiWordTokens(value);
+  let best;
+  for (let i = 0;i < tokens.length; i += 1) {
+    if (!RECENCY_COUNT_CUES.has(tokens[i]))
+      continue;
+    let next = i + 1;
+    while (next < tokens.length && RECENCY_COUNT_SKIP.has(tokens[next]))
+      next += 1;
+    const token = tokens[next];
+    if (!token)
+      continue;
+    if (RECENCY_TIME_UNITS.has(tokens[next + 1] ?? ""))
+      continue;
+    let parsed;
+    if (token in RECENCY_COUNT_WORDS) {
+      parsed = RECENCY_COUNT_WORDS[token];
+    } else if (token.length <= 2 && [...token].every((ch) => ch >= "0" && ch <= "9")) {
+      parsed = Number.parseInt(token, 10);
+    }
+    if (parsed !== undefined && parsed >= 2) {
+      const bounded = Math.min(MAX_REQUESTED_RECENCY_SEATS, parsed);
+      if (best === undefined || bounded > best)
+        best = bounded;
+    }
+  }
+  return best;
+}
+function questionRequestedRecencyCount(input) {
+  const fromQuestion = requestedRecencyCount(input.question);
+  const fromQuery = input.searchQuery ? requestedRecencyCount(input.searchQuery) : undefined;
+  if (fromQuestion === undefined)
+    return fromQuery;
+  if (fromQuery === undefined)
+    return fromQuestion;
+  return Math.max(fromQuestion, fromQuery);
 }
 function selectedItemsToRoutedSlice(input) {
   const hits = [];
@@ -113565,7 +113634,7 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
     const matches = new Set(run.matchingCandidateIds ?? []);
     return run.hits.filter((hit) => !semantic.has(routedHitCandidateId(hit)) || matches.has(routedHitCandidateId(hit)));
   }) : runs.map((run) => run.hits);
-  const recency = seatRoutedQueryRuns(drawRuns, readWideEnabled() ? Math.max(READ_WIDE_MATCH_LIMIT, retrievalLimit) : retrievalLimit, questionHasTemporalIntent(input));
+  const recency = seatRoutedQueryRuns(drawRuns, readWideEnabled() ? Math.max(READ_WIDE_MATCH_LIMIT, retrievalLimit) : retrievalLimit, questionHasTemporalIntent(input), questionRequestedRecencyCount(input));
   const { degradations: budgetDegradations } = recency;
   const fused = withRunSemanticSeats(recency.hits, runs, poolAllocation?.semanticSeats ?? 0);
   return {
@@ -113649,7 +113718,7 @@ async function withConversationWindows(entries, input, perSide, maxChars) {
   }
   return out;
 }
-function seatRoutedQueryRuns(runs, retrievalLimit, temporalIntent) {
+function seatRoutedQueryRuns(runs, retrievalLimit, temporalIntent, recencyCount) {
   const ranked = fuseRankedCandidateLanes({
     lanes: runs.map((run, index) => ({ name: String(index + 1), items: run })),
     getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
@@ -113657,7 +113726,7 @@ function seatRoutedQueryRuns(runs, retrievalLimit, temporalIntent) {
     tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id))
   });
   const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
-  const recency = temporalIntent ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit) : { ...budgeted, recencySeats: 0 };
+  const recency = temporalIntent ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit, recencyCount) : { ...budgeted, recencySeats: 0 };
   return recency;
 }
 function mergeRoutedSkippedCorpora(runs) {
@@ -113673,6 +113742,7 @@ function literalSearchQuery(input) {
   return input.searchQuery?.trim() || input.question;
 }
 function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, poolAllocation) {
+  const recencyCount = questionRequestedRecencyCount(input);
   return observeSourceAnswerRoutedQuery(ordinal, () => routeSourceIndexSearch({
     registry: input.registry,
     adapters: input.adapters,
@@ -113682,6 +113752,7 @@ function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, poolA
       ...input.corpusIds ? { corpusIds: input.corpusIds } : {},
       context: input.searchContext,
       ...questionHasTemporalIntent(input) ? { temporalIntent: true } : {},
+      ...recencyCount !== undefined ? { recencyCount } : {},
       ...poolAllocation ? { poolAllocation } : {},
       ...readWideEnabled() ? { readWide: true } : {}
     },
@@ -113797,7 +113868,7 @@ function trustDomainRank2(trustDomain) {
     return 1;
   return 2;
 }
-var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf82, MAX_SEARCH_QUERIES = 3, CONVERSATION_WINDOW_ENV = "OLYMPUS_CONVERSATION_WINDOW", CONVERSATION_WINDOW_HITS = 3, CUT_SHORT_LANES;
+var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf82, RECENCY_COUNT_CUES, RECENCY_COUNT_SKIP, RECENCY_COUNT_WORDS, RECENCY_TIME_UNITS, MAX_REQUESTED_RECENCY_SEATS = 8, MAX_SEARCH_QUERIES = 3, CONVERSATION_WINDOW_ENV = "OLYMPUS_CONVERSATION_WINDOW", CONVERSATION_WINDOW_HITS = 3, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_read_wide();
   init_keyword_context();
@@ -113813,6 +113884,45 @@ var init_evidence_pack = __esm(() => {
   init_types();
   init_answer_latency_trace();
   utf82 = new TextEncoder;
+  RECENCY_COUNT_CUES = new Set(["last", "latest", "newest", "recent"]);
+  RECENCY_COUNT_SKIP = new Set(["my", "the", "most", "very"]);
+  RECENCY_COUNT_WORDS = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+    couple: 2,
+    few: 5,
+    several: 5
+  };
+  RECENCY_TIME_UNITS = new Set([
+    "second",
+    "seconds",
+    "sec",
+    "secs",
+    "minute",
+    "minutes",
+    "min",
+    "mins",
+    "hour",
+    "hours",
+    "hr",
+    "hrs",
+    "day",
+    "days",
+    "week",
+    "weeks",
+    "month",
+    "months",
+    "year",
+    "years"
+  ]);
   CUT_SHORT_LANES = new Map([
     [KEYWORD_PREPARATION_INCOMPLETE, { suffix: ":keywords", gap: keywordPreparationGap }],
     [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
@@ -114290,15 +114400,16 @@ function createAnalystSourceIndexAnswerHandler(options) {
       const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1]));
       const guarded = (analyst, remote = false) => ({
         analyze: async (dispatchPack, analyzeOptions) => {
+          let remoteChunkNote;
           if (remote) {
             const checked = await checkedRemotePack(dispatchPack, (candidate) => candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex((original) => original.provenance === candidate.provenance)] ?? "", options.releaseCheck);
             dispatchPack = checked.pack;
-            const note = chunkCoverageNote(checked.report);
-            if (note)
-              chunkHoldNotes.add(note);
+            remoteChunkNote = chunkCoverageNote(checked.report);
           }
           await assertDispatchAllowed(analysisDetail);
           const result = await analyst.analyze(dispatchPack, analyzeOptions);
+          if (remoteChunkNote)
+            chunkHoldNotes.add(remoteChunkNote);
           analyzedInputs.push(...dispatchPack.candidates.map((candidate) => candidateReleaseInput(candidate, candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex((original) => original.provenance === candidate.provenance)] ?? "")));
           return result;
         }

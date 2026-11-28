@@ -1732,6 +1732,7 @@ function defineSourceIndexCorpus(input) {
   }
   const embeddingPolicy = input.embeddingPolicy ?? defaultEmbeddingPolicyForStorage(storageProfile);
   assertEmbeddingPolicyMatchesStorage(embeddingPolicy, storageProfile);
+  const recencyLane = input.recencyLane ?? defaultRecencyLaneForFamily(input.family);
   return {
     corpusId,
     family: input.family,
@@ -1740,8 +1741,16 @@ function defineSourceIndexCorpus(input) {
     storageProfile,
     defaultSensitivity,
     embeddingPolicy,
+    ...recencyLane ? { recencyLane } : {},
     ...input.description ? { description: input.description } : {}
   };
+}
+function defaultRecencyLaneForFamily(family) {
+  if (family === "chat")
+    return "authored";
+  if (family === "x")
+    return "updated";
+  return;
 }
 function defaultTrustTierForDomain(trustDomain) {
   if (trustDomain === "secure_local")
@@ -21344,7 +21353,7 @@ var init_analyst_openclaw_infer = __esm(() => {
 });
 
 // src/core/evidence-pack.ts
-var utf82, CUT_SHORT_LANES;
+var utf82, RECENCY_COUNT_CUES, RECENCY_COUNT_SKIP, RECENCY_TIME_UNITS, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_read_wide();
   init_keyword_context();
@@ -21360,6 +21369,30 @@ var init_evidence_pack = __esm(() => {
   init_types();
   init_answer_latency_trace();
   utf82 = new TextEncoder;
+  RECENCY_COUNT_CUES = new Set(["last", "latest", "newest", "recent"]);
+  RECENCY_COUNT_SKIP = new Set(["my", "the", "most", "very"]);
+  RECENCY_TIME_UNITS = new Set([
+    "second",
+    "seconds",
+    "sec",
+    "secs",
+    "minute",
+    "minutes",
+    "min",
+    "mins",
+    "hour",
+    "hours",
+    "hr",
+    "hrs",
+    "day",
+    "days",
+    "week",
+    "weeks",
+    "month",
+    "months",
+    "year",
+    "years"
+  ]);
   CUT_SHORT_LANES = new Map([
     [KEYWORD_PREPARATION_INCOMPLETE, { suffix: ":keywords", gap: keywordPreparationGap }],
     [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],

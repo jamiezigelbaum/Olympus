@@ -647,17 +647,18 @@ export function createAnalystSourceIndexAnswerHandler(
         const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1] as const));
         const guarded = (analyst: Analyst, remote = false): Analyst => ({
           analyze: async (dispatchPack, analyzeOptions) => {
+            let remoteChunkNote: string | undefined;
             if (remote) {
               const checked = await checkedRemotePack(dispatchPack, candidate => candidateCorpus.get(candidate)
                 ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex(original => original.provenance === candidate.provenance)] ?? '', options.releaseCheck);
               dispatchPack = checked.pack;
-              const note = chunkCoverageNote(checked.report);
-              if (note) chunkHoldNotes.add(note);
+              remoteChunkNote = chunkCoverageNote(checked.report);
             }
             await assertDispatchAllowed(analysisDetail);
             const result = await analyst.analyze(dispatchPack, analyzeOptions);
             // Only a leg that answered can shape the answer: a failed Private
             // route must not hold back the ordinary fallback that replaced it.
+            if (remoteChunkNote) chunkHoldNotes.add(remoteChunkNote);
             analyzedInputs.push(...dispatchPack.candidates.map(candidate => candidateReleaseInput(candidate,
               candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex(original => original.provenance === candidate.provenance)] ?? '')));
             return result;

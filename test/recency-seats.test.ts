@@ -1,10 +1,22 @@
 import { describe, expect, test } from 'bun:test';
-import { buildEvidencePackDetailed, type LocalContentProvider } from '../src/core/evidence-pack.ts';
+import {
+  buildEvidencePackDetailed,
+  hasTemporalIntent,
+  requestedRecencyCount,
+  type LocalContentProvider,
+} from '../src/core/evidence-pack.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { RESERVED_RECENCY_SEATS, withReservedRecencySeats } from '../src/core/source-index/retrieval.ts';
 import type { SourceIndexCorpusSearchAdapter, SourceIndexSearchContext } from '../src/core/source-index/router.ts';
 import { buildSourceSensitivity, type SourceFamily } from '../src/core/source-index/types.ts';
+import {
+  LocalConnectorStore,
+  createConnectorStoreContentProvider,
+  createConnectorStoreCorpusAdapter,
+} from '../src/workers/connector-store/local-index.ts';
 import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
+import { createXBookmarksSourceConnector } from '../src/workers/x-bookmarks/connector.ts';
+import { defineXBookmarksCorpus } from '../src/workers/x-bookmarks/corpus-adapter.ts';
 
 // The 2026-07-05 "did I just get..." case. A chat store pins its newest
 // messages at the tail of its cut (withPinnedNewestChatHits), behind its
@@ -201,5 +213,74 @@ describe('recency seats never cost a store its seat in the pack', () => {
     expect(read.length).toBeLessThan(ordered.length);
     expect(read.slice(0, 5)).toEqual(['lead-0', 'lead-1', 'lead-2', 'newest', 'second']);
     expect(read.slice(5)).toEqual(read.slice(5).map((_, index) => `store-${index + 1}-first`));
+  });
+});
+
+describe('saved-order recency lane and requested recency counts', () => {
+  test('hasTemporalIntent and requestedRecencyCount parse item counts without matching time durations', () => {
+    expect(hasTemporalIntent('Enumerate my last 5 X bookmarks with links.')).toBe(true);
+    expect(requestedRecencyCount('Enumerate my last 5 X bookmarks with links.')).toBe(5);
+    expect(requestedRecencyCount('Show the latest three saved posts')).toBe(3);
+    expect(requestedRecencyCount('What happened in the last 30 days?')).toBeUndefined();
+    expect(requestedRecencyCount('Did I just get a message from the clinic?')).toBeUndefined();
+  });
+
+  test('last 5 X bookmarks returns the 5 most recently saved posts even when older bookmarks have newer post dates and keyword matches', async () => {
+    const corpus = defineXBookmarksCorpus();
+    expect(corpus.recencyLane).toBe('updated');
+    const store = new LocalConnectorStore({
+      dbPath: ':memory:',
+      corpusId: corpus.corpusId,
+      family: 'x',
+      trustDomain: 'internal',
+    });
+    try {
+      // Earlier sync: 10 older bookmarks whose post dates are recent and whose text matches "links"/"bookmarks".
+      const olderPosts = Array.from({ length: 10 }, (_, index) => ({
+        id: `old-${index}`,
+        text: `Great bookmarks thread with links number ${index}`,
+        authorUsername: `old_author_${index}`,
+        createdAt: `2026-11-20T10:${String(10 + index).padStart(2, '0')}:00.000Z`,
+      }));
+      await store.syncFromConnector(createXBookmarksSourceConnector({
+        account: 'personal',
+        posts: olderPosts,
+        fetchedAt: '2026-11-21T00:00:00.000Z',
+      }), { fetchContent: true });
+
+      // Newer sync: 5 newly bookmarked posts in X API reverse-saved order (newest-saved first),
+      // with much older original tweet dates and zero keyword overlap with "enumerate links".
+      const newestSaved = [
+        { id: 'saved-1', text: 'Freshly saved post about sourdough', authorUsername: 'baker_one', createdAt: '2024-03-01T00:00:00.000Z' },
+        { id: 'saved-2', text: 'Freshly saved post about espresso', authorUsername: 'barista_two', createdAt: '2024-02-01T00:00:00.000Z' },
+        { id: 'saved-3', text: 'Freshly saved post about woodworking', authorUsername: 'maker_three', createdAt: '2024-01-01T00:00:00.000Z' },
+        { id: 'saved-4', text: 'Freshly saved post about astronomy', authorUsername: 'stargazer_four', createdAt: '2023-12-01T00:00:00.000Z' },
+        { id: 'saved-5', text: 'Freshly saved post about ceramics', authorUsername: 'potter_five', createdAt: '2023-11-01T00:00:00.000Z' },
+      ];
+      await store.syncFromConnector(createXBookmarksSourceConnector({
+        account: 'personal',
+        posts: newestSaved,
+        fetchedAt: '2026-11-28T15:00:00.000Z',
+      }), { fetchContent: true });
+
+      const detail = await buildEvidencePackDetailed({
+        question: 'Enumerate my last 5 X bookmarks with links.',
+        maxResults: 12,
+        searchContext: allowAll,
+        registry: buildSourceIndexCorpusRegistry([corpus]),
+        adapters: { [corpus.corpusId]: createConnectorStoreCorpusAdapter({ store }) },
+        contentProviders: { [corpus.corpusId]: createConnectorStoreContentProvider({ store }) },
+      });
+
+      const recencyIds = detail.pack.candidates.slice(3, 8).map((c) => c.provenance.sourceItem.providerItemId);
+      expect(recencyIds).toEqual(['saved-1', 'saved-2', 'saved-3', 'saved-4', 'saved-5']);
+      expect(detail.recencySeats).toBe(5);
+      // Both original post date and saved timestamp reach citations.
+      const firstSaved = detail.pack.candidates[3]!;
+      expect(firstSaved.provenance.citation?.authoredAt).toBe('2024-03-01T00:00:00.000Z');
+      expect(firstSaved.provenance.citation?.updatedAt).toBe('2026-11-28T15:00:00.000Z');
+    } finally {
+      store.close();
+    }
   });
 });
