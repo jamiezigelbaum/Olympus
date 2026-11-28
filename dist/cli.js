@@ -100834,7 +100834,7 @@ var init_vocabulary = __esm(() => {
       askPhrase: "Open Olympus on my computer",
       askPhraseFor: "Open Olympus on my computer to connect {source}",
       byHandAfterAsk: "Or run one command in Terminal:",
-      oneStep: "Run this in Terminal on your computer, then open the link it prints:",
+      oneStep: "Run this in Terminal on your computer — Olympus opens in your browser automatically:",
       keepOpen: "Leave Terminal open while using the dashboard (press Ctrl+C to close the tunnel).",
       sshTargetLabel: "Server SSH address (for example, user@my-server)",
       sshTargetPlaceholder: "user@my-server",
@@ -117867,7 +117867,7 @@ var init_live_control2 = __esm(() => {
   init_owner_limit_settings();
   init_connector();
   providerStops = createProviderRateLimitReporter("x");
-  X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
+  X_BOOKMARKS_HEAD_INTERVAL_MS = 30 * 60000;
   X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60000;
   X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
@@ -118023,6 +118023,18 @@ async function acquireIncremental(client, checkpoint, usage, account, config, cl
   const previous = usage.headCheckpoint(account) || checkpoint?.trim();
   const catchupItemLimit = config.maxCatchupItems;
   const deferralStanding = previous !== undefined && usage.headTruncationDeferredAt(account) !== undefined;
+  let probeRequests = 0;
+  if (previous && !deferralStanding) {
+    const probe = await guardedPage(usage, account, config, clock, 1, false, provenance, 1, (reservedMaxResults) => client.fetchBookmarks({
+      maxResults: reservedMaxResults,
+      headOnly: true
+    }), (value) => distinctResourceIds(value.posts.map((post) => `post:${post.id}`)));
+    probeRequests = 1;
+    const topId = probe.posts[0]?.id;
+    if (!topId || topId === previous) {
+      return acquisition([], true, false, previous, probeRequests, [], 0, [1], 0);
+    }
+  }
   const catchupPageLimit = previous ? deferralStanding ? 1 : config.maxCatchupPages : 1;
   const posts = [];
   let nextToken;
@@ -118071,7 +118083,7 @@ async function acquireIncremental(client, checkpoint, usage, account, config, cl
     }
   } while (!foundPrevious && !truncationDeferred && nextToken && posts.length < catchupItemLimit && headPageSizesUsed.length < catchupPageLimit);
   const warnings = truncationDeferred ? ["x_head_truncation_suspected_deferred_checkpoint_preserved"] : previous && !foundPrevious && nextToken ? ["x_head_catchup_bounded_daily_reconcile_required"] : [];
-  return acquisition(posts, true, posts.length > 0, truncationDeferred ? previous : newestId ?? previous, headPageSizesUsed.length, warnings, posts.length, headPageSizesUsed, Number(truncationDeferred));
+  return acquisition(posts, true, posts.length > 0, truncationDeferred ? previous : newestId ?? previous, probeRequests + headPageSizesUsed.length, warnings, posts.length, headPageSizesUsed, Number(truncationDeferred));
 }
 async function acquireReconciliation(client, usage, stateStore, account, providerUserId, config, startedAt, clock, provenance, preservationFloorAuthorizationSha256, providerWindowBoundaryPolicy = X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY) {
   const limits = reconcileLimits(config);
@@ -206131,8 +206143,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const socket = typeof remote.socketPath === "string" && /^\/[A-Za-z0-9_./-]+\/olympus\/worker\.sock$/.test(remote.socketPath) && !remote.socketPath.split("/").some((part) => part === ".." || part === ".") ? remote.socketPath : "";
     const forward = socket ? "-o ExitOnForwardFailure=yes -L 127.0.0.1:" + port + ":" + socket : "-o ExitOnForwardFailure=yes -L 127.0.0.1:" + port + ":127.0.0.1:" + port;
     const targetFlag = path ? " --target " + path : "";
+    const origin = ["http", "://127.0.0.1"].join("") + (port === 80 ? "" : ":" + port);
+    const launchPrefix = origin + "/dashboard/launch#";
+    const ticketMatch = launchPrefix + "olympus_launch_ticket=";
     return {
-      oneCommand: "ssh " + forward + " " + target + ` 'PATH="$HOME/.local/bin:$PATH" olympus dashboard --no-open` + targetFlag + " && cat'",
+      oneCommand: "ssh " + forward + " " + target + ` 'PATH="$HOME/.local/bin:$PATH" olympus dashboard --no-open` + targetFlag + ` && cat' | (o=; while IFS= read -r l; do printf '%s\\n' "$l"; case "$o:$l" in :*'"url": "` + ticketMatch + `'*) u="` + launchPrefix + "${l#*" + launchPrefix + '}"; u=${u%%\\"*}; case "$u" in *" "*) ;; *) o=1; case "$(uname)" in Darwin) open "$u";; *) xdg-open "$u";; esac </dev/null >/dev/null 2>&1 &;; esac;; esac; done)',
       port,
       hasTarget: !!(configured || entered),
       hasConfiguredTarget: !!configured

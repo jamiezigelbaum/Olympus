@@ -92,7 +92,7 @@ describe('X bookmarks thin connector', () => {
       config: testConfig(),
     });
     const page = await firstPageWithCursor(connector, '1');
-    expect(calls).toEqual([{ maxResults: 10 }]);
+    expect(calls).toEqual([{ maxResults: 1, headOnly: true }, { maxResults: 10 }]);
     expect(page.items).toHaveLength(1);
     expect(page.items[0]?.identity).toMatchObject({ provider: 'x', providerItemId: '2' });
     expect(connector.status()).toMatchObject({ mode: 'incremental', complete: true, checkpoint: '2' });
@@ -215,6 +215,7 @@ describe('X bookmarks thin connector', () => {
       config: testConfig(),
       sourceClient: {
         async fetchBookmarks(request = {}) {
+          if (request.headOnly) return { posts: [{ id: visible[0]!.id }] };
           return { posts: visible };
         },
         async fetchBookmarkFolders() { return { folders: [] }; },
@@ -232,7 +233,7 @@ describe('X bookmarks thin connector', () => {
 
   test('escalates all-new head pages 10 -> 20 -> 40 and stops on the first overlap', async () => {
     const usage = new LocalXBookmarksApiUsageStore(':memory:');
-    const calls: Array<{ maxResults?: number; paginationToken?: string }> = [];
+    const calls: Array<{ maxResults?: number; paginationToken?: string; headOnly?: boolean }> = [];
     const page = (prefix: string, count: number) => Array.from(
       { length: count },
       (_, index) => bookmark(`${prefix}-${index}`, `${prefix} marker ${index}`),
@@ -247,6 +248,7 @@ describe('X bookmarks thin connector', () => {
       sourceClient: {
         async fetchBookmarks(request = {}) {
           calls.push(request);
+          if (request.headOnly) return { posts: [{ id: 'first-0' }] };
           if (!request.paginationToken) {
             return { posts: page('first', 10), nextToken: 'second' };
           }
@@ -265,6 +267,7 @@ describe('X bookmarks thin connector', () => {
 
     const result = await firstPageWithCursor(connector, 'stored');
     expect(calls).toEqual([
+      { maxResults: 1, headOnly: true },
       { maxResults: 10 },
       { maxResults: 20, paginationToken: 'second' },
       { maxResults: 40, paginationToken: 'third' },
@@ -274,7 +277,7 @@ describe('X bookmarks thin connector', () => {
       changed: true,
       checkpoint: 'first-0',
       counts: {
-        apiRequests: 3,
+        apiRequests: 4,
         itemsSeen: 35,
         headPagesRead: 3,
         headTruncationDeferrals: 0,
@@ -284,10 +287,10 @@ describe('X bookmarks thin connector', () => {
     usage.close();
   });
 
-  test('stops the typical head run on first-page overlap and bills every returned item', async () => {
+  test('stops a no-change head run on the 1-post ID-only probe and bills 1 resource ($0.001)', async () => {
     const usage = new LocalXBookmarksApiUsageStore(':memory:');
     const now = new Date('2026-08-17T13:00:00.000Z');
-    const calls: Array<{ maxResults?: number; paginationToken?: string }> = [];
+    const calls: Array<{ maxResults?: number; paginationToken?: string; headOnly?: boolean }> = [];
     const connector = createXBookmarksApiSourceConnector({
       mode: 'incremental',
       account: ACCOUNT,
@@ -298,11 +301,15 @@ describe('X bookmarks thin connector', () => {
       sourceClient: {
         async fetchBookmarks(request = {}) {
           calls.push(request);
+          if (request.headOnly) return { posts: [{ id: 'stored' }] };
           return {
-            posts: [bookmark('stored', 'stored overlap'), ...Array.from(
-              { length: 9 },
-              (_, index) => bookmark(`older-${index}`, `older marker ${index}`),
-            )],
+            posts: [
+              { ...bookmark('stored', 'stored overlap'), authorId: 'a0', mediaKeys: ['m1', 'm2'] },
+              ...Array.from(
+                { length: 9 },
+                (_, index) => ({ ...bookmark(`older-${index}`, `older marker ${index}`), authorId: `a${index + 1}`, mediaKeys: [`m-${index}`] }),
+              ),
+            ],
             nextToken: 'must-not-be-read',
           };
         },
@@ -312,18 +319,18 @@ describe('X bookmarks thin connector', () => {
     });
 
     const result = await firstPageWithCursor(connector, 'stored');
-    expect(calls).toEqual([{ maxResults: 10 }]);
+    expect(calls).toEqual([{ maxResults: 1, headOnly: true }]);
     expect(result.items).toEqual([]);
     expect(connector.status().counts).toMatchObject({
       apiRequests: 1,
       itemsSeen: 0,
       headPagesRead: 1,
-      headPageSizesUsed: [10],
+      headPageSizesUsed: [1],
     });
     expect(usage.status({ account: ACCOUNT, config: testConfig(), now })).toMatchObject({
-      resource_reads: 10,
-      estimated_billable_resources: 10,
-      estimated_spend_microusd: 10_000,
+      resource_reads: 1,
+      estimated_billable_resources: 1,
+      estimated_spend_microusd: 1_000,
     });
     usage.close();
   });
@@ -340,6 +347,7 @@ describe('X bookmarks thin connector', () => {
       config: testConfig({ maxCatchupItems: 25, maxCatchupPages: 2 }),
       sourceClient: {
         async fetchBookmarks(request = {}) {
+          if (request.headOnly) return { posts: [{ id: 'page-1-0' }] };
           const requested = request.maxResults ?? 0;
           calls.push(requested);
           return {
@@ -397,7 +405,7 @@ describe('X bookmarks thin connector', () => {
     await expect(handler.syncHead({ attempted_at: now.toISOString() })).resolves.toMatchObject({
       status: 'progress',
       counts: {
-        api_requests: 1,
+        api_requests: 2,
         items_seen: 10,
         items_indexed: 10,
         head_pages_read: 1,
@@ -504,6 +512,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
         sourceClient: {
           async fetchBookmarks(request = {}) {
             requests.push(request.maxResults ?? 0);
+            if (request.headOnly) return { posts: [{ id: 'new-save' }] };
             return { posts: [
               // Old posts newly bookmarked must keep the provider's bookmark order.
               { ...bookmark('new-save', 'new save marker'), createdAt: '2020-01-01T00:00:00.000Z' },
@@ -517,7 +526,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
       });
       try {
         const result = await handler.syncHead();
-        expect(requests).toEqual([10]);
+        expect(requests).toEqual(checkpoint ? [1, 10] : [10]);
         expect(result.counts.items_indexed).toBe(2);
         expect(result.counts.head_truncation_deferrals).toBe(0);
         expect(usage.headCheckpoint(ACCOUNT)).toBe('new-save');
@@ -559,12 +568,13 @@ describe('X bookmarks two-speed connector-store sync', () => {
       checkpoint: '101',
     });
     expect(calls).toEqual([
+      { maxResults: 1, headOnly: true },
       { maxResults: 10 },
     ]);
     expect(changed).toMatchObject({
       status: 'progress',
       counts: {
-        api_requests: 1,
+        api_requests: 2,
         items_indexed: 2,
         chunks_embedded: 2,
         head_pages_read: 1,
@@ -584,7 +594,7 @@ describe('X bookmarks two-speed connector-store sync', () => {
     const noChange = await handler.syncHead({ attempted_at: '2026-07-18T12:00:30.000Z' });
     expect(noChange).toMatchObject({ status: 'idle', counts: { api_requests: 1 } });
     expect(noChange).not.toHaveProperty('checkpoint');
-    expect(calls.at(-1)).toEqual({ maxResults: 10 });
+    expect(calls.at(-1)).toEqual({ maxResults: 1, headOnly: true });
     expect(embedding.embedCalls).toHaveLength(1);
     expect(store.status().counts.syncRuns).toBe(1);
 
@@ -1555,15 +1565,15 @@ describe('X bookmarks API usage and response controls', () => {
     }
   });
 
-  test('keeps the product cadences at 15 minutes and 24 hours with independent stale alarms', () => {
+  test('keeps the product cadences at 30 minutes and 24 hours with independent stale alarms', () => {
     const config = defaultXBookmarksLiveSyncConfig({});
     expect(config).toMatchObject({
-      headIntervalMs: 900_000,
-      headFreshnessThresholdMs: 2_100_000,
+      headIntervalMs: 1_800_000,
+      headFreshnessThresholdMs: 3_900_000,
       reconcileIntervalMs: 86_400_000,
       reconcileFreshnessThresholdMs: 93_600_000,
-      headApiRequestReserve: 216,
-      headResourceReadReserve: 416,
+      headApiRequestReserve: 168,
+      headResourceReadReserve: 368,
       headEstimatedSpendReserveMicrousd: 250_000,
       richResourceExpansionMultiplier: 6,
     });
@@ -1693,10 +1703,11 @@ describe('X bookmarks API usage and response controls', () => {
     await firstPageWithCursor(connector, '1');
 
     expect(calls).toEqual([
-      { maxResults: 3 },
+      { maxResults: 1, headOnly: true },
+      { maxResults: 2 },
     ]);
     const status = usage.status({ account: ACCOUNT, config, now });
-    expect(status.resource_reads).toBe(3);
+    expect(status.resource_reads).toBe(4);
     expect(status.resource_reads).toBeLessThanOrEqual(status.hard_budgets.resource_reads);
     usage.close();
   });
@@ -1775,10 +1786,10 @@ describe('X bookmarks API usage and response controls', () => {
     await firstPageWithCursor(connector, '0');
     const status = usage.status({ account: ACCOUNT, config, now });
     expect(status).toMatchObject({
-      api_requests: 1,
-      resource_reads: 5,
-      estimated_billable_resources: 5,
-      estimated_spend_microusd: 5_000,
+      api_requests: 2,
+      resource_reads: 6,
+      estimated_billable_resources: 6,
+      estimated_spend_microusd: 6_000,
     });
     expect(JSON.stringify(status)).not.toContain('author-a');
     expect(JSON.stringify(status)).not.toContain('media-1');
@@ -1808,7 +1819,7 @@ describe('X bookmarks API usage and response controls', () => {
         async fetchBookmarksInFolder() { return { posts: [] }; },
       },
     });
-    await expect(firstPageWithCursor(connector, 'old')).rejects.toMatchObject({
+    await expect(firstPageWithCursor(connector, '')).rejects.toMatchObject({
       errorKind: 'api_request_guard',
       degradedReason: 'daily_cost_guard',
       counts: { limit_stop_limit: 5_000, limit_stop_used: 0 },

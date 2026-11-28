@@ -139,9 +139,9 @@ export function remoteOpenInstructions(input: { port: number; sshTarget?: string
 
 /**
  * Single-command launch on the owner's computer: opens the loopback tunnel on
- * the engine's port, runs `olympus dashboard --no-open` on the server so the
- * clickable one-time launch link prints in the same Terminal window, and holds
- * the tunnel open until Ctrl+C.
+ * the engine's port, runs `olympus dashboard --no-open` on the server, opens
+ * the validated one-time loopback launch URL automatically in the browser
+ * (macOS `open` / Linux `xdg-open`), and holds the tunnel open until Ctrl+C.
  */
 export function remoteOpenOneCommand(input: { port: number; sshTarget?: string; target?: OpenTarget; socketPath?: string }): string {
   const port = isValidPort(input.port) ? input.port : DEFAULT_ENGINE_PORT;
@@ -152,7 +152,10 @@ export function remoteOpenOneCommand(input: { port: number; sshTarget?: string; 
     ? `-o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:${socket}`
     : `-o ExitOnForwardFailure=yes -L 127.0.0.1:${port}:127.0.0.1:${port}`;
   const targetFlag = path === 'dashboard' ? '' : ` --target ${path}`;
-  return `ssh ${forward} ${sshTarget} 'PATH="$HOME/.local/bin:$PATH" olympus dashboard --no-open${targetFlag} && cat'`;
+  const origin = port === 80 ? 'http://127.0.0.1' : `http://127.0.0.1:${port}`;
+  const launchPrefix = `${origin}/dashboard/launch#`;
+  const ticketMatch = `${launchPrefix}olympus_launch_ticket=`;
+  return `ssh ${forward} ${sshTarget} 'PATH="$HOME/.local/bin:$PATH" olympus dashboard --no-open${targetFlag} && cat' | (o=; while IFS= read -r l; do printf '%s\\n' "$l"; case "$o:$l" in :*'"url": "${ticketMatch}'*) u="${launchPrefix}\${l#*${launchPrefix}}"; u=\${u%%\\"*}; case "$u" in *" "*) ;; *) o=1; case "$(uname)" in Darwin) open "$u";; *) xdg-open "$u";; esac </dev/null >/dev/null 2>&1 &;; esac;; esac; done)`;
 }
 
 /** Resolve at each page read: linger can outlive the graphical login session. */

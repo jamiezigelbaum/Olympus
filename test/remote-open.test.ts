@@ -5,7 +5,8 @@
  * end on the computer listens on the engine's OWN port number.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { createConnection, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -542,6 +543,50 @@ describe('the panel in remote mode', () => {
     expect(win.document.querySelector('.remote-box')).toBeNull();
     expect(sent.some((message) => message.method === 'ui/open-link')).toBe(true);
   });
+
+  test('the single-step Terminal command auto-opens only the validated loopback launch URL once', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-remote-open-sh-'));
+    try {
+      const logPath = join(dir, 'opened.log');
+      const stubBin = join(dir, 'bin');
+      const stub = `#!/bin/sh\nprintf '%s\\n' "$1" >> ${JSON.stringify(logPath)}\n`;
+      for (const name of ['open', 'xdg-open']) {
+        const binPath = join(stubBin, name);
+        execFileSync('mkdir', ['-p', stubBin]);
+        writeFileSync(binPath, stub, { mode: 0o755 });
+        chmodSync(binPath, 0o755);
+      }
+      const cmd = remoteOpenOneCommand({
+        port: 8010,
+        sshTarget: 'zig@sparta',
+        socketPath: '/run/user/1000/olympus/worker.sock',
+      });
+      const pipeIndex = cmd.indexOf(' | ');
+      expect(pipeIndex).toBeGreaterThan(0);
+      const openerPipe = cmd.slice(pipeIndex + 3);
+      const validUrl = `http://127.0.0.1:8010/dashboard/launch#olympus_launch_ticket=${TICKET}`;
+      const payload = [
+        '{',
+        `  "url": "https://evil.example/dashboard/launch#olympus_launch_ticket=${TICKET}",`,
+        `  "url": "http://127.0.0.1:9999/dashboard/launch#olympus_launch_ticket=${TICKET}",`,
+        `  "url": "http://127.0.0.1:8010/dashboard/launch#olympus_launch_ticket=${TICKET} extra",`,
+        `  "url": "${validUrl}",`,
+        `  "url": "${validUrl}&second=1",`,
+        '  "opened": false',
+        '}',
+      ].join('\n');
+      const out = execFileSync('/bin/sh', ['-c', `${openerPipe.slice(0, -1)}; wait)`], {
+        input: `${payload}\n`,
+        env: { PATH: `${stubBin}:/usr/bin:/bin` },
+        encoding: 'utf8',
+      });
+      expect(out).toContain(validUrl);
+      const opened = readFileSync(logPath, 'utf8').trim().split('\n');
+      expect(opened).toEqual([validUrl]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
 
 /* ------------------------------------------------------------------ */

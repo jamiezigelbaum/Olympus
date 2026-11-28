@@ -452,6 +452,27 @@ async function acquireIncremental(
   // recovered, that page finds the overlap and the lane advances normally.
   const deferralStanding = previous !== undefined
     && usage.headTruncationDeferredAt(account) !== undefined;
+  let probeRequests = 0;
+  // When a checkpoint is already known (every routine poll after activation),
+  // check the newest bookmark id with a 1-post ID-only probe ($0.001) before
+  // paying for a rich page with author and media expansions (~$0.037-$0.040).
+  // If the head id still matches the checkpoint, nothing new was saved.
+  if (previous && !deferralStanding) {
+    const probe = await guardedPage(
+      usage, account, config, clock, 1, false, provenance,
+      1,
+      (reservedMaxResults) => client.fetchBookmarks({
+        maxResults: reservedMaxResults,
+        headOnly: true,
+      }),
+      (value) => distinctResourceIds(value.posts.map((post) => `post:${post.id}`)),
+    );
+    probeRequests = 1;
+    const topId = probe.posts[0]?.id;
+    if (!topId || topId === previous) {
+      return acquisition([], true, false, previous, probeRequests, [], 0, [1], 0);
+    }
+  }
   const catchupPageLimit = previous ? (deferralStanding ? 1 : config.maxCatchupPages) : 1;
   const posts: XBookmarkPost[] = [];
   let nextToken: string | undefined;
@@ -546,7 +567,7 @@ async function acquireIncremental(
     true,
     posts.length > 0,
     truncationDeferred ? previous : (newestId ?? previous),
-    headPageSizesUsed.length,
+    probeRequests + headPageSizesUsed.length,
     warnings,
     posts.length,
     headPageSizesUsed,

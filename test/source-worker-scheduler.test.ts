@@ -537,7 +537,7 @@ describe('source worker scheduler', () => {
     };
     const source = createXBookmarksSchedulerSource({ config: schedulerConfig(), liveSync })!;
     expect(source.tasks.map((entry) => ({ id: entry.id, intervalMs: entry.intervalMs }))).toEqual([
-      { id: 'x.bookmarks_head', intervalMs: 900_000 },
+      { id: 'x.bookmarks_head', intervalMs: 1_800_000 },
       { id: 'x.bookmarks_reconcile', intervalMs: 86_400_000 },
     ]);
     expect(source.tasks[1]?.bootstrapLastSuccessAt?.()).toBe('2026-07-17T12:00:00.000Z');

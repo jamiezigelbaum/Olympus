@@ -2159,7 +2159,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
     askPhrase: 'Open Olympus on my computer',
     askPhraseFor: 'Open Olympus on my computer to connect {source}',
     byHandAfterAsk: 'Or run one command in Terminal:',
-    oneStep: 'Run this in Terminal on your computer, then open the link it prints:',
+    oneStep: 'Run this in Terminal on your computer — Olympus opens in your browser automatically:',
     keepOpen: 'Leave Terminal open while using the dashboard (press Ctrl+C to close the tunnel).',
     sshTargetLabel: 'Server SSH address (for example, user@my-server)',
     sshTargetPlaceholder: 'user@my-server',

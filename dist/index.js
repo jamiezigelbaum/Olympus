@@ -20293,7 +20293,7 @@ var init_vocabulary = __esm(() => {
       askPhrase: "Open Olympus on my computer",
       askPhraseFor: "Open Olympus on my computer to connect {source}",
       byHandAfterAsk: "Or run one command in Terminal:",
-      oneStep: "Run this in Terminal on your computer, then open the link it prints:",
+      oneStep: "Run this in Terminal on your computer — Olympus opens in your browser automatically:",
       keepOpen: "Leave Terminal open while using the dashboard (press Ctrl+C to close the tunnel).",
       sshTargetLabel: "Server SSH address (for example, user@my-server)",
       sshTargetPlaceholder: "user@my-server",
@@ -21436,7 +21436,7 @@ var init_live_control2 = __esm(() => {
   init_owner_limit_settings();
   init_connector3();
   providerStops = createProviderRateLimitReporter("x");
-  X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
+  X_BOOKMARKS_HEAD_INTERVAL_MS = 30 * 60000;
   X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60000;
   X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;

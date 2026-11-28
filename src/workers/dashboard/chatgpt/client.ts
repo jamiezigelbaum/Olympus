@@ -859,8 +859,8 @@ export function chatgptDashboardClient(
 
   /**
    * Single-step Terminal command matching core/remote-open.ts remoteOpenOneCommand:
-   * opens the loopback tunnel on the engine's port, prints the clickable one-time
-   * launch link in the same window, and holds the tunnel open until Ctrl+C.
+   * opens the loopback tunnel on the engine's port, opens the validated one-time
+   * launch link in the browser automatically, and holds the tunnel open until Ctrl+C.
    */
   function remoteLines(href: string, overrideTarget?: string): { oneCommand: string; port: number; hasTarget: boolean; hasConfiguredTarget: boolean } {
     const remote = state.data.remote;
@@ -876,8 +876,11 @@ export function chatgptDashboardClient(
       ? '-o ExitOnForwardFailure=yes -L 127.0.0.1:' + port + ':' + socket
       : '-o ExitOnForwardFailure=yes -L 127.0.0.1:' + port + ':127.0.0.1:' + port;
     const targetFlag = path ? ' --target ' + path : '';
+    const origin = ['http', '://127.0.0.1'].join('') + (port === 80 ? '' : ':' + port);
+    const launchPrefix = origin + '/dashboard/launch#';
+    const ticketMatch = launchPrefix + 'olympus_launch_ticket=';
     return {
-      oneCommand: 'ssh ' + forward + ' ' + target + ' \'PATH="$HOME/.local/bin:$PATH" olympus dashboard --no-open' + targetFlag + ' && cat\'',
+      oneCommand: 'ssh ' + forward + ' ' + target + ' \'PATH="$HOME/.local/bin:$PATH" olympus dashboard --no-open' + targetFlag + ' && cat\' | (o=; while IFS= read -r l; do printf \'%s\\n\' "$l"; case "$o:$l" in :*\'"url": "' + ticketMatch + '\'*) u="' + launchPrefix + '${l#*' + launchPrefix + '}"; u=${u%%\\"*}; case "$u" in *" "*) ;; *) o=1; case "$(uname)" in Darwin) open "$u";; *) xdg-open "$u";; esac </dev/null >/dev/null 2>&1 &;; esac;; esac; done)',
       port,
       hasTarget: !!(configured || entered),
       hasConfiguredTarget: !!configured,

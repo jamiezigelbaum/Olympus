@@ -16,12 +16,12 @@ import { X_BOOKMARKS_SOURCE_ID } from './connector.ts';
 
 const providerStops = createProviderRateLimitReporter('x');
 
-// The bookmarks API has no since_id, so every head poll pays for its whole
-// first page even when nothing is new. At 30 seconds that came to about
-// $28.80 a day at the default unit cost, and the $2 daily guard parked the
-// source by about 01:00 UTC every day (#1203). Every 15 minutes is 96 polls,
-// about $0.96 a day, which leaves the rest of the day's budget for top-ups.
-export const X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60_000;
+// The bookmarks API has no since_id, so routine head polls first send a 1-post
+// ID-only probe (`headOnly: true`, 1 resource = $0.001) and only fetch a rich
+// page (post + author + media, ~$0.037-$0.040) when the newest bookmark id
+// changed. At 30 minutes (48 polls/day), a quiet day costs ~$0.048 instead of
+// ~$3.84/day, leaving almost the entire $2 daily budget for real catch-up.
+export const X_BOOKMARKS_HEAD_INTERVAL_MS = 30 * 60_000;
 export const X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60_000;
 export const X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60_000;
 export const X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;

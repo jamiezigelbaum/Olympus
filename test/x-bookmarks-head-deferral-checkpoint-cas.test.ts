@@ -110,7 +110,10 @@ function bookmark(id: string): XBookmarkPost {
 function truncatingProvider(pageSizes: number[], onFirstPage?: () => void) {
   let page = 0;
   return {
-    async fetchBookmarks(request: { maxResults?: number } = {}) {
+    async fetchBookmarks(request: { maxResults?: number; headOnly?: boolean } = {}) {
+      if (request.headOnly) {
+        return { posts: [bookmark('suspect-head')] };
+      }
       const requested = request.maxResults ?? 0;
       pageSizes.push(requested);
       page += 1;

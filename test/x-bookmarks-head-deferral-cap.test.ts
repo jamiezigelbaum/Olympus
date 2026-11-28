@@ -79,7 +79,10 @@ function stuckProvider(pageSizes: number[], overlapId?: string) {
   // second run look terminal on its first page for the wrong reason.
   let page = 0;
   return {
-    async fetchBookmarks(request: { maxResults?: number } = {}) {
+    async fetchBookmarks(request: { maxResults?: number; headOnly?: boolean } = {}) {
+      if (request.headOnly) {
+        return { posts: [bookmark('suspect-head')] };
+      }
       const requested = request.maxResults ?? 0;
       pageSizes.push(requested);
       page += 1;
