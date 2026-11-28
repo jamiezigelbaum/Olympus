@@ -69210,6 +69210,7 @@ async function routePreparedSourceIndexSearch(options) {
       maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: searchedContext,
+      ...request.temporalIntent ? { temporalIntent: true } : {},
       ...request.recencyCount !== undefined ? { recencyCount: request.recencyCount } : {},
       onProgress: () => progress(),
       [DEFER_SEARCH_DELIVERY]: true,
@@ -71186,7 +71187,8 @@ function createConnectorStoreCorpusAdapter(options) {
         publishKeywordLane(emitPartial, keywordLane.rows);
         markStage?.("keyword_relaxation_ms");
         let recencyCut = false;
-        const recencyRows = await chatRecencyLaneRows(store, request.corpus.recencyLane, options.accountScope, filters, request.deadlineAtMs, () => {
+        const recencyOrder = request.corpus.recencyLane === "updated" && !request.temporalIntent ? undefined : request.corpus.recencyLane;
+        const recencyRows = await chatRecencyLaneRows(store, recencyOrder, options.accountScope, filters, request.deadlineAtMs, () => {
           recencyCut = true;
         }, searchEligibility);
         markStage?.("recency_read_ms");
@@ -71503,7 +71505,8 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.("keyword_relaxation_ms");
   let recencyCut = false;
-  const recencyRows = await chatRecencyLaneRows(store, request.corpus.recencyLane, accountScope, filters, request.deadlineAtMs, () => {
+  const recencyOrder = request.corpus.recencyLane === "updated" && !request.temporalIntent ? undefined : request.corpus.recencyLane;
+  const recencyRows = await chatRecencyLaneRows(store, recencyOrder, accountScope, filters, request.deadlineAtMs, () => {
     recencyCut = true;
   }, searchEligibility);
   markStage?.("recency_read_ms");

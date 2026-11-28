@@ -279,6 +279,17 @@ describe('saved-order recency lane and requested recency counts', () => {
       const firstSaved = detail.pack.candidates[3]!;
       expect(firstSaved.provenance.citation?.authoredAt).toBe('2024-03-01T00:00:00.000Z');
       expect(firstSaved.provenance.citation?.updatedAt).toBe('2026-11-28T15:00:00.000Z');
+
+      // Non-temporal off-domain queries do NOT pull unrelated latest bookmarks into an empty result.
+      const offDomain = await buildEvidencePackDetailed({
+        question: 'quantum crystallography lattice vibrations',
+        maxResults: 12,
+        searchContext: allowAll,
+        registry: buildSourceIndexCorpusRegistry([corpus]),
+        adapters: { [corpus.corpusId]: createConnectorStoreCorpusAdapter({ store }) },
+        contentProviders: { [corpus.corpusId]: createConnectorStoreContentProvider({ store }) },
+      });
+      expect(offDomain.pack.candidates).toEqual([]);
     } finally {
       store.close();
     }

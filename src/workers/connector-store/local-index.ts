@@ -19166,7 +19166,10 @@ export function createConnectorStoreCorpusAdapter(
       publishKeywordLane(emitPartial, keywordLane.rows);
       markStage?.('keyword_relaxation_ms');
       let recencyCut = false;
-      const recencyRows = await chatRecencyLaneRows(store, request.corpus.recencyLane, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
+      const recencyOrder = request.corpus.recencyLane === 'updated' && !request.temporalIntent
+        ? undefined
+        : request.corpus.recencyLane;
+      const recencyRows = await chatRecencyLaneRows(store, recencyOrder, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
       markStage?.('recency_read_ms');
       keywordLane = (await refreshSearchTierVisibility(store, keywordLane, [], searchEligibility)).keyword;
       markStage?.('keyword_revalidation_ms');
@@ -19667,7 +19670,10 @@ async function hybridConnectorStoreSearch(
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.('keyword_relaxation_ms');
   let recencyCut = false;
-  const recencyRows = await chatRecencyLaneRows(store, request.corpus.recencyLane, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
+  const recencyOrder = request.corpus.recencyLane === 'updated' && !request.temporalIntent
+    ? undefined
+    : request.corpus.recencyLane;
+  const recencyRows = await chatRecencyLaneRows(store, recencyOrder, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
   markStage?.('recency_read_ms');
   const checked = await refreshSearchTierVisibility(store, keywordLane, vectorLane.rows, searchEligibility);
   keywordLane = checked.keyword;

@@ -87,6 +87,7 @@ export interface SourceIndexCorpusSearchRequest {
   maxResults: number;
   corpus: SourceIndexCorpusDefinition;
   context: SourceIndexSearchContext;
+  temporalIntent?: boolean;
   recencyCount?: number;
   // Explicit deadlines from other callers remain supported by adapters. Routed
   // lanes use batch progress instead of imposing a total deadline.
@@ -658,6 +659,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: searchedContext,
+      ...(request.temporalIntent ? { temporalIntent: true } : {}),
       ...(request.recencyCount !== undefined ? { recencyCount: request.recencyCount } : {}),
       onProgress: () => progress(),
       [DEFER_SEARCH_DELIVERY]: true,
